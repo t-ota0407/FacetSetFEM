@@ -1,0 +1,26 @@
+# Rust
+/target/
+**/target/
+# Cargo.lock はアプリケーションなので **コミットする**（再現性が最優先要件のため）
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+
+# 計算結果
+*.vtu
+*.vtp
+*.pvd
+results/
+out/
+
+# エディタ・OS
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
