@@ -1,0 +1,20 @@
+[package]
+name = "gfem-py"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "GenericFEM の Python バインディング（PyO3）"
+
+[lib]
+# maturin の module-name = "gfem._gfem" と一致させる必要がある
+name = "_gfem"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+gfem-core.workspace = true
+pyo3 = { workspace = true, features = ["abi3-py312"] }
+
+[features]
+# maturin が渡す。cargo test などで単体ビルドするときは外れる
+extension-module = ["pyo3/extension-module"]

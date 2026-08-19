@@ -1,0 +1,27 @@
+[build-system]
+requires = ["maturin>=1.14,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "gfem"
+version = "0.1.0"
+description = "経皮電気刺激シミュレーションのための有限要素法アプリケーション"
+readme = "README.md"
+requires-python = ">=3.12"
+classifiers = ["Private :: Do Not Upload"]
+dependencies = [
+  "numpy>=2.0",
+  "pandas>=2.0",
+  "PyYAML>=6.0",
+  "pyvista>=0.44",
+  "PySide6>=6.7",
+]
+
+[tool.maturin]
+manifest-path = "crates/gfem-py/Cargo.toml"
+python-source = "python"
+module-name = "gfem._gfem"
+features = ["pyo3/extension-module"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

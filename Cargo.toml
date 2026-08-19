@@ -1,0 +1,20 @@
+[workspace]
+resolver = "3"
+members = ["crates/gfem-core", "crates/gfem-py"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+publish = false
+
+[workspace.dependencies]
+gfem-core = { path = "crates/gfem-core" }
+# VTU の圧縮に使う。C ライブラリに依存しない純 Rust 実装（miniz_oxide）を選ぶ
+flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
+pyo3 = "0.29.2"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+# 再現性のため、コンパイラによる浮動小数点の再結合は行わない設定のまま（Rust の既定）

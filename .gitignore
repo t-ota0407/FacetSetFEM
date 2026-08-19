@@ -6,11 +6,16 @@
 # Python
 .venv/
 __pycache__/
+# *.pyd も含む（maturin develop が python/gfem/ に置くビルド成果物）
 *.py[cod]
 *.egg-info/
 .pytest_cache/
 build/
 dist/
+*.whl
+
+# ビルド成果物（maturin develop --release が python/gfem/ に置く）
+*.pdb
 
 # 計算結果
 *.vtu

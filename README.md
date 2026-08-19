@@ -10,14 +10,36 @@
 
 | フェーズ | 状態 |
 |---|---|
-| 仕様策定 | **完了**（SPEC.md v0.1） |
+| 仕様策定 | **完了**（SPEC.md v0.3） |
 | 開発環境構築 | **完了**（2026-08-18） |
-| M0: 骨組み | **未着手 ← 次はここから** |
-| M1: 体験一周（GUI で solve まで） | 未着手 |
+| M0: 骨組み | **完了**（2026-08-19） |
+| M1: 体験一周（GUI で solve まで） | **未着手 ← 次はここから** |
 | M2: 検証（解析解・収束次数） | 未着手 |
 | M3 以降 | 未着手 |
 
 マイルストーンの定義は SPEC.md §8 を参照。
+
+### M0 で動くもの
+
+```python
+import gfem
+
+mesh = gfem.read_nastran("tests/models/slab_3layer.bdf", length_unit="mm")
+print(mesh)                              # <Mesh nodes=936 solids=4032 shells=48 unit=mm>
+print(gfem.describe_bounding_box(mesh))  # 60 mm x 40 mm x 20 mm = 0.06 m x 0.04 m x 0.02 m
+print(mesh.solid_pids())                 # [1, 2, 3]      領域（PSOLID）
+print(mesh.shell_pids())                 # [101, 201]     電極候補面（PSHELL）
+print(mesh.report)                       # カード件数・未対応カード・警告
+mesh.write_vtu("out.vtu")                # ParaView で開ける
+```
+
+- Nastran バルクデータの読み込み（小フィールド / 大フィールド / 自由形式、継続行、
+  GRID・CTETRA・CHEXA・CPENTA・CTRIA3・CQUAD4・PSOLID・PSHELL）
+- 座標の SI 正規化と、単位取り違えを検出するためのバウンディングボックス表示
+- 参照切れ・ID 重複・退化要素・孤立節点の検査と読み込みレポート
+- VTU（zlib 圧縮つき）出力
+
+まだ無いのは**解く部分**（アセンブリ・ソルバ・ポスト処理・GUI）。M1 で入れる。
 
 ---
 
@@ -81,6 +103,7 @@ export PATH="$HOME/.cargo/bin:$PATH"
 | フォーマット | `cargo fmt` |
 | Python 拡張のビルド（開発時） | `.venv/Scripts/maturin.exe develop --release` |
 | Python のテスト | `.venv/Scripts/python.exe -m pytest` |
+| サンプルモデルの再生成 | `.venv/Scripts/python.exe scripts/make_sample_mesh.py` |
 | GUI 起動（M1 以降） | `.venv/Scripts/python.exe -m gfem.gui` |
 
 `maturin develop` は `VIRTUAL_ENV` を見るので、Git Bash からは環境変数を明示するのが確実:
@@ -89,35 +112,52 @@ export PATH="$HOME/.cargo/bin:$PATH"
 VIRTUAL_ENV='C:\Users\t-ota\Desktop\GenericFEM\.venv' .venv/Scripts/maturin.exe develop --release
 ```
 
+`CONDA_PREFIX` と `VIRTUAL_ENV` が両方立っていると maturin が拒否する。その場合は片方を外す:
+
+```bash
+env -u CONDA_PREFIX VIRTUAL_ENV='C:\Users\t-ota\Desktop\GenericFEM\.venv' .venv/Scripts/maturin.exe develop --release
+```
+
+Rust だけを触ったときは `cargo test`、Python から見える形まで確認するときは
+`maturin develop` してから `pytest` を回す。
+
 ---
 
 ## 構成（SPEC.md §7 の計画）
 
 ```
+Cargo.toml            ワークスペース
+pyproject.toml        maturin（Rust 拡張）と pytest の設定
 crates/
-  gfem-core/    Rust コア。CUDA・Python に一切依存しない
-  gfem-cuda/    CUDA バックエンド（feature フラグ）
-  gfem-py/      PyO3 バインディング
-python/gfem/    高レベル Python API と PySide6 GUI
-tests/          解析解ベンチ・収束性試験・サンプルモデル
+  gfem-core/          Rust コア。CUDA・Python に一切依存しない
+    src/element/      要素の種類と幾何量（要素剛性は M1 以降）
+    src/mesh/         メッシュ表現と ID 索引
+    src/io/nastran/   バルクデータパーサ（field / reader / parse の 3 層）
+    src/io/vtu.rs     VTU ライタ
+  gfem-cuda/          CUDA バックエンド（M5 で作る。未作成）
+  gfem-py/            PyO3 バインディング
+python/gfem/          高レベル Python API（GUI は M1 で追加）
+scripts/              サンプルモデル生成など開発用スクリプト
+tests/                Python テストとサンプルモデル
 ```
-
-まだディレクトリは作成していない（M0 で作る）。
 
 ---
 
-## 次にやること（M0）
+## 次にやること（M1）
 
-SPEC.md §8 の M0:
+SPEC.md §8 の M1「体験一周」。ゴールは GUI で
+「読込 → 単位選択 → PID に σ 入力 → シェル PID を anode/cathode に割当 → solve → 断面表示」
+が通ること。
 
-1. Cargo ワークスペースを作る（`gfem-core` / `gfem-py`）
-2. 最小の Nastran パーサ（`GRID` / `CTETRA` / `PSOLID`、小フィールド形式 + 自由形式）
-3. VTU ライタ
-4. 小規模サンプルモデル（直方体の多層メッシュ）を生成するスクリプト
-5. `maturin develop` で Python から読み込めるところまで疎通
+1. Tet4 の要素剛性と CSR アセンブリ（SPEC §2.3 / §4.2）
+2. 射影付き Jacobi-CG（SPEC §2.2 / §4.3）— ゲージ固定は 1 節点ピン留めではなく射影
+3. 電極荷重ベクトル（面積按分。SPEC §2.4）
+4. 保存則チェック（SPEC §5.4）
+5. PySide6 + PyVista の GUI と、ケースファイル（YAML）の保存・読込
+6. numpy への zero-copy 受け渡し（SPEC §6.3）
 
 ---
 
 ## 未決事項
 
-SPEC.md §12 を参照。バージョン管理（git）はまだ初期化していない。
+SPEC.md §12 を参照。
