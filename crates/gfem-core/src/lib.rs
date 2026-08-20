@@ -15,17 +15,29 @@
 //! Nastran バルクデータの読み込みと VTU 出力まで。
 //! アセンブリ・ソルバ・ポスト処理は M1 以降で追加する（SPEC §8）。
 
+pub mod analysis;
+pub mod assemble;
+pub mod case;
 pub mod element;
 pub mod error;
 pub mod io;
+pub mod material;
 pub mod mesh;
+pub mod post;
+pub mod solver;
 pub mod units;
 
+pub use analysis::{Analysis, Timings, solve, write_analysis_vtu};
+pub use assemble::{CsrMatrix, LinearSystem, assemble};
+pub use case::{Case, Electrode, ElectrodeRole, Preconditioner, ReferencePotential, SolverOptions};
 pub use element::ElementKind;
 pub use error::{ErrorKind, GfemError, Location, Result};
 pub use io::nastran::{ReadReport, read_nastran};
 pub use io::vtu::{VtuData, VtuOptions, write_mesh_vtu, write_vtu};
-pub use mesh::{ElementBlock, Mesh, Nodes, Property};
+pub use material::Conductivity;
+pub use mesh::{ElementBlock, ElementRef, Mesh, Nodes, Property};
+pub use post::{ConservationReport, FieldResult};
+pub use solver::{CgReport, CpuSerial, LinearBackend};
 pub use units::LengthUnit;
 
 /// gfem-core のバージョン。出力 JSON のプロビナンス記録に使う（SPEC §5.5）。

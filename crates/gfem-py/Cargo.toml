@@ -14,6 +14,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 gfem-core.workspace = true
 pyo3 = { workspace = true, features = ["abi3-py312"] }
+numpy.workspace = true
 
 [features]
 # maturin が渡す。cargo test などで単体ビルドするときは外れる

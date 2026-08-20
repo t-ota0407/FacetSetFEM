@@ -10,36 +10,66 @@
 
 | フェーズ | 状態 |
 |---|---|
-| 仕様策定 | **完了**（SPEC.md v0.3） |
+| 仕様策定 | **完了**（SPEC.md v0.4） |
 | 開発環境構築 | **完了**（2026-08-18） |
 | M0: 骨組み | **完了**（2026-08-19） |
-| M1: 体験一周（GUI で solve まで） | **未着手 ← 次はここから** |
-| M2: 検証（解析解・収束次数） | 未着手 |
+| M1: 体験一周（GUI で solve まで） | **完了**（2026-08-20） |
+| M2: 検証（解析解・収束次数） | 一部完了（一様場・層状媒質は M1 で実装）**← 次はここから** |
 | M3 以降 | 未着手 |
 
 マイルストーンの定義は SPEC.md §8 を参照。
 
-### M0 で動くもの
+### いま動くもの
+
+GUI:
+
+```bash
+.venv/Scripts/python.exe -m gfem.gui tests/models/slab_3layer.yaml
+```
+
+Python API（GUI と同じコアを叩く）:
 
 ```python
 import gfem
 
 mesh = gfem.read_nastran("tests/models/slab_3layer.bdf", length_unit="mm")
-print(mesh)                              # <Mesh nodes=936 solids=4032 shells=48 unit=mm>
 print(gfem.describe_bounding_box(mesh))  # 60 mm x 40 mm x 20 mm = 0.06 m x 0.04 m x 0.02 m
-print(mesh.solid_pids())                 # [1, 2, 3]      領域（PSOLID）
-print(mesh.shell_pids())                 # [101, 201]     電極候補面（PSHELL）
-print(mesh.report)                       # カード件数・未対応カード・警告
-mesh.write_vtu("out.vtu")                # ParaView で開ける
+
+case = gfem.Case(mesh)
+case.set_conductivity({1: 0.10, 2: 0.04, 3: 0.35})   # PSOLID の PID ごとに σ [S/m]
+case.add_electrode("E1", role="anode",   current=2e-3, shell_pids=[101])
+case.add_electrode("E2", role="cathode", current=2e-3, shell_pids=[201])
+
+result = case.solve()
+print(result)                    # <Solution iterations=94 residual=7.12e-11 R=206.3933 ohm>
+print(result.impedance)          # 電極間の等価抵抗 [Ω]
+print(result.j_magnitude.max())  # |J| の最大 [A/m²]（要素値）
+result.write_vtu("out.vtu")      # ParaView で開ける
 ```
 
-- Nastran バルクデータの読み込み（小フィールド / 大フィールド / 自由形式、継続行、
-  GRID・CTETRA・CHEXA・CPENTA・CTRIA3・CQUAD4・PSOLID・PSHELL）
-- 座標の SI 正規化と、単位取り違えを検出するためのバウンディングボックス表示
-- 参照切れ・ID 重複・退化要素・孤立節点の検査と読み込みレポート
-- VTU（zlib 圧縮つき）出力
+ケースファイル（YAML）から一括で:
 
-まだ無いのは**解く部分**（アセンブリ・ソルバ・ポスト処理・GUI）。M1 で入れる。
+```python
+result = gfem.Study.load("tests/models/slab_3layer.yaml").solve()
+```
+
+| 機能 | 状態 |
+|---|---|
+| Nastran 読み込み（小/大/自由形式、継続行、8 種のカード） | ✔ |
+| 座標の SI 正規化と単位取り違えの検出表示 | ✔ |
+| 参照切れ・ID 重複・退化要素・非多様体・非連結の検査 | ✔ |
+| Tet4 の CSR アセンブリ | ✔ |
+| 射影付き Jacobi-CG（ゲージ固定は射影。1 節点ピン留めはしない） | ✔ |
+| 電極荷重（面積按分の一様電流密度） | ✔ |
+| E, J, 電力密度、電極間インピーダンス、保存則チェック | ✔ |
+| VTU 出力（節点値・要素値の両方、zlib 圧縮） | ✔ |
+| GUI（領域ハイライト・電極選択・断面スライス・収束曲線） | ✔ |
+| ケースファイル（YAML）の保存・読込 | ✔ |
+| Hex8 / Penta6 の要素剛性 | M4 |
+| CPU 並列 / CUDA | M4 / M5 |
+| 領域統計 CSV・等値面・プロビナンス JSON | M3 |
+
+正しさは解析解で確認済み（一様場と層状媒質で、1 次要素の理論どおり誤差は丸めレベル）。
 
 ---
 
@@ -104,7 +134,7 @@ export PATH="$HOME/.cargo/bin:$PATH"
 | Python 拡張のビルド（開発時） | `.venv/Scripts/maturin.exe develop --release` |
 | Python のテスト | `.venv/Scripts/python.exe -m pytest` |
 | サンプルモデルの再生成 | `.venv/Scripts/python.exe scripts/make_sample_mesh.py` |
-| GUI 起動（M1 以降） | `.venv/Scripts/python.exe -m gfem.gui` |
+| GUI 起動 | `.venv/Scripts/python.exe -m gfem.gui [model.bdf \| case.yaml]` |
 
 `maturin develop` は `VIRTUAL_ENV` を見るので、Git Bash からは環境変数を明示するのが確実:
 
@@ -130,31 +160,35 @@ Cargo.toml            ワークスペース
 pyproject.toml        maturin（Rust 拡張）と pytest の設定
 crates/
   gfem-core/          Rust コア。CUDA・Python に一切依存しない
-    src/element/      要素の種類と幾何量（要素剛性は M1 以降）
-    src/mesh/         メッシュ表現と ID 索引
+    src/element/      要素の種類・幾何量・Tet4 の要素剛性・面積分
+    src/mesh/         メッシュ表現、ID 索引、外表面抽出
     src/io/nastran/   バルクデータパーサ（field / reader / parse の 3 層）
     src/io/vtu.rs     VTU ライタ
+    src/assemble/     CSR、非ゼロ構造、剛性・荷重のアセンブリ
+    src/solver/       決定的リダクション、バックエンド trait、射影 CG
+    src/post/         E・J・保存則チェック
+    src/analysis.rs   SPEC §4.1 の流れを通す入口
   gfem-cuda/          CUDA バックエンド（M5 で作る。未作成）
   gfem-py/            PyO3 バインディング
-python/gfem/          高レベル Python API（GUI は M1 で追加）
+python/gfem/          高レベル Python API
+  study.py            ケースファイル（YAML）
+  gui/                PySide6 + PyVista の GUI
 scripts/              サンプルモデル生成など開発用スクリプト
 tests/                Python テストとサンプルモデル
 ```
 
 ---
 
-## 次にやること（M1）
+## 次にやること（M2）
 
-SPEC.md §8 の M1「体験一周」。ゴールは GUI で
-「読込 → 単位選択 → PID に σ 入力 → シェル PID を anode/cathode に割当 → solve → 断面表示」
-が通ること。
+SPEC.md §8 の M2「検証」。論文に載せられる水準の正しさを担保し、CI で自動回帰させる。
 
-1. Tet4 の要素剛性と CSR アセンブリ（SPEC §2.3 / §4.2）
-2. 射影付き Jacobi-CG（SPEC §2.2 / §4.3）— ゲージ固定は 1 節点ピン留めではなく射影
-3. 電極荷重ベクトル（面積按分。SPEC §2.4）
-4. 保存則チェック（SPEC §5.4）
-5. PySide6 + PyVista の GUI と、ケースファイル（YAML）の保存・読込
-6. numpy への zero-copy 受け渡し（SPEC §6.3）
+1. 解析解ベンチマークの残り: 同心球殻、半無限媒質上の点電極、二層半無限媒質（鏡像法の級数解）
+2. メッシュ収束性試験: φ の L2 誤差 ∝ h²、E の L2 誤差 ∝ h を数値的に確認し、
+   収束次数の理論値からの逸脱を CI で検出する
+3. 保存則の自動回帰を全テストケースに広げる
+
+M1 で先に入れた一様場・層状媒質のベンチマークは `crates/gfem-core/tests/analytic.rs` にある。
 
 ---
 

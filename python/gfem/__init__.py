@@ -3,33 +3,50 @@
 GUI（`gfem.gui`）もバッチスクリプトも、このモジュールを通して同じ Rust コアを叩く
 （SPEC §6.5）。GUI 側にロジックは置かない。
 
-M0 で使えるのは Nastran の読み込みと VTU 出力まで:
-
     >>> import gfem
     >>> mesh = gfem.read_nastran("tests/models/slab_3layer.bdf", length_unit="mm")
-    >>> mesh.n_nodes
-    936
-    >>> print(gfem.describe_bounding_box(mesh))
-    60 mm x 40 mm x 20 mm = 0.06 m x 0.04 m x 0.02 m
+    >>> case = gfem.Case(mesh)
+    >>> case.set_conductivity({1: 0.10, 2: 0.04, 3: 0.35})
+    >>> case.add_electrode("E1", role="anode",   current=2e-3, shell_pids=[101])
+    >>> case.add_electrode("E2", role="cathode", current=2e-3, shell_pids=[201])
+    >>> result = case.solve()
+    >>> round(result.impedance, 1)
+    83.0
+    >>> result.write_vtu("out.vtu")
 
-物性の割り当て・電極定義・solve は M1 で追加する（SPEC §8）。
+ケースファイル（YAML）から一括で回すこともできる:
+
+    >>> study = gfem.Study.load("case.yaml")
+    >>> result = study.solve()
 """
 
 from __future__ import annotations
 
 from ._gfem import (
+    Case,
     GfemError,
     Mesh,
     ReadReport,
+    Solution,
+    SolverCancelled,
     __version__,
     length_units,
     read_nastran,
 )
+from .study import ElectrodeSpec, Material, OutputSpec, SolverSpec, Study
 
 __all__ = [
+    "Case",
+    "ElectrodeSpec",
     "GfemError",
+    "Material",
     "Mesh",
+    "OutputSpec",
     "ReadReport",
+    "Solution",
+    "SolverCancelled",
+    "SolverSpec",
+    "Study",
     "__version__",
     "describe_bounding_box",
     "length_units",
@@ -61,5 +78,4 @@ def describe_bounding_box(mesh: Mesh, unit: str | None = None) -> str:
 
 def _fmt(v: float) -> str:
     """桁数を抑えつつ、末尾の 0 を落とした表示。"""
-    s = f"{v:.6g}"
-    return s
+    return f"{v:.6g}"

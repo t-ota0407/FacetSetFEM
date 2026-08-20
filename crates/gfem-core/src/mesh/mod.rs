@@ -9,12 +9,14 @@
 //! という利点がある。
 
 pub mod idmap;
+pub mod topology;
 
 use crate::element::{ElementKind, max_edge_length, tet4_signed_volume};
 use crate::units::LengthUnit;
 use std::path::PathBuf;
 
 pub use idmap::IdMap;
+pub use topology::{Surface, SurfaceFace, extract_surface};
 
 /// Nastran の節点 ID。
 pub type NodeId = u32;
@@ -169,6 +171,39 @@ pub struct Property {
     pub card: &'static str,
 }
 
+/// 全ブロックを通しで走査するときの、要素 1 個分の参照。
+#[derive(Debug, Clone, Copy)]
+pub struct ElementRef<'a> {
+    /// ソリッド（またはシェル）全体での通し番号。CSR や要素値配列の添字になる
+    pub index: usize,
+    /// 要素種
+    pub kind: ElementKind,
+    /// Nastran の要素 ID
+    pub id: ElemId,
+    /// プロパティ ID
+    pub pid: PropId,
+    /// 節点索引
+    pub conn: &'a [NodeIndex],
+}
+
+/// ブロックの並びを 1 本の要素列として走査する。
+///
+/// `index` はブロックをまたいだ通し番号で、この順序が**要素値配列の並びを定義する**
+/// （VTU のセル順序、要素ごとの E・J の並びは全てこれに従う）。
+fn iter_blocks(blocks: &[ElementBlock]) -> impl Iterator<Item = ElementRef<'_>> {
+    blocks
+        .iter()
+        .flat_map(|b| (0..b.len()).map(move |i| (b, i)))
+        .enumerate()
+        .map(|(index, (b, i))| ElementRef {
+            index,
+            kind: b.kind(),
+            id: b.ids()[i],
+            pid: b.pids()[i],
+            conn: b.conn_of(i),
+        })
+}
+
 /// 有限要素メッシュ。
 #[derive(Debug, Clone)]
 pub struct Mesh {
@@ -207,6 +242,36 @@ impl Mesh {
     /// ソリッド → シェルの順に全ブロックを走査する。VTU 出力のセル順序はこれに従う。
     pub fn blocks(&self) -> impl Iterator<Item = &ElementBlock> {
         self.solids.iter().chain(self.shells.iter())
+    }
+
+    /// 全ソリッド要素を通し番号つきで走査する。
+    pub fn iter_solids(&self) -> impl Iterator<Item = ElementRef<'_>> {
+        iter_blocks(&self.solids)
+    }
+
+    /// 全シェル要素（電極候補面）を通し番号つきで走査する。
+    pub fn iter_shells(&self) -> impl Iterator<Item = ElementRef<'_>> {
+        iter_blocks(&self.shells)
+    }
+
+    /// 接続から節点座標（m）を取り出して `out` を埋める。
+    ///
+    /// 要素ループの内側で `Vec` を確保しないための形。
+    pub fn gather_coords(&self, conn: &[NodeIndex], out: &mut [[f64; 3]]) {
+        for (o, &n) in out.iter_mut().zip(conn) {
+            *o = self.nodes.coord(n);
+        }
+    }
+
+    /// Tet4 要素の 4 節点座標（m）。
+    pub fn tet4_coords(&self, conn: &[NodeIndex]) -> [[f64; 3]; 4] {
+        debug_assert_eq!(conn.len(), 4);
+        [
+            self.nodes.coord(conn[0]),
+            self.nodes.coord(conn[1]),
+            self.nodes.coord(conn[2]),
+            self.nodes.coord(conn[3]),
+        ]
     }
 
     /// 指定した種類のブロックを探す。

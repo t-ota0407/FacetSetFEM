@@ -13,6 +13,8 @@ gfem-core = { path = "crates/gfem-core" }
 # VTU の圧縮に使う。C ライブラリに依存しない純 Rust 実装（miniz_oxide）を選ぶ
 flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
 pyo3 = "0.29.2"
+# 大規模データを numpy 配列として Python に渡す（SPEC §6.3）
+numpy = "0.29.0"
 
 [profile.release]
 opt-level = 3

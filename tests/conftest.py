@@ -44,3 +44,25 @@ def sample_bdf() -> Path:
 def make_sample_mesh() -> ModuleType:
     """サンプルモデル生成スクリプト。"""
     return _load_script("make_sample_mesh")
+
+
+@pytest.fixture(scope="session")
+def full_face_bdf(tmp_path_factory, make_sample_mesh) -> Path:
+    """上面全体を陽極、下面全体を陰極にしたサンプル。
+
+    一次元問題になるので、各層で E = I/(σA) という解析解と直接照合できる
+    （SPEC §8 M2 の 1・2）。
+    """
+    out = tmp_path_factory.mktemp("models") / "slab_full_face.bdf"
+    make_sample_mesh.main(["-o", str(out), "--electrodes", "full"])
+    return out
+
+
+#: サンプルモデルの寸法 [m] と層構成（厚さ [m], σ [S/m]）
+SLAB_AREA = 0.060 * 0.040
+SLAB_LAYERS = [(1, 0.002, 0.10), (2, 0.004, 0.04), (3, 0.014, 0.35)]
+
+
+@pytest.fixture(scope="session")
+def slab_sigma() -> dict[int, float]:
+    return {pid: sigma for pid, _t, sigma in SLAB_LAYERS}

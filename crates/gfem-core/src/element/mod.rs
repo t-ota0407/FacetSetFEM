@@ -1,7 +1,12 @@
 //! 要素の種類と、種類ごとの幾何量。
 //!
 //! M0 の時点では「要素の識別」と「幾何チェックに必要な最小限の量」だけを持つ。
-//! 要素剛性（SPEC §2.3）は M1（Tet4）・M4（Hex8 / Penta6）でこのモジュールに足す。
+//! 要素剛性（SPEC §2.3）は要素種ごとのサブモジュールに置く:
+//! Tet4 は [`tet4`]（M1）、Hex8 / Penta6 は M4 で追加する。
+//! 面要素（電極荷重に使う）は [`shell`]。
+
+pub mod shell;
+pub mod tet4;
 
 /// 対応する要素の種類（SPEC §1.3 / §3.1）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -63,7 +68,51 @@ impl ElementKind {
             ElementKind::Quad4 => 9,
         }
     }
+
+    /// ソリッド要素の面（局所節点番号）。並びは**外向き法線**になる向き。
+    ///
+    /// 外表面抽出（SPEC §4.1）と、電極面が体表面に載っているかの照合（SPEC §11.1）に使う。
+    /// シェル要素はそれ自体が面なので空を返す。
+    pub const fn faces(self) -> &'static [&'static [usize]] {
+        match self {
+            ElementKind::Tet4 => &TET4_FACES,
+            ElementKind::Penta6 => &PENTA6_FACES,
+            ElementKind::Hex8 => &HEX8_FACES,
+            ElementKind::Tria3 | ElementKind::Quad4 => &[],
+        }
+    }
+
+    /// この面（節点数）に対応するシェル要素の種類。外表面を三角形／四辺形として扱うときに使う。
+    pub const fn face_kind(n_nodes: usize) -> Option<ElementKind> {
+        match n_nodes {
+            3 => Some(ElementKind::Tria3),
+            4 => Some(ElementKind::Quad4),
+            _ => None,
+        }
+    }
 }
+
+/// Tet4 の 4 面。節点順序は外向き法線になるように選んである。
+const TET4_FACES: [&[usize]; 4] = [&[1, 2, 3], &[0, 3, 2], &[0, 1, 3], &[0, 2, 1]];
+
+/// Penta6 の 5 面（三角 2 + 四辺形 3）。
+const PENTA6_FACES: [&[usize]; 5] = [
+    &[0, 2, 1],
+    &[3, 4, 5],
+    &[0, 1, 4, 3],
+    &[1, 2, 5, 4],
+    &[2, 0, 3, 5],
+];
+
+/// Hex8 の 6 面。
+const HEX8_FACES: [&[usize]; 6] = [
+    &[0, 3, 2, 1],
+    &[4, 5, 6, 7],
+    &[0, 1, 5, 4],
+    &[1, 2, 6, 5],
+    &[2, 3, 7, 6],
+    &[3, 0, 4, 7],
+];
 
 /// Tet4 の符号付き体積（SPEC §2.3）。
 ///
@@ -131,6 +180,50 @@ mod tests {
         assert_eq!(ElementKind::Penta6.node_count(), 6);
         assert!(ElementKind::Tet4.is_solid());
         assert!(!ElementKind::Tria3.is_solid());
+    }
+
+    #[test]
+    fn tet4_faces_point_outward() {
+        // 正の体積を持つ基準四面体で、全ての面の法線が重心から外を向くことを確認する
+        let p = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ];
+        assert!(tet4_signed_volume(&p) > 0.0);
+        let centre = [0.25, 0.25, 0.25];
+        for face in ElementKind::Tet4.faces() {
+            let (a, b, c) = (p[face[0]], p[face[1]], p[face[2]]);
+            let u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+            let v = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+            let n = [
+                u[1] * v[2] - u[2] * v[1],
+                u[2] * v[0] - u[0] * v[2],
+                u[0] * v[1] - u[1] * v[0],
+            ];
+            let d = [a[0] - centre[0], a[1] - centre[1], a[2] - centre[2]];
+            assert!(
+                n[0] * d[0] + n[1] * d[1] + n[2] * d[2] > 0.0,
+                "面 {face:?} の法線が内側を向いています"
+            );
+        }
+    }
+
+    #[test]
+    fn every_solid_face_uses_valid_local_nodes() {
+        for kind in [ElementKind::Tet4, ElementKind::Penta6, ElementKind::Hex8] {
+            let mut seen = vec![0usize; kind.node_count()];
+            for face in kind.faces() {
+                assert!(face.len() == 3 || face.len() == 4);
+                for &n in *face {
+                    assert!(n < kind.node_count());
+                    seen[n] += 1;
+                }
+            }
+            // どの節点も 3 面以上に現れる（＝面の定義に抜けが無い）
+            assert!(seen.iter().all(|&c| c >= 3), "{kind:?}: {seen:?}");
+        }
     }
 
     #[test]

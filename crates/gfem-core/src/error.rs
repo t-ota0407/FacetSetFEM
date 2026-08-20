@@ -28,6 +28,10 @@ pub enum ErrorKind {
     Unsupported,
     /// 解析ケースの設定が不足・矛盾している
     Case,
+    /// 反復解法が収束しなかった
+    Convergence,
+    /// 利用者に中断された
+    Cancelled,
     /// 実装の不備（利用者側では直せない）
     Internal,
 }
@@ -41,6 +45,8 @@ impl ErrorKind {
             ErrorKind::Model => "モデルエラー",
             ErrorKind::Unsupported => "未対応",
             ErrorKind::Case => "設定エラー",
+            ErrorKind::Convergence => "収束エラー",
+            ErrorKind::Cancelled => "中断",
             ErrorKind::Internal => "内部エラー",
         }
     }

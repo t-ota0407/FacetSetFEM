@@ -1,0 +1,57 @@
+# GenericFEM サンプルケース（SPEC §3.3）
+#
+#   .venv/Scripts/python.exe -m gfem.gui tests/models/slab_3layer.yaml
+#
+# か、バッチから:
+#
+#   import gfem
+#   result = gfem.Study.load("tests/models/slab_3layer.yaml").solve()
+#   print(result.impedance)
+
+version: 1
+
+mesh:
+  file: slab_3layer.bdf
+  length_unit: mm
+
+# PSOLID の PID が領域の単位。σ は S/m
+# 値は経皮電気刺激で使われる代表的なオーダー（文献値の整備は SPEC §12 の未決事項）
+materials:
+  - pid: 1
+    name: skin
+    sigma: 0.10
+  - pid: 2
+    name: fat
+    sigma: 0.04
+  - pid: 3
+    name: muscle
+    sigma: 0.35
+
+# 上面に 15 x 20 mm のパッチを 2 枚。総電流 2 mA
+electrodes:
+  - name: E1
+    role: anode
+    current: 2.0e-3
+    distribution: uniform_current_density
+    faces:
+      shell_pids: [101]
+      element_ids: []
+
+  - name: E2
+    role: cathode
+    current: 2.0e-3
+    distribution: uniform_current_density
+    faces:
+      shell_pids: [201]
+      element_ids: []
+
+solver:
+  backend: auto
+  method: cg
+  preconditioner: jacobi
+  gauge: mean_zero
+  tolerance: 1.0e-10
+  max_iterations: 50000
+
+output:
+  reference_potential: cathode_mean

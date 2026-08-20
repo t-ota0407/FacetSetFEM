@@ -32,10 +32,15 @@ LAYERS: list[tuple[str, int, float, int]] = [
 ]
 
 #: 電極パッチ: (名前, PSHELL の PID, x 範囲 [mm], y 範囲 [mm])
+#: 既定は上面に 2 枚並べる配置（経皮電気刺激の典型）
 ELECTRODES: list[tuple[str, int, tuple[float, float], tuple[float, float]]] = [
     ("E1", 101, (5.0, 20.0), (10.0, 30.0)),
     ("E2", 201, (40.0, 55.0), (10.0, 30.0)),
 ]
+
+#: 上面全体を陽極、下面全体を陰極にする配置。
+#: 一次元問題になるので解析解（各層で E = I/(σA)）と直接照合できる（SPEC §8 M2）
+FULL_FACE_ELECTRODES = [("E1", 101, "top"), ("E2", 201, "bottom")]
 
 #: Kuhn の 6 分割。局所節点番号は n = bx + 2*by + 4*bz。
 #: いずれも (0,0,0) から (1,1,1) へ 1 軸ずつ進む経路になっている。
@@ -77,8 +82,14 @@ def signed_volume(p0, p1, p2, p3) -> float:
     return (cx * c[0] + cy * c[1] + cz * c[2]) / 6.0
 
 
-def build_mesh(lx: float, ly: float, nx: int, ny: int, refine: int) -> Mesh:
-    """スラブの四面体メッシュと電極シェルを作る。"""
+def build_mesh(
+    lx: float, ly: float, nx: int, ny: int, refine: int, electrodes: str = "patches"
+) -> Mesh:
+    """スラブの四面体メッシュと電極シェルを作る。
+
+    ``electrodes`` が ``"patches"`` なら上面に 2 枚のパッチ、``"full"`` なら
+    上面全体と下面全体を電極にする（後者は一次元問題の解析解と照合できる）。
+    """
     # z 方向の格子。層ごとの分割数に refine を掛ける
     z_levels: list[float] = [0.0]
     z_pid_of_cell: list[int] = []
@@ -126,29 +137,41 @@ def build_mesh(lx: float, ly: float, nx: int, ny: int, refine: int) -> Mesh:
                     tets.append(quad)
                     tet_pids.append(pid)
 
-    # --- 上面の電極パッチ ---
-    # Kuhn 分割では上面（z = 最大）の四角形が (i,j)-(i+1,j+1) の対角線で割れる。
+    # --- 電極面 ---
+    # Kuhn 分割では z = 一定の面が (i,j)-(i+1,j+1) の対角線で割れる。
     # シェル要素はこの三角形分割に一致していなければならない（SPEC §11.1）。
-    ktop = nz
     tris: list[tuple[int, int, int]] = []
     tri_pids: list[int] = []
-    for _name, pid, (x0, x1), (y0, y1) in ELECTRODES:
-        for j in range(ny):
-            yc0, yc1 = ys[j], ys[j + 1]
-            if yc0 < y0 - 1e-9 or yc1 > y1 + 1e-9:
-                continue
-            for i in range(nx):
-                xc0, xc1 = xs[i], xs[i + 1]
-                if xc0 < x0 - 1e-9 or xc1 > x1 + 1e-9:
+
+    def add_face(i: int, j: int, k: int, pid: int, outward_up: bool) -> None:
+        n00 = nid(i, j, k)
+        n10 = nid(i + 1, j, k)
+        n11 = nid(i + 1, j + 1, k)
+        n01 = nid(i, j + 1, k)
+        if outward_up:
+            faces = [(n00, n10, n11), (n00, n11, n01)]
+        else:
+            faces = [(n00, n11, n10), (n00, n01, n11)]
+        tris.extend(faces)
+        tri_pids.extend([pid] * len(faces))
+
+    if electrodes == "full":
+        for _name, pid, side in FULL_FACE_ELECTRODES:
+            k, up = (nz, True) if side == "top" else (0, False)
+            for j in range(ny):
+                for i in range(nx):
+                    add_face(i, j, k, pid, up)
+    else:
+        for _name, pid, (x0, x1), (y0, y1) in ELECTRODES:
+            for j in range(ny):
+                yc0, yc1 = ys[j], ys[j + 1]
+                if yc0 < y0 - 1e-9 or yc1 > y1 + 1e-9:
                     continue
-                n00 = nid(i, j, ktop)
-                n10 = nid(i + 1, j, ktop)
-                n11 = nid(i + 1, j + 1, ktop)
-                n01 = nid(i, j + 1, ktop)
-                # +z を向く反時計回り
-                tris.append((n00, n10, n11))
-                tris.append((n00, n11, n01))
-                tri_pids.extend([pid, pid])
+                for i in range(nx):
+                    xc0, xc1 = xs[i], xs[i + 1]
+                    if xc0 < x0 - 1e-9 or xc1 > x1 + 1e-9:
+                        continue
+                    add_face(i, j, nz, pid, True)
 
     return Mesh(coords, tets, tet_pids, tris, tri_pids)
 
@@ -223,6 +246,17 @@ def free(fields: list[object]) -> str:
     return ",".join(repr(f) if isinstance(f, float) else str(f) for f in fields)
 
 
+def _electrode_name(pid: int) -> str:
+    """PID から電極名を引く（見つからなければ空文字）。"""
+    for name, p, *_rest in ELECTRODES:
+        if p == pid:
+            return name
+    for name, p, _side in FULL_FACE_ELECTRODES:
+        if p == pid:
+            return name
+    return ""
+
+
 def write_bdf(path: Path, mesh: Mesh, fmt: str, header: list[str]) -> None:
     lines: list[str] = [f"$ {h}" for h in header]
     lines.append("BEGIN BULK")
@@ -249,8 +283,10 @@ def write_bdf(path: Path, mesh: Mesh, fmt: str, header: list[str]) -> None:
         card("PSOLID", [pid, 1])
 
     lines.append("$ --- candidate electrode faces ---")
-    for name, pid, xr, yr in ELECTRODES:
-        lines.append(f"$ PID {pid}: {name}  x={xr[0]}..{xr[1]} mm, y={yr[0]}..{yr[1]} mm")
+    # 実際に使われたシェル PID から書き出す（電極配置の指定によらず正しくなる）
+    for pid in sorted(set(mesh.tri_pids)):
+        name = _electrode_name(pid)
+        lines.append(f"$ PID {pid}: {name}")
         card("PSHELL", [pid, 1, 0.1])
 
     lines.append("$ --- nodes ---")
@@ -300,16 +336,22 @@ def main(argv: list[str] | None = None) -> int:
         default="small",
         help="出力する Nastran の書式",
     )
+    p.add_argument(
+        "--electrodes",
+        choices=["patches", "full"],
+        default="patches",
+        help="patches: 上面に 2 枚のパッチ / full: 上面全体と下面全体（解析解と照合できる）",
+    )
     args = p.parse_args(argv)
 
-    mesh = build_mesh(args.lx, args.ly, args.nx, args.ny, args.refine)
+    mesh = build_mesh(args.lx, args.ly, args.nx, args.ny, args.refine, args.electrodes)
     total_z = sum(t for _n, _p, t, _d in LAYERS)
     header = [
         "GenericFEM sample model: 3-layer slab (skin / fat / muscle)",
         "generated by scripts/make_sample_mesh.py -- length unit is mm",
         f"size: {args.lx} x {args.ly} x {total_z} mm",
         f"divisions: nx={args.nx}, ny={args.ny}, refine={args.refine}",
-        "electrodes: " + ", ".join(f"{n}=PID {p}" for n, p, _x, _y in ELECTRODES),
+        f"electrode layout: {args.electrodes}",
     ]
     write_bdf(args.out, mesh, args.format, header)
 
@@ -320,7 +362,12 @@ def main(argv: list[str] | None = None) -> int:
     for name, pid, _t, _d in LAYERS:
         n = sum(1 for q in mesh.tet_pids if q == pid)
         print(f"  PID {pid:<4} {name:<8} {n:>8} 要素")
-    for name, pid, _x, _y in ELECTRODES:
+    pid_names = (
+        [(n, p) for n, p, _s in FULL_FACE_ELECTRODES]
+        if args.electrodes == "full"
+        else [(n, p) for n, p, _x, _y in ELECTRODES]
+    )
+    for name, pid in pid_names:
         n = sum(1 for q in mesh.tri_pids if q == pid)
         area = sum(
             abs(
