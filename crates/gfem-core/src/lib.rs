@@ -36,7 +36,7 @@ pub use io::nastran::{ReadReport, read_nastran};
 pub use io::vtu::{VtuData, VtuOptions, write_mesh_vtu, write_vtu};
 pub use material::Conductivity;
 pub use mesh::{ElementBlock, ElementRef, Mesh, Nodes, Property};
-pub use post::{ConservationReport, FieldResult};
+pub use post::{ConservationReport, ErrorNorms, FieldResult, convergence_order};
 pub use solver::{CgReport, CpuSerial, LinearBackend};
 pub use units::LengthUnit;
 

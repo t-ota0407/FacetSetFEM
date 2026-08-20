@@ -1,4 +1,10 @@
-//! ポスト処理: 導出量と保存則チェック（SPEC §5）。
+//! ポスト処理: 導出量と保存則チェック（SPEC §5）、解析解との誤差評価（SPEC §8 M2）。
+
+pub mod error;
+
+pub use error::{
+    ErrorNorms, convergence_order, l2_error_field, l2_error_potential, mean_element_size,
+};
 
 use crate::assemble::csr::CsrMatrix;
 use crate::assemble::load::ElectrodeGeometry;
@@ -159,7 +165,10 @@ pub fn pad_for_shells(mesh: &Mesh, values: &[f64], n_components: usize, fill: f6
 /// 保存則チェックの結果（SPEC §5.4）と電極間インピーダンス（SPEC §5.3）。
 #[derive(Debug, Clone, Default)]
 pub struct ConservationReport {
-    /// `1ᵀf / max|f|`。電流保存の残差
+    /// 電流保存の残差 `1ᵀf / I`。**総注入電流で正規化**した無次元量
+    ///
+    /// 「差し引き何アンペア余っているか」を注入電流と比べた値なので、
+    /// メッシュを細かくしても意味が変わらない。
     pub current_balance: f64,
     /// ∫σ|E|² dΩ [W]
     pub power_from_field: f64,
@@ -198,13 +207,29 @@ pub fn check_conservation(
 ) -> ConservationReport {
     let mut warnings = Vec::new();
 
-    // 1. 電流保存: 1ᵀf = 0
+    // 1. 電流保存: 1ᵀf = 0（SPEC §2.2 の適合条件）
+    //
+    // 正規化には**総注入電流**を使う。SPEC v0.3 までは max|f| で割っていたが、
+    // これは節点あたりの荷重で割ることになるためメッシュ依存になる:
+    // 細かくすると max|f| は節点数に反比例して小さくなる一方、総和の丸め誤差は
+    // √N で増えるので、同じ精度で解いているのに判定だけが厳しくなってしまう。
+    // 総注入電流で割れば「差し引き何 A 余っているか」を測ることになり、
+    // 分割によらず同じ意味になる。
     let sum_f = reduce::sum(load);
-    let max_f = load.iter().fold(0.0f64, |m, v| m.max(v.abs()));
-    let current_balance = if max_f > 0.0 { sum_f / max_f } else { 0.0 };
+    let total_current: f64 = electrodes
+        .iter()
+        .filter(|e| e.role == ElectrodeRole::Anode)
+        .map(|e| e.signed_current)
+        .sum();
+    let scale = if total_current > 0.0 {
+        total_current
+    } else {
+        load.iter().fold(0.0f64, |m, v| m.max(v.abs()))
+    };
+    let current_balance = if scale > 0.0 { sum_f / scale } else { 0.0 };
     if current_balance.abs() > CURRENT_BALANCE_TOLERANCE {
         warnings.push(format!(
-            "電流保存の残差が大きすぎます: 1ᵀf/max|f| = {current_balance:.3e}（許容 {CURRENT_BALANCE_TOLERANCE:.0e}）"
+            "電流保存の残差が大きすぎます: 1ᵀf/I = {current_balance:.3e}（許容 {CURRENT_BALANCE_TOLERANCE:.0e}）"
         ));
     }
 
@@ -242,11 +267,6 @@ pub fn check_conservation(
         .collect();
     let anode = weighted_potential(electrodes, phi, ElectrodeRole::Anode);
     let cathode = weighted_potential(electrodes, phi, ElectrodeRole::Cathode);
-    let total_current: f64 = electrodes
-        .iter()
-        .filter(|e| e.role == ElectrodeRole::Anode)
-        .map(|e| e.signed_current)
-        .sum();
     let voltage = anode - cathode;
     let impedance = if total_current != 0.0 {
         voltage / total_current

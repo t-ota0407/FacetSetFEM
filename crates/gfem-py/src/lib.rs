@@ -304,6 +304,27 @@ impl PyMesh {
         flat.into_pyarray(py).reshape([rows, 4])
     }
 
+    /// ソリッド要素の重心 `(n_solid_elements, 3)` [m]。
+    ///
+    /// 要素値（E, J など）は要素内で一定なので、解析解と突き合わせるときは
+    /// この重心で真値を評価すればよい（SPEC §8 M2 の検証で使う）。
+    fn element_centroids<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<f64>>> {
+        let mut flat: Vec<f64> = Vec::with_capacity(self.inner.n_solid_elements() * 3);
+        for e in self.inner.iter_solids() {
+            let mut c = [0.0f64; 3];
+            let scale = 1.0 / e.conn.len() as f64;
+            for &node in e.conn {
+                let p = self.inner.nodes.coord(node);
+                for (d, cd) in c.iter_mut().enumerate() {
+                    *cd += scale * p[d];
+                }
+            }
+            flat.extend_from_slice(&c);
+        }
+        let rows = flat.len() / 3;
+        flat.into_pyarray(py).reshape([rows, 3])
+    }
+
     /// 外表面の総面積 [m²]。
     fn surface_area(&self) -> PyResult<f64> {
         let surface = gfem_core::mesh::extract_surface(&self.inner).map_err(to_py)?;
