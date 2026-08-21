@@ -60,6 +60,13 @@ pub trait LinearBackend {
     /// ベクトルをホストへ書き戻す。
     fn download(&self, x: &Self::Vector, host: &mut [f64]) -> Result<()>;
 
+    /// ホストのスライスを既存のベクトルへ書き込む。
+    ///
+    /// AMG の最粗レベルはホストで直接解く（[`crate::solver::amg`]）ので、
+    /// V サイクルのたびに結果を戻す必要がある。[`upload`](Self::upload) だと
+    /// 反復ごとに確保が走ってしまうため、書き込み先を渡せる形も用意する。
+    fn upload_into(&self, host: &[f64], x: &mut Self::Vector) -> Result<()>;
+
     /// `dst ← src`（同じ長さであること）。
     fn copy_from(&self, src: &Self::Vector, dst: &mut Self::Vector) -> Result<()>;
 
@@ -91,6 +98,13 @@ pub trait LinearBackend {
 
     /// 全成分に定数を足す `x_i += delta`
     fn shift(&self, delta: f64, x: &mut Self::Vector) -> Result<()>;
+
+    /// 全成分を `value` にする。
+    ///
+    /// AMG の V サイクル（SPEC §4.5）が、各レベルの補正量を毎回ゼロから始めるために使う。
+    /// `scale(0.0)` で代用すると負の成分が `-0.0` になって総和の符号が変わりうるので、
+    /// 専用の操作にしてある。
+    fn fill(&self, value: f64, x: &mut Self::Vector) -> Result<()>;
 
     // --- 既定実装 ---------------------------------------------------------
 
@@ -146,6 +160,11 @@ impl LinearBackend for CpuSerial {
 
     fn download(&self, x: &Vec<f64>, host: &mut [f64]) -> Result<()> {
         host.copy_from_slice(x);
+        Ok(())
+    }
+
+    fn upload_into(&self, host: &[f64], x: &mut Vec<f64>) -> Result<()> {
+        x.copy_from_slice(host);
         Ok(())
     }
 
@@ -208,6 +227,11 @@ impl LinearBackend for CpuSerial {
         }
         Ok(())
     }
+
+    fn fill(&self, value: f64, x: &mut Vec<f64>) -> Result<()> {
+        x.fill(value);
+        Ok(())
+    }
 }
 
 /// CPU 並列バックエンド（rayon）。
@@ -243,6 +267,11 @@ impl LinearBackend for CpuParallel {
 
     fn download(&self, x: &Vec<f64>, host: &mut [f64]) -> Result<()> {
         host.copy_from_slice(x);
+        Ok(())
+    }
+
+    fn upload_into(&self, host: &[f64], x: &mut Vec<f64>) -> Result<()> {
+        x.copy_from_slice(host);
         Ok(())
     }
 
@@ -342,6 +371,12 @@ impl LinearBackend for CpuParallel {
                 *xi += delta;
             }
         });
+        Ok(())
+    }
+
+    fn fill(&self, value: f64, x: &mut Vec<f64>) -> Result<()> {
+        use rayon::prelude::*;
+        x.par_chunks_mut(CHUNK).for_each(|chunk| chunk.fill(value));
         Ok(())
     }
 }

@@ -37,6 +37,8 @@ pub struct CudaCsr {
     col_idx: CudaSlice<u32>,
     values: CudaSlice<f64>,
     n_rows: usize,
+    /// 列数。AMG の補間・制限は矩形なので行数と違う（SPEC §4.5）
+    n_cols: usize,
 }
 
 impl CudaCsr {
@@ -175,6 +177,7 @@ impl LinearBackend for CudaBackend {
                 .clone_htod(a.values())
                 .map_err(|e| upload_err("成分", &e))?,
             n_rows: a.n_rows(),
+            n_cols: a.n_cols(),
         })
     }
 
@@ -208,6 +211,14 @@ impl LinearBackend for CudaBackend {
         self.sync()
     }
 
+    fn upload_into(&self, host: &[f64], x: &mut CudaVector) -> Result<()> {
+        Self::same_len(x.len, host.len())?;
+        self.device
+            .stream
+            .memcpy_htod(host, &mut x.data)
+            .map_err(|e| cuda_error("ベクトルを VRAM へ書き戻せませんでした", &e))
+    }
+
     fn copy_from(&self, src: &CudaVector, dst: &mut CudaVector) -> Result<()> {
         Self::same_len(src.len, dst.len)?;
         self.device
@@ -221,7 +232,7 @@ impl LinearBackend for CudaBackend {
     }
 
     fn spmv(&self, a: &CudaCsr, x: &CudaVector, y: &mut CudaVector) -> Result<()> {
-        Self::same_len(a.n_rows, x.len)?;
+        Self::same_len(a.n_cols, x.len)?;
         Self::same_len(a.n_rows, y.len)?;
         let n = a.n_rows as u64;
         let mut b = self.device.stream.launch_builder(&self.device.spmv);
@@ -319,5 +330,14 @@ impl LinearBackend for CudaBackend {
         unsafe { b.launch(Self::config(x.len)) }
             .map(|_| ())
             .map_err(|e| cuda_error("shift のカーネル起動に失敗しました", &e))
+    }
+
+    fn fill(&self, value: f64, x: &mut CudaVector) -> Result<()> {
+        let n = x.len as u64;
+        let mut b = self.device.stream.launch_builder(&self.device.fill);
+        b.arg(&n).arg(&value).arg(&mut x.data);
+        unsafe { b.launch(Self::config(x.len)) }
+            .map(|_| ())
+            .map_err(|e| cuda_error("fill のカーネル起動に失敗しました", &e))
     }
 }

@@ -135,6 +135,7 @@ fn apparent_resistivity(mesh: &Mesh, sigma_upper: f64, sigma_lower: f64) -> f64 
         max_iterations: 200_000,
         preconditioner: Preconditioner::Jacobi,
         backend: Backend::CpuSerial,
+        ..Default::default()
     };
     case.reference = ReferencePotential::ZeroMean;
 

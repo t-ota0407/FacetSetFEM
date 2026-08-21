@@ -42,6 +42,7 @@ fn case() -> Case {
         max_iterations: 100_000,
         preconditioner: Preconditioner::Jacobi,
         backend: Backend::CpuSerial,
+        ..Default::default()
     };
     case.reference = ReferencePotential::CathodeMean;
     case

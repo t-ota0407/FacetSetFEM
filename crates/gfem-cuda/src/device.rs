@@ -67,6 +67,7 @@ pub struct Device {
     pub(crate) scale: CudaFunction,
     pub(crate) multiply: CudaFunction,
     pub(crate) shift: CudaFunction,
+    pub(crate) fill: CudaFunction,
     pub(crate) block_sum: CudaFunction,
     pub(crate) block_dot: CudaFunction,
     /// モジュールを生かしておく（関数はモジュールから借りている）
@@ -150,6 +151,7 @@ impl Device {
             scale: load("gfem_scale")?,
             multiply: load("gfem_multiply")?,
             shift: load("gfem_shift")?,
+            fill: load("gfem_fill")?,
             block_sum: load("gfem_block_sum")?,
             block_dot: load("gfem_block_dot")?,
             info,

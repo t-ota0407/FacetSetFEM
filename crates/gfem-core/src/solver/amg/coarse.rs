@@ -1,0 +1,243 @@
+//! 最粗レベルの直接解法（SPEC §4.5）。
+//!
+//! V サイクルの効き目は「最粗レベルをきちんと解けるか」で決まる。ここを
+//! 平滑化で誤魔化すと、レベルを増やしても反復回数が頭打ちにならない。
+//!
+//! # 特異性の扱い
+//!
+//! 粗レベルの行列も特異である。`A_c b_c = Pᵀ A P b_c = Pᵀ A b = 0`
+//! （[`super::prolongation`] の議論）なので、零空間は既知の 1 次元 span{b_c}。
+//! 1 節点ピン留めは使わない（CLAUDE.md 設計原則 3）ので、代わりに
+//!
+//! ```text
+//! M = A_c + c b_c b_cᵀ,    c = (tr A_c / n) / ‖b_c‖²
+//! ```
+//!
+//! を分解する。`M b_c = c‖b_c‖² b_c` なので、`b_c` 方向の固有値が
+//! 対角平均になり、M は正定値かつ条件数も素直になる。解いた後に `b_c` 成分を
+//! 落とせば `A_c` の擬似逆行列による解が得られる。
+//!
+//! 密 Cholesky なので O(n³/6)。最粗レベルは数百節点に抑えるので一瞬で終わる。
+
+use crate::assemble::csr::CsrMatrix;
+
+/// 最粗レベルのソルバ。
+#[derive(Debug, Clone)]
+pub struct CoarseSolver {
+    n: usize,
+    /// 下三角 L（行優先の密。`l[i * n + j]`、j ≤ i のみ有効）
+    l: Vec<f64>,
+    /// 近零空間ベクトル
+    nullspace: Vec<f64>,
+    /// ‖b‖²
+    null_norm2: f64,
+    /// Cholesky に成功したか。失敗したら呼び出し側は平滑化で代用する
+    direct: bool,
+}
+
+impl CoarseSolver {
+    /// 分解する。失敗しても panic せず、[`is_direct`](Self::is_direct) が `false` になる。
+    pub fn factor(a: &CsrMatrix, nullspace: &[f64]) -> Self {
+        let n = a.n_rows();
+        let mut solver = Self {
+            n,
+            l: Vec::new(),
+            nullspace: nullspace.to_vec(),
+            null_norm2: nullspace.iter().map(|v| v * v).sum(),
+            direct: false,
+        };
+        if n == 0 || solver.null_norm2 == 0.0 {
+            return solver;
+        }
+
+        // 密行列に展開してから、零空間方向の rank-1 項で正則化する
+        let mut m = vec![0.0f64; n * n];
+        let mut trace = 0.0;
+        for i in 0..n {
+            let (cols, vals) = a.row(i);
+            for (&j, &v) in cols.iter().zip(vals) {
+                m[i * n + j as usize] = v;
+                if j as usize == i {
+                    trace += v;
+                }
+            }
+        }
+        if trace <= 0.0 || !trace.is_finite() {
+            return solver;
+        }
+        let c = (trace / n as f64) / solver.null_norm2;
+        for i in 0..n {
+            for j in 0..n {
+                m[i * n + j] += c * nullspace[i] * nullspace[j];
+            }
+        }
+
+        // 素直な Cholesky（行優先、上から順に）
+        for i in 0..n {
+            for j in 0..=i {
+                let mut s = m[i * n + j];
+                for k in 0..j {
+                    s -= m[i * n + k] * m[j * n + k];
+                }
+                if i == j {
+                    if s <= 0.0 || !s.is_finite() {
+                        return solver; // direct = false のまま
+                    }
+                    m[i * n + i] = s.sqrt();
+                } else {
+                    m[i * n + j] = s / m[j * n + j];
+                }
+            }
+            // 上三角は使わないので消しておく（デバッグしやすさのため）
+            for j in (i + 1)..n {
+                m[i * n + j] = 0.0;
+            }
+        }
+        solver.l = m;
+        solver.direct = true;
+        solver
+    }
+
+    /// 密分解が使えるか。`false` なら呼び出し側は平滑化で代用する。
+    pub fn is_direct(&self) -> bool {
+        self.direct
+    }
+
+    /// 最粗レベルの節点数。
+    pub fn n(&self) -> usize {
+        self.n
+    }
+
+    /// `A_c x = rhs` の擬似逆行列解（`b_c` 成分を落とした代表元）。
+    ///
+    /// [`is_direct`](Self::is_direct) が `false` のときは何もしない。
+    // 三角行列の前進・後退代入は「既に求めた成分を添字で引く」形が自然で、
+    // イテレータに直すとかえって読めなくなる
+    #[allow(clippy::needless_range_loop)]
+    pub fn solve(&self, rhs: &[f64], out: &mut [f64]) {
+        debug_assert_eq!(rhs.len(), self.n);
+        debug_assert_eq!(out.len(), self.n);
+        if !self.direct {
+            out.fill(0.0);
+            return;
+        }
+        let n = self.n;
+        // 前進代入 L y = rhs
+        for i in 0..n {
+            let mut s = rhs[i];
+            for k in 0..i {
+                s -= self.l[i * n + k] * out[k];
+            }
+            out[i] = s / self.l[i * n + i];
+        }
+        // 後退代入 Lᵀ x = y
+        for i in (0..n).rev() {
+            let mut s = out[i];
+            for k in (i + 1)..n {
+                s -= self.l[k * n + i] * out[k];
+            }
+            out[i] = s / self.l[i * n + i];
+        }
+        // 零空間成分を落として代表元を揃える
+        let mut proj = 0.0;
+        for i in 0..n {
+            proj += self.nullspace[i] * out[i];
+        }
+        let scale = proj / self.null_norm2;
+        for i in 0..n {
+            out[i] -= scale * self.nullspace[i];
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 1 次元格子ラプラシアン（全 Neumann、零空間は定数）。
+    fn laplacian_1d(n: usize) -> CsrMatrix {
+        let mut row_ptr = vec![0usize];
+        let mut col_idx: Vec<u32> = Vec::new();
+        let mut values: Vec<f64> = Vec::new();
+        for i in 0..n {
+            let mut diag = 0.0;
+            if i > 0 {
+                col_idx.push(i as u32 - 1);
+                values.push(-1.0);
+                diag += 1.0;
+            }
+            let slot = col_idx.len();
+            col_idx.push(i as u32);
+            values.push(0.0);
+            if i + 1 < n {
+                col_idx.push(i as u32 + 1);
+                values.push(-1.0);
+                diag += 1.0;
+            }
+            values[slot] = diag;
+            row_ptr.push(col_idx.len());
+        }
+        let mut m = CsrMatrix::from_structure(n, row_ptr, col_idx);
+        m.values_mut().copy_from_slice(&values);
+        m
+    }
+
+    #[test]
+    fn solves_a_singular_system_exactly() {
+        let n = 40;
+        let a = laplacian_1d(n);
+        let b = vec![1.0; n];
+        let solver = CoarseSolver::factor(&a, &b);
+        assert!(solver.is_direct());
+
+        // 零空間に直交する右辺
+        let mut rhs = vec![0.0; n];
+        rhs[0] = 1.0;
+        rhs[n - 1] = -1.0;
+
+        let mut x = vec![0.0; n];
+        solver.solve(&rhs, &mut x);
+
+        // A x = rhs を満たすか
+        let mut ax = vec![0.0; n];
+        a.spmv(&x, &mut ax);
+        let worst = ax
+            .iter()
+            .zip(&rhs)
+            .map(|(p, q)| (p - q).abs())
+            .fold(0.0f64, f64::max);
+        assert!(worst < 1e-10, "残差 {worst}");
+        // 代表元は平均ゼロ
+        let mean: f64 = x.iter().sum::<f64>() / n as f64;
+        assert!(mean.abs() < 1e-12, "平均 {mean}");
+    }
+
+    #[test]
+    fn repeated_solves_are_bitwise_identical() {
+        let n = 30;
+        let a = laplacian_1d(n);
+        let b = vec![1.0; n];
+        let solver = CoarseSolver::factor(&a, &b);
+        let rhs: Vec<f64> = (0..n).map(|i| (i as f64).sin()).collect();
+        let mut first = vec![0.0; n];
+        solver.solve(&rhs, &mut first);
+        for _ in 0..5 {
+            let mut again = vec![0.0; n];
+            solver.solve(&rhs, &mut again);
+            assert_eq!(first, again);
+        }
+    }
+
+    #[test]
+    fn an_indefinite_matrix_is_reported_rather_than_panicking() {
+        let row_ptr = vec![0, 1, 2];
+        let col_idx = vec![0, 1];
+        let mut m = CsrMatrix::from_structure(2, row_ptr, col_idx);
+        m.values_mut().copy_from_slice(&[-1.0, -1.0]);
+        let solver = CoarseSolver::factor(&m, &[1.0, 1.0]);
+        assert!(!solver.is_direct());
+        let mut out = vec![9.0; 2];
+        solver.solve(&[1.0, 1.0], &mut out);
+        assert_eq!(out, vec![0.0, 0.0]);
+    }
+}

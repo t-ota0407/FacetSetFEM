@@ -163,18 +163,31 @@ impl Analysis {
             .set("backend_setting", case.solver.backend.label())
             .set("method", "projected_preconditioned_cg")
             .set("gauge", "mean_zero")
-            .set(
-                "preconditioner",
-                match case.solver.preconditioner {
-                    crate::case::Preconditioner::Jacobi => "jacobi",
-                    _ => "none",
-                },
-            )
+            .set("preconditioner", case.solver.preconditioner.label())
             .set("tolerance", case.solver.tolerance)
             .set("max_iterations", case.solver.max_iterations)
             .set("iterations", self.solver.iterations)
             .set("relative_residual", self.solver.relative_residual)
-            .set("converged", self.solver.converged);
+            .set("converged", self.solver.converged)
+            .set("preconditioner_setup_s", self.solver.setup_seconds);
+        if let Some(info) = &self.solver.amg {
+            // 「どんな階層で解いたか」は後から結果を読み解くのに要る（SPEC §4.5 / §5.5）
+            let levels: Vec<Json> = info
+                .levels
+                .iter()
+                .map(|&(n_rows, nnz)| {
+                    let mut j = Json::object();
+                    j.set("n_rows", n_rows).set("nnz", nnz);
+                    j
+                })
+                .collect();
+            let mut amg = Json::object();
+            amg.set("levels", Json::Array(levels))
+                .set("operator_complexity", info.operator_complexity)
+                .set("grid_complexity", info.grid_complexity)
+                .set("direct_coarse_solve", info.direct_coarse_solve);
+            solver.set("amg", amg);
+        }
         root.set("solver", solver);
 
         let c = &self.conservation;

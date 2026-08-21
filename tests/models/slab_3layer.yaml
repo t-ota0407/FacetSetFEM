@@ -48,7 +48,7 @@ electrodes:
 solver:
   backend: auto
   method: cg
-  preconditioner: jacobi
+  preconditioner: jacobi   # jacobi | amg（代数マルチグリッド）| none
   gauge: mean_zero
   tolerance: 1.0e-10
   max_iterations: 50000

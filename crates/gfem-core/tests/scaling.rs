@@ -76,6 +76,7 @@ fn case_with(backend: Backend) -> Case {
         max_iterations: 100_000,
         preconditioner: Preconditioner::Jacobi,
         backend,
+        ..Default::default()
     };
     case.reference = ReferencePotential::CathodeMean;
     case

@@ -23,9 +23,12 @@
 //! 変わりようがない。
 
 use crate::assemble::csr::CsrMatrix;
-use crate::case::{Preconditioner, SolverOptions};
+use crate::case::SolverOptions;
 use crate::error::{GfemError, Result};
+use crate::solver::amg::AmgInfo;
 use crate::solver::backend::LinearBackend;
+use crate::solver::precond;
+use std::time::Instant;
 
 /// 停滞とみなすまでの反復数。
 const STALL_WINDOW: usize = 500;
@@ -50,6 +53,12 @@ pub struct CgReport {
     pub history: Vec<f64>,
     /// 使用したバックエンド名
     pub backend: &'static str,
+    /// 使用した前処理の名前
+    pub preconditioner: &'static str,
+    /// AMG の階層の要約（AMG 以外では `None`。SPEC §5.5）
+    pub amg: Option<AmgInfo>,
+    /// 前処理の準備にかかった時間 [秒]（AMG では階層の構築が入る）
+    pub setup_seconds: f64,
 }
 
 impl CgReport {
@@ -99,30 +108,15 @@ pub fn solve<B: LinearBackend>(
     }
     let mut progress = progress;
 
-    // 前処理（対角の逆数）。ホスト側で作ってから転送する
-    let inv_diag = match options.preconditioner {
-        Preconditioner::None => None,
-        Preconditioner::Jacobi => {
-            let diag = matrix.diagonal();
-            if let Some((i, d)) = diag
-                .iter()
-                .enumerate()
-                .find(|&(_, &d)| d <= 0.0 || d.is_nan())
-            {
-                return Err(GfemError::internal(format!(
-                    "剛性行列の対角成分が正ではありません: 行 {i} で {d}"
-                ))
-                .with_hint("退化要素か、導電率がゼロ以下の領域が残っている可能性があります"));
-            }
-            Some(diag.iter().map(|d| 1.0 / d).collect::<Vec<f64>>())
-        }
-    };
-
+    // 前処理の準備。AMG の階層はホスト側で組み立てるので、
+    // どのバックエンドで解いても同じものができる（SPEC §4.5）
+    let setup_started = Instant::now();
+    let hierarchy = precond::build_hierarchy(matrix, options)?;
     let a = backend.upload_matrix(matrix)?;
-    let inv_diag = match inv_diag {
-        Some(d) => Some(backend.upload(&d)?),
-        None => None,
-    };
+    let mut precond = precond::build(backend, matrix, options, hierarchy.as_ref())?;
+    let setup_seconds = setup_started.elapsed().as_secs_f64();
+    let preconditioner = precond.label();
+    let amg_info = precond.amg_info();
 
     // 右辺と初期値を零空間に直交させる。
     // f は解析的には 1ᵀf = 0 を満たすが、面積按分の丸めでわずかにずれるため落としておく
@@ -144,6 +138,9 @@ pub fn solve<B: LinearBackend>(
             cancelled: false,
             history,
             backend: backend.name(),
+            preconditioner,
+            amg: amg_info,
+            setup_seconds,
         });
     }
 
@@ -170,10 +167,13 @@ pub fn solve<B: LinearBackend>(
             cancelled: false,
             history,
             backend: backend.name(),
+            preconditioner,
+            amg: amg_info,
+            setup_seconds,
         });
     }
 
-    apply_preconditioner(backend, inv_diag.as_ref(), &r, &mut z)?;
+    precond.apply(backend, &r, &mut z)?;
     backend.project_mean_zero(&mut z)?;
     backend.copy_from(&z, &mut p)?;
     let mut rz = backend.dot(&r, &z)?;
@@ -232,7 +232,7 @@ pub fn solve<B: LinearBackend>(
             break;
         }
 
-        apply_preconditioner(backend, inv_diag.as_ref(), &r, &mut z)?;
+        precond.apply(backend, &r, &mut z)?;
         backend.project_mean_zero(&mut z)?;
         let rz_next = backend.dot(&r, &z)?;
         let beta = rz_next / rz;
@@ -253,25 +253,16 @@ pub fn solve<B: LinearBackend>(
         cancelled,
         history,
         backend: backend.name(),
+        preconditioner,
+        amg: amg_info,
+        setup_seconds,
     })
-}
-
-fn apply_preconditioner<B: LinearBackend>(
-    backend: &B,
-    inv_diag: Option<&B::Vector>,
-    r: &B::Vector,
-    z: &mut B::Vector,
-) -> Result<()> {
-    match inv_diag {
-        Some(d) => backend.multiply(d, r, z),
-        None => backend.copy_from(r, z),
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::case::Backend;
+    use crate::case::{Backend, Preconditioner};
     use crate::solver::backend::CpuSerial;
 
     /// 1 次元の格子ラプラシアン（全 Neumann）。K = tridiag(−1, 2, −1) の端を 1 にしたもの。
@@ -311,6 +302,7 @@ mod tests {
             max_iterations: 5000,
             preconditioner: Preconditioner::Jacobi,
             backend: Backend::CpuSerial,
+            ..Default::default()
         }
     }
 
@@ -427,6 +419,7 @@ mod tests {
             max_iterations: 3,
             preconditioner: Preconditioner::Jacobi,
             backend: Backend::CpuSerial,
+            ..Default::default()
         };
         let report = solve(&CpuSerial, &k, &f, &mut phi, &opts, None).unwrap();
         assert!(!report.converged);
@@ -447,6 +440,7 @@ mod tests {
             max_iterations: 5000,
             preconditioner: Preconditioner::None,
             backend: Backend::CpuSerial,
+            ..Default::default()
         };
         let report = solve(&CpuSerial, &k, &f, &mut phi, &opts, None).unwrap();
         assert!(report.converged, "{:?}", report.failure_reason());

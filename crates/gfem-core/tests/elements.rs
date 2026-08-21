@@ -62,6 +62,7 @@ fn layered_case() -> Case {
         max_iterations: 50_000,
         preconditioner: Preconditioner::Jacobi,
         backend: Backend::CpuSerial,
+        ..Default::default()
     };
     case.reference = ReferencePotential::CathodeMean;
     case

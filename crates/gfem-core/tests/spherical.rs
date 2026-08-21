@@ -53,6 +53,7 @@ fn case_for(sigmas: &[(u32, f64)]) -> Case {
         max_iterations: 50_000,
         preconditioner: Preconditioner::Jacobi,
         backend: Backend::CpuSerial,
+        ..Default::default()
     };
     // 解析解は φ(R) = 0 と揃えてあるので、基準も外側電極に合わせる
     case.reference = ReferencePotential::CathodeMean;

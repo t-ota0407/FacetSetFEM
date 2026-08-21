@@ -11,6 +11,7 @@ use crate::error::{ErrorKind, GfemError, Result, format_sample_list};
 use crate::material::Conductivity;
 use crate::mesh::topology::Surface;
 use crate::mesh::{ElemId, Mesh, NodeId, PropId};
+use crate::solver::amg::AmgOptions;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// エラー一覧に並べる最大件数。
@@ -117,7 +118,12 @@ pub enum ReferencePotential {
     Node(NodeId),
 }
 
-/// 前処理（SPEC §4.3）。
+/// 前処理（SPEC §4.3 / §4.5）。
+///
+/// **どれを選んでも収束後の答えは同じ**（同じ方程式を解いている）。変わるのは
+/// 反復回数と 1 反復のコストだけ。ただしバックエンドの違いと違って、
+/// 前処理を変えると反復の道筋が変わるので**ビット列は一致しない**——
+/// 収束判定の範囲内で一致する。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Preconditioner {
@@ -125,6 +131,35 @@ pub enum Preconditioner {
     None,
     /// 対角スケーリング
     Jacobi,
+    /// 代数マルチグリッド（平滑化凝集。SPEC §4.5）
+    ///
+    /// 反復回数がメッシュの細かさにほとんど依存しなくなる。1 反復は重くなるので、
+    /// 小さい問題や導電率が一様な問題では Jacobi のほうが速い。
+    Amg,
+}
+
+impl Preconditioner {
+    /// 表示・記録用の名前。
+    pub const fn label(self) -> &'static str {
+        match self {
+            Preconditioner::None => "none",
+            Preconditioner::Jacobi => "jacobi",
+            Preconditioner::Amg => "amg",
+        }
+    }
+
+    /// 文字列から解釈する。
+    pub fn parse(value: &str) -> Result<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "none" => Ok(Preconditioner::None),
+            "jacobi" | "diagonal" => Ok(Preconditioner::Jacobi),
+            "amg" | "smoothed_aggregation" | "sa" => Ok(Preconditioner::Amg),
+            other => Err(
+                GfemError::new(ErrorKind::Case, format!("未知の前処理です: \"{other}\""))
+                    .with_hint("jacobi / amg / none のいずれかを指定してください"),
+            ),
+        }
+    }
 }
 
 /// 計算バックエンド（SPEC §3.3 / §4.4）。
@@ -227,6 +262,8 @@ pub struct SolverOptions {
     pub max_iterations: usize,
     /// 前処理
     pub preconditioner: Preconditioner,
+    /// AMG の設定（`preconditioner: amg` のときだけ使う）
+    pub amg: AmgOptions,
     /// 計算バックエンド
     pub backend: Backend,
 }
@@ -237,6 +274,7 @@ impl Default for SolverOptions {
             tolerance: 1.0e-10,
             max_iterations: 50_000,
             preconditioner: Preconditioner::Jacobi,
+            amg: AmgOptions::default(),
             backend: Backend::Auto,
         }
     }

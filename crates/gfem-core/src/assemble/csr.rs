@@ -14,10 +14,13 @@
 
 use crate::error::{GfemError, Result};
 
-/// 対称正半定値の CSR 行列。
+/// CSR 行列。剛性行列は対称正半定値の正方行列だが、AMG の補間演算子
+/// （SPEC §4.5）は矩形なので、行数と列数を別に持つ。
 #[derive(Debug, Clone, Default)]
 pub struct CsrMatrix {
     n: usize,
+    /// 列数。正方行列では `n` と等しい
+    n_cols: usize,
     /// 長さ `n + 1`
     row_ptr: Vec<usize>,
     /// 行ごとに昇順
@@ -26,13 +29,24 @@ pub struct CsrMatrix {
 }
 
 impl CsrMatrix {
-    /// 構造（`row_ptr` / `col_idx`）から、値を 0 にした行列を作る。
+    /// 構造（`row_ptr` / `col_idx`）から、値を 0 にした正方行列を作る。
     pub fn from_structure(n: usize, row_ptr: Vec<usize>, col_idx: Vec<u32>) -> Self {
-        debug_assert_eq!(row_ptr.len(), n + 1);
-        debug_assert_eq!(row_ptr[n], col_idx.len());
+        Self::from_structure_rect(n, n, row_ptr, col_idx)
+    }
+
+    /// 矩形版。`n_cols` は補間演算子 P（細 × 粗）などで行数と異なる。
+    pub fn from_structure_rect(
+        n_rows: usize,
+        n_cols: usize,
+        row_ptr: Vec<usize>,
+        col_idx: Vec<u32>,
+    ) -> Self {
+        debug_assert_eq!(row_ptr.len(), n_rows + 1);
+        debug_assert_eq!(row_ptr[n_rows], col_idx.len());
         let values = vec![0.0; col_idx.len()];
         Self {
-            n,
+            n: n_rows,
+            n_cols,
             row_ptr,
             col_idx,
             values,
@@ -42,6 +56,11 @@ impl CsrMatrix {
     /// 行数（＝節点数）。
     pub fn n_rows(&self) -> usize {
         self.n
+    }
+
+    /// 列数。正方行列では [`n_rows`](Self::n_rows) と等しい。
+    pub fn n_cols(&self) -> usize {
+        self.n_cols
     }
 
     /// 非ゼロ要素数。
@@ -105,7 +124,7 @@ impl CsrMatrix {
     /// 行内は列番号の昇順に逐次加算する。この順序が全バックエンド共通の約束
     /// （モジュール冒頭の不変条件を参照）。
     pub fn spmv(&self, x: &[f64], y: &mut [f64]) {
-        debug_assert_eq!(x.len(), self.n);
+        debug_assert_eq!(x.len(), self.n_cols);
         debug_assert_eq!(y.len(), self.n);
         for (i, yi) in y.iter_mut().enumerate() {
             let (s, e) = (self.row_ptr[i], self.row_ptr[i + 1]);
@@ -114,6 +133,45 @@ impl CsrMatrix {
                 acc += self.values[k] * x[self.col_idx[k] as usize];
             }
             *yi = acc;
+        }
+    }
+
+    /// 転置 `Aᵀ`（SPEC §4.5。AMG の制限演算子 R = Pᵀ を明示的に持つために使う）。
+    ///
+    /// AMG では制限 `R x` が要る。`Pᵀ` を「列方向に足し込む」形で計算すると
+    /// GPU では書き込みが衝突して atomicAdd が要り、加算順序が実行ごとに変わってしまう
+    /// （CLAUDE.md 設計原則 1 に反する）。だから**転置を CSR として明示的に持ち**、
+    /// 制限も普通の行ごと SpMV で行う。メモリは増えるが再現性が守れる。
+    ///
+    /// 計数ソートなので O(nnz)。各行の列番号は昇順に並ぶ。
+    pub fn transpose(&self) -> CsrMatrix {
+        let mut counts = vec![0usize; self.n_cols + 1];
+        for &c in &self.col_idx {
+            counts[c as usize + 1] += 1;
+        }
+        for i in 0..self.n_cols {
+            counts[i + 1] += counts[i];
+        }
+        let row_ptr = counts.clone();
+        let mut col_idx = vec![0u32; self.col_idx.len()];
+        let mut values = vec![0.0f64; self.values.len()];
+        // 元の行を昇順にたどるので、転置後の各行内も行番号（＝元の列）の昇順に並ぶ
+        let mut cursor = counts;
+        for i in 0..self.n {
+            for k in self.row_ptr[i]..self.row_ptr[i + 1] {
+                let c = self.col_idx[k] as usize;
+                let pos = cursor[c];
+                cursor[c] += 1;
+                col_idx[pos] = i as u32;
+                values[pos] = self.values[k];
+            }
+        }
+        CsrMatrix {
+            n: self.n_cols,
+            n_cols: self.n,
+            row_ptr,
+            col_idx,
+            values,
         }
     }
 

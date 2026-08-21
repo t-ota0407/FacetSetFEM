@@ -98,6 +98,12 @@ KNOWN_BACKENDS = frozenset(
     {"auto", "cpu", "cpu_serial", "serial", "cpu_parallel", "parallel", "cuda", "gpu"}
 )
 
+#: 指定できる前処理（SPEC §4.3 / §4.5）。
+#: バックエンドと違い、こちらは反復の道筋が変わるので収束判定の範囲で答えが揺れる。
+KNOWN_PRECONDITIONERS = frozenset(
+    {"jacobi", "diagonal", "amg", "smoothed_aggregation", "sa", "none"}
+)
+
 
 @dataclass
 class SolverSpec:
@@ -106,6 +112,7 @@ class SolverSpec:
     #: "auto"（規模で自動選択）/ "cpu"（逐次）/ "cpu_parallel"（rayon）/ "cuda"（GPU）
     backend: str = "auto"
     method: str = "cg"
+    #: "jacobi"（既定）/ "amg"（代数マルチグリッド）/ "none"
     preconditioner: str = "jacobi"
     gauge: str = "mean_zero"
     tolerance: float = 1.0e-10
@@ -430,6 +437,13 @@ def _solver_from(data: Any, where_: str) -> SolverSpec:
             f"{where_} の backend",
             "auto / cpu / cpu_parallel / cuda のいずれかです。"
             "cuda が使えるかは gfem.describe_gpus() で確認できます",
+        )
+    if spec.preconditioner not in KNOWN_PRECONDITIONERS:
+        raise _error(
+            f"未知の前処理です: {spec.preconditioner}",
+            f"{where_} の preconditioner",
+            "jacobi / amg / none のいずれかです。amg は反復回数が"
+            "メッシュの細かさにほとんど依存しなくなります（SPEC §4.5）",
         )
     return spec
 

@@ -25,6 +25,7 @@ fn tight_solver() -> SolverOptions {
         max_iterations: 20_000,
         preconditioner: Preconditioner::Jacobi,
         backend: Backend::CpuSerial,
+        ..Default::default()
     }
 }
 

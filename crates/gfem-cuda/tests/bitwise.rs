@@ -155,6 +155,10 @@ fn every_vector_operation_matches_the_cpu_bitwise() {
         gpu.shift(-1.0 / 9.0, &mut ag).unwrap();
         check("shift", &ac, &ag);
 
+        cpu.fill(-0.0, &mut ac).unwrap();
+        gpu.fill(-0.0, &mut ag).unwrap();
+        check("fill", &ac, &ag);
+
         // 射影は sum と shift の組み合わせ（既定実装）
         let (mut pc, mut pg) = (cpu.upload(&x).unwrap(), gpu.upload(&x).unwrap());
         cpu.project_mean_zero(&mut pc).unwrap();
@@ -182,6 +186,43 @@ fn transfers_round_trip() {
     gpu.copy_from(&v, &mut z).unwrap();
     gpu.download(&z, &mut back).unwrap();
     assert_eq!(host, back, "VRAM 内のコピー");
+
+    // 既存のベクトルへの書き戻し（AMG の最粗レベルがこれを毎サイクル使う）
+    let other = spread(host.len(), 0.13);
+    gpu.upload_into(&other, &mut z).unwrap();
+    gpu.download(&z, &mut back).unwrap();
+    assert_eq!(other, back, "既存ベクトルへの書き戻し");
+}
+
+#[test]
+fn rectangular_matrices_multiply_the_same_way() {
+    // AMG の補間 P（細 × 粗）と制限 R（粗 × 細）は矩形（SPEC §4.5）。
+    // GPU の SpMV は行ごと 1 スレッドなので矩形でもそのまま動くはずだが、
+    // 長さの検査を間違えると静かに壊れるので固定しておく
+    let gpu = gpu_or_skip!();
+    let (n_fine, n_coarse) = (5_000usize, 617);
+
+    // 各行 1 非ゼロの試行補間そのもの
+    let row_ptr: Vec<usize> = (0..=n_fine).collect();
+    let col_idx: Vec<u32> = (0..n_fine).map(|i| (i % n_coarse) as u32).collect();
+    let mut p = CsrMatrix::from_structure_rect(n_fine, n_coarse, row_ptr, col_idx);
+    let values = spread(n_fine, 0.29);
+    p.values_mut().copy_from_slice(&values);
+    let r = p.transpose();
+
+    let cpu = CpuSerial;
+    for m in [&p, &r] {
+        let (mc, mg) = (cpu.upload_matrix(m).unwrap(), gpu.upload_matrix(m).unwrap());
+        let x = spread(m.n_cols(), 0.71);
+        let (xc, xg) = (cpu.upload(&x).unwrap(), gpu.upload(&x).unwrap());
+        let mut yc = cpu.zeros(m.n_rows()).unwrap();
+        let mut yg = gpu.zeros(m.n_rows()).unwrap();
+        cpu.spmv(&mc, &xc, &mut yc).unwrap();
+        gpu.spmv(&mg, &xg, &mut yg).unwrap();
+        let mut back = vec![0.0; m.n_rows()];
+        gpu.download(&yg, &mut back).unwrap();
+        assert_eq!(yc, back, "{} x {} の SpMV", m.n_rows(), m.n_cols());
+    }
 }
 
 #[test]

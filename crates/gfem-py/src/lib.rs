@@ -489,8 +489,13 @@ impl PyCase {
 
     /// ソルバ設定を変更する。
     ///
-    /// `backend` は `"auto"` / `"cpu"` / `"cpu_parallel"`。
+    /// `backend` は `"auto"` / `"cpu"` / `"cpu_parallel"` / `"cuda"`。
     /// **どれを選んでも結果はビット単位で同じ**で、速度だけが変わる（SPEC §4.4）。
+    ///
+    /// `preconditioner` は `"jacobi"`（既定）/ `"amg"` / `"none"`。
+    /// こちらは反復の道筋が変わるので、収束判定の範囲内で答えが揺れる。
+    /// `"amg"` は反復回数がメッシュの細かさにほとんど依存しなくなる代わりに
+    /// 1 反復が重くなる（SPEC §4.5）。
     #[pyo3(signature = (
         tolerance = None,
         max_iterations = None,
@@ -511,15 +516,7 @@ impl PyCase {
             self.inner.solver.max_iterations = n;
         }
         if let Some(p) = preconditioner {
-            self.inner.solver.preconditioner = match p.to_ascii_lowercase().as_str() {
-                "jacobi" => Preconditioner::Jacobi,
-                "none" => Preconditioner::None,
-                other => {
-                    return Err(GfemError::new_err(format!(
-                        "未知の前処理です: \"{other}\"（jacobi / none）"
-                    )));
-                }
-            };
+            self.inner.solver.preconditioner = Preconditioner::parse(p).map_err(to_py)?;
         }
         if let Some(b) = backend {
             self.inner.solver.backend = Backend::parse(b).map_err(to_py)?;
@@ -533,13 +530,7 @@ impl PyCase {
         let d = PyDict::new(py);
         d.set_item("tolerance", self.inner.solver.tolerance)?;
         d.set_item("max_iterations", self.inner.solver.max_iterations)?;
-        d.set_item(
-            "preconditioner",
-            match self.inner.solver.preconditioner {
-                Preconditioner::Jacobi => "jacobi",
-                _ => "none",
-            },
-        )?;
+        d.set_item("preconditioner", self.inner.solver.preconditioner.label())?;
         d.set_item("backend", self.inner.solver.backend.label())?;
         Ok(d.unbind())
     }
@@ -832,6 +823,30 @@ impl PySolution {
     #[getter]
     fn backend(&self) -> &'static str {
         self.inner.solver.backend
+    }
+
+    /// 使用した前処理の名前（`"jacobi"` / `"amg"` / `"none"`）。
+    #[getter]
+    fn preconditioner(&self) -> &'static str {
+        self.inner.solver.preconditioner
+    }
+
+    /// AMG の階層の要約。AMG 以外で解いた場合は `None`（SPEC §4.5）。
+    ///
+    /// `levels` はレベルごとの `(節点数, 非ゼロ数)`。`operator_complexity` は
+    /// V サイクル 1 回が最細レベルの SpMV 何回ぶんに相当するかの目安。
+    #[getter]
+    fn amg(&self, py: Python<'_>) -> PyResult<Option<Py<PyDict>>> {
+        let Some(info) = &self.inner.solver.amg else {
+            return Ok(None);
+        };
+        let d = PyDict::new(py);
+        d.set_item("levels", info.levels.clone())?;
+        d.set_item("operator_complexity", info.operator_complexity)?;
+        d.set_item("grid_complexity", info.grid_complexity)?;
+        d.set_item("direct_coarse_solve", info.direct_coarse_solve)?;
+        d.set_item("setup_seconds", self.inner.solver.setup_seconds)?;
+        Ok(Some(d.unbind()))
     }
 
     /// 保存則チェックの結果（SPEC §5.4）。

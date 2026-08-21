@@ -89,6 +89,17 @@ __global__ void gfem_multiply(
     y[i] = __dmul_rn(a[i], x[i]);
 }
 
+// x = value（全成分）
+__global__ void gfem_fill(
+    const unsigned long long n,
+    const double value,
+    double* __restrict__ x)
+{
+    unsigned long long i = blockIdx.x * (unsigned long long)blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    x[i] = value;
+}
+
 // x += delta
 __global__ void gfem_shift(
     const unsigned long long n,

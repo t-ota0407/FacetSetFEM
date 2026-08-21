@@ -155,6 +155,7 @@ fn case_with(backend: Backend) -> Case {
         max_iterations: 100_000,
         preconditioner: Preconditioner::Jacobi,
         backend,
+        ..Default::default()
     };
     case.reference = ReferencePotential::CathodeMean;
     case
@@ -207,6 +208,60 @@ fn gpu_and_cpu_solve_bitwise_identically() {
     // CLAUDE.md 設計原則 1: 3 つのバックエンドが 1 ビットも違わないこと
     assert_identical(&serial, &parallel);
     assert_identical(&serial, &cuda);
+}
+
+#[test]
+fn gpu_and_cpu_agree_bitwise_with_amg_too() {
+    // AMG の V サイクルはバックエンドの演算しか使わないので、
+    // CPU 逐次・CPU 並列・GPU で 1 ビットも変わってはいけない（CLAUDE.md 設計原則 1）。
+    // 補間・制限は矩形の SpMV、最粗レベルはホストでの密分解を経由する——
+    // どちらも M5 の経路には無かったので、ここで初めて通る道になる
+    let gpu = gpu_or_skip!();
+    let mesh = slab(20, 14, 1);
+    let mut case = case_with(Backend::CpuSerial);
+    case.solver.preconditioner = Preconditioner::Amg;
+
+    let serial = solve_with(&mesh, &case, None, None).unwrap();
+    let parallel = solve_with(
+        &mesh,
+        &case,
+        None,
+        Some(&BackendSolver(CpuParallel) as &dyn gfem_core::LinearSolver),
+    )
+    .unwrap();
+    let cuda = solve_with(&mesh, &case, None, Some(&BackendSolver(gpu))).unwrap();
+
+    let info = cuda.solver.amg.as_ref().expect("AMG の情報が無い");
+    println!(
+        "節点 {}: AMG {} 反復（レベル {:?}, 作用素複雑度 {:.2}）",
+        mesh.nodes.len(),
+        cuda.solver.iterations,
+        info.levels,
+        info.operator_complexity
+    );
+    assert!(info.levels.len() >= 2, "階層が 1 段しかない");
+    assert!(info.direct_coarse_solve, "最粗レベルを密分解できていない");
+    assert_eq!(cuda.solver.preconditioner, "amg");
+
+    assert_identical(&serial, &parallel);
+    assert_identical(&serial, &cuda);
+    assert_eq!(serial.solver.amg, cuda.solver.amg, "階層の要約");
+
+    // Jacobi と同じ答えに、はるかに少ない反復でたどり着いていること
+    let jacobi = solve_with(&mesh, &case_with(Backend::CpuSerial), None, None).unwrap();
+    println!(
+        "Jacobi {} 反復 / AMG {} 反復",
+        jacobi.solver.iterations, cuda.solver.iterations
+    );
+    assert!(cuda.solver.iterations * 4 < jacobi.solver.iterations);
+    let scale = jacobi.potential.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+    let worst = jacobi
+        .potential
+        .iter()
+        .zip(&cuda.potential)
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0f64, f64::max);
+    assert!(worst < 1e-8 * scale, "電位の差 {worst}");
 }
 
 #[test]
@@ -381,4 +436,117 @@ fn measure_gpu_speedup() {
             serial.timings.solve / cuda.timings.solve.max(1e-12)
         );
     }
+}
+
+#[test]
+#[ignore = "計測用。--ignored で実行する"]
+fn measure_amg_on_the_gpu() {
+    // AMG の V サイクルは SpMV を何度も回すので、GPU の帯域がそのまま効く。
+    // ただし階層の構築はホスト側の逐次寄りの処理で、そこが新しい律速になりうる
+    let gpu = gpu_or_skip!();
+    println!("GPU: {}", gpu.device().info().name);
+    println!(
+        "{:>10} {:>7} {:>10} {:>7} {:>10} {:>9} {:>7}",
+        "節点", "J 反復", "J CG[s]", "A 反復", "A CG[s]", "階層[s]", "倍率"
+    );
+    let solver = BackendSolver(gpu);
+    for (nx, ny, refine) in [(50, 34, 2), (80, 54, 3), (140, 94, 4), (200, 134, 5)] {
+        let mesh = slab(nx, ny, refine);
+
+        let jacobi = solve_with(&mesh, &case_with(Backend::Cuda), None, Some(&solver)).unwrap();
+
+        let mut case = case_with(Backend::Cuda);
+        case.solver.preconditioner = Preconditioner::Amg;
+        let amg = solve_with(&mesh, &case, None, Some(&solver)).unwrap();
+
+        let jacobi_cg = jacobi.timings.solve;
+        let amg_cg = amg.timings.solve;
+        println!(
+            "{:>10} {:>7} {:>10.3} {:>7} {:>10.3} {:>9.3} {:>7.2}",
+            mesh.nodes.len(),
+            jacobi.solver.iterations,
+            jacobi_cg,
+            amg.solver.iterations,
+            amg_cg,
+            amg.solver.setup_seconds,
+            jacobi_cg / amg_cg.max(1e-12)
+        );
+        if let Some(info) = &amg.solver.amg {
+            println!(
+                "           レベル {:?}, 作用素複雑度 {:.2}",
+                info.levels, info.operator_complexity
+            );
+        }
+    }
+}
+
+#[test]
+#[ignore = "重い（1000 万節点・VRAM 十数 GB）。--ignored で実行する"]
+fn ten_million_nodes_with_amg() {
+    // M5 の 1000 万節点は Jacobi で 1423 反復・CG 17.5 秒だった。
+    // AMG がその規模でも反復回数を抑えられるか、VRAM に収まるかを見る
+    use std::time::Instant;
+    let gpu = gpu_or_skip!();
+    println!("GPU: {}", gpu.device().info().name);
+
+    let build = Instant::now();
+    let mesh = slab(410, 273, 8);
+    let n = mesh.nodes.len();
+    println!(
+        "節点 {n}, 四面体 {}（生成 {:.1} 秒）",
+        mesh.n_solid_elements(),
+        build.elapsed().as_secs_f64()
+    );
+    assert!(n >= 10_000_000, "節点数が足りません: {n}");
+
+    let mut case = case_with(Backend::Cuda);
+    case.solver.tolerance = 1.0e-9;
+    case.solver.preconditioner = Preconditioner::Amg;
+
+    let t = Instant::now();
+    let analysis = solve_with(&mesh, &case, None, Some(&BackendSolver(gpu))).unwrap();
+    let elapsed = t.elapsed().as_secs_f64();
+    let info = analysis.solver.amg.as_ref().unwrap();
+    println!(
+        "GPU + AMG {elapsed:.1} 秒（準備 {:.1} / アセンブリ {:.1} / CG {:.1}（うち階層 {:.1}） / ポスト {:.1}）, {} 反復",
+        analysis.timings.prepare,
+        analysis.timings.assemble,
+        analysis.timings.solve,
+        analysis.solver.setup_seconds,
+        analysis.timings.post,
+        analysis.solver.iterations
+    );
+    println!(
+        "レベル {:?}, 作用素複雑度 {:.2}",
+        info.levels, info.operator_complexity
+    );
+
+    assert!(
+        analysis.solver.converged,
+        "{:?}",
+        analysis.solver.failure_reason()
+    );
+    assert!(
+        analysis.conservation.is_clean(),
+        "{:?}",
+        analysis.conservation.warnings
+    );
+    // M5 の Jacobi は 1423 反復だった。桁で減っていること
+    assert!(
+        analysis.solver.iterations < 200,
+        "{} 反復。AMG の効き目が出ていない",
+        analysis.solver.iterations
+    );
+
+    let area = LX * LY;
+    let expected: f64 = LAYERS
+        .iter()
+        .map(|&(_p, t, sigma, _d)| t / (sigma * area))
+        .sum();
+    let error = (analysis.impedance() - expected).abs() / expected;
+    println!(
+        "R = {} Ω（期待 {expected} Ω、相対誤差 {error:.2e}）",
+        analysis.impedance()
+    );
+    assert!(error < 1e-6, "R の相対誤差 {error}");
 }

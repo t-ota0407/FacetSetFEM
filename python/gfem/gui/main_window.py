@@ -808,7 +808,7 @@ class SolverPage(QWidget):
         self.max_iterations = QSpinBox()
         self.max_iterations.setRange(1, 10_000_000)
         self.preconditioner = QComboBox()
-        self.preconditioner.addItems(["jacobi", "none"])
+        self.preconditioner.addItems(["jacobi", "amg", "none"])
         self.backend = QComboBox()
         self.backend.addItems(["auto", "cpu", "cpu_parallel", "cuda"])
         self.reference = QComboBox()
@@ -830,7 +830,12 @@ class SolverPage(QWidget):
         self.environment = QLabel(describe_gpus())
         self.environment.setWordWrap(True)
         layout.addWidget(
-            QLabel("バックエンドを変えても結果は 1 ビットも変わりません（速度だけが変わります）。")
+            QLabel(
+                "バックエンドを変えても結果は 1 ビットも変わりません（速度だけが変わります）。\n"
+                "前処理はこれと違い、反復の道筋が変わるので答えが収束判定の範囲で揺れます。\n"
+                "amg（代数マルチグリッド）は反復回数がメッシュの細かさにほとんど依存しなく\n"
+                "なりますが、1 反復は重くなります。細かいメッシュほど有利です（SPEC §4.5）。"
+            )
         )
         layout.addWidget(self.environment)
         layout.addStretch(1)
@@ -848,6 +853,9 @@ class SolverPage(QWidget):
         self._loading = True
         self.tolerance.setText(f"{study.solver.tolerance:g}")
         self.max_iterations.setValue(study.solver.max_iterations)
+        # ケースファイルに未知の値が入っていたときに黙って既定値へ戻さない
+        if self.preconditioner.findText(study.solver.preconditioner) < 0:
+            self.preconditioner.addItem(study.solver.preconditioner)
         self.preconditioner.setCurrentText(study.solver.preconditioner)
         if self.backend.findText(study.solver.backend) < 0:
             self.backend.addItem(study.solver.backend)

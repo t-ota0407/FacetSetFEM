@@ -60,6 +60,7 @@ fn setup() -> (Mesh, Case, Analysis) {
         max_iterations: 20_000,
         preconditioner: Preconditioner::Jacobi,
         backend: Backend::CpuSerial,
+        ..Default::default()
     };
     case.reference = ReferencePotential::CathodeMean;
     let analysis = solve(&mesh, &case, None).unwrap();
