@@ -15,7 +15,10 @@
 //! result.write_vtu("out.vtu")
 //! ```
 
-use gfem_core::case::{Electrode, ElectrodeRole, Preconditioner, ReferencePotential};
+use gfem_core::case::{Backend, Electrode, ElectrodeRole, Preconditioner, ReferencePotential};
+use gfem_core::mesh::streamline::{TraceDirection, TraceOptions};
+use gfem_core::post::RegionStats;
+use gfem_core::provenance::Provenance;
 use gfem_core::{Analysis, LengthUnit, VtuOptions};
 use numpy::{IntoPyArray, PyArray1, PyArray2, PyArrayMethods};
 use pyo3::create_exception;
@@ -43,6 +46,13 @@ create_exception!(
 type BoundingBox = ((f64, f64, f64), (f64, f64, f64));
 
 /// シェル要素の三角形分割を返すときの形。`(三角形, PID, 要素 ID)`。
+/// 等値面を Python 側に返すときの形。`(頂点, 三角形, 頂点のスカラー)`。
+type IsoSurfaceArrays<'py> = (
+    Bound<'py, PyArray2<f64>>,
+    Bound<'py, PyArray2<u32>>,
+    Bound<'py, PyArray1<f64>>,
+);
+
 type ShellTriangles<'py> = (
     Bound<'py, PyArray2<u32>>,
     Bound<'py, PyArray1<i32>>,
@@ -274,11 +284,37 @@ impl PyMesh {
         ))
     }
 
-    /// 四面体の接続 `(n_tet, 4)`（節点索引）。
+    /// ソリッド要素を VTK のセル配列として返す `(cells, celltypes)`。
     ///
     /// SPEC §6.3 の「小規模モデル用エスケープハッチ」。節点数が少ないうちは
     /// これで PyVista の `UnstructuredGrid` を組み立て、断面スライスなど
     /// VTK の全機能を使う。大規模モデルでは表示用データの抽出を Rust 側で行う。
+    ///
+    /// `cells` は VTK の並び `[節点数, 節点索引..., 節点数, ...]`、
+    /// `celltypes` は要素ごとの VTK セル型。CTETRA / CHEXA / CPENTA はそれぞれ
+    /// VTK_TETRA / VTK_HEXAHEDRON / VTK_WEDGE に対応するので、
+    /// 四面体へ切り分ける必要はない（M4 で追加）。節点の並び替えは
+    /// `ElementKind::vtk_node_order`（VTU 出力と共通）。
+    ///
+    /// 並びは要素値配列（`solid_pid_array` や結果の要素値）と同じ。
+    fn solid_cells<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> (Bound<'py, PyArray1<i64>>, Bound<'py, PyArray1<u8>>) {
+        let mut cells: Vec<i64> = Vec::new();
+        let mut types: Vec<u8> = Vec::with_capacity(self.inner.n_solid_elements());
+        for e in self.inner.iter_solids() {
+            cells.push(e.conn.len() as i64);
+            cells.extend(e.kind.vtk_node_order().iter().map(|&l| e.conn[l] as i64));
+            types.push(e.kind.vtk_cell_type());
+        }
+        (cells.into_pyarray(py), types.into_pyarray(py))
+    }
+
+    /// 四面体の接続 `(n_tet, 4)`（節点索引）。
+    ///
+    /// CTETRA だけのモデル用。要素種が混ざっていてもよい表示経路は
+    /// [`solid_cells`] を使う。
     fn tetrahedra<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<u32>>> {
         let others: Vec<&str> = self
             .inner
@@ -289,8 +325,9 @@ impl PyMesh {
             .collect();
         if !others.is_empty() {
             return Err(GfemError::new_err(format!(
-                "[未対応] 四面体以外のソリッド要素があります: {}
-                   対処: tetrahedra() は CTETRA だけを返します。                 CHEXA / CPENTA を含むモデルの表示は M4 で対応します",
+                "[未対応] 四面体以外のソリッド要素があります: {}\n\
+                 対処: tetrahedra() は CTETRA だけを返します。\
+                 要素種が混ざったモデルは solid_cells() を使ってください",
                 others.join(", ")
             )));
         }
@@ -398,6 +435,17 @@ impl PyCase {
         self.inner.set_conductivity(pid, s).map_err(to_py)
     }
 
+    /// PID に領域名を付ける（計算には使わないが、統計と表示に出る）。
+    fn set_region_name(&mut self, pid: u32, name: &str) {
+        self.inner.set_region_name(pid, name);
+    }
+
+    /// 設定済みの領域名。
+    #[getter]
+    fn region_names(&self) -> BTreeMap<u32, String> {
+        self.inner.region_names.clone()
+    }
+
     /// 設定済みの導電率。
     #[getter]
     fn conductivity(&self) -> BTreeMap<u32, f64> {
@@ -438,12 +486,21 @@ impl PyCase {
     }
 
     /// ソルバ設定を変更する。
-    #[pyo3(signature = (tolerance = None, max_iterations = None, preconditioner = None))]
+    ///
+    /// `backend` は `"auto"` / `"cpu"` / `"cpu_parallel"`。
+    /// **どれを選んでも結果はビット単位で同じ**で、速度だけが変わる（SPEC §4.4）。
+    #[pyo3(signature = (
+        tolerance = None,
+        max_iterations = None,
+        preconditioner = None,
+        backend = None,
+    ))]
     fn set_solver(
         &mut self,
         tolerance: Option<f64>,
         max_iterations: Option<usize>,
         preconditioner: Option<&str>,
+        backend: Option<&str>,
     ) -> PyResult<()> {
         if let Some(t) = tolerance {
             self.inner.solver.tolerance = t;
@@ -462,6 +519,9 @@ impl PyCase {
                 }
             };
         }
+        if let Some(b) = backend {
+            self.inner.solver.backend = Backend::parse(b).map_err(to_py)?;
+        }
         Ok(())
     }
 
@@ -478,6 +538,7 @@ impl PyCase {
                 _ => "none",
             },
         )?;
+        d.set_item("backend", self.inner.solver.backend.label())?;
         Ok(d.unbind())
     }
 
@@ -553,6 +614,7 @@ impl PyCase {
         let analysis = analysis.map_err(to_py)?;
         Ok(PySolution {
             mesh: self.mesh.clone_ref(py),
+            case: case.clone(),
             inner: analysis,
         })
     }
@@ -572,7 +634,65 @@ impl PyCase {
 #[pyclass(name = "Solution", module = "gfem._gfem", frozen)]
 pub struct PySolution {
     mesh: Py<PyMesh>,
+    /// 解いたときのケース。領域統計や実行サマリに σ と領域名が要る
+    case: gfem_core::Case,
     inner: Analysis,
+}
+
+impl PySolution {
+    /// 表示・等値面用の節点値。要素値の量は体積重み平均で節点に移す（SPEC §5.1）。
+    fn nodal_values(&self, quantity: &str) -> PyResult<Vec<f64>> {
+        if quantity == "phi" {
+            return Ok(self.inner.potential.clone());
+        }
+        let f = &self.inner.fields;
+        let element_values = match quantity {
+            "e_magnitude" => &f.e_magnitude,
+            "j_magnitude" => &f.j_magnitude,
+            "power_density" => &f.power_density,
+            other => {
+                return Err(GfemError::new_err(format!(
+                    "未知の量です: \"{other}\"（phi / e_magnitude / j_magnitude / power_density）"
+                )));
+            }
+        };
+        let mesh = &self.mesh.get().inner;
+        Ok(gfem_core::post::nodal_average(
+            mesh,
+            element_values,
+            &f.volume,
+            1,
+        ))
+    }
+}
+
+fn region_stats_dict<'py>(py: Python<'py>, s: &RegionStats) -> PyResult<Bound<'py, PyDict>> {
+    let quantity = |q: &gfem_core::post::QuantityStats| -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        d.set_item("max", q.max)?;
+        d.set_item("mean", q.mean)?;
+        d.set_item("median", q.median)?;
+        d.set_item("p95", q.p95)?;
+        d.set_item("p99", q.p99)?;
+        Ok(d)
+    };
+    let hotspot = PyDict::new(py);
+    hotspot.set_item("element_id", s.hotspot.element_id)?;
+    hotspot.set_item("centroid", s.hotspot.centroid.to_vec())?;
+    hotspot.set_item("j_magnitude", s.hotspot.j_magnitude)?;
+    hotspot.set_item("e_magnitude", s.hotspot.e_magnitude)?;
+
+    let d = PyDict::new(py);
+    d.set_item("pid", s.pid)?;
+    d.set_item("name", s.name.clone())?;
+    d.set_item("sigma", s.sigma)?;
+    d.set_item("n_elements", s.n_elements)?;
+    d.set_item("volume", s.volume)?;
+    d.set_item("power", s.power)?;
+    d.set_item("j_magnitude", quantity(&s.current_density)?)?;
+    d.set_item("e_magnitude", quantity(&s.electric_field)?)?;
+    d.set_item("hotspot", hotspot)?;
+    Ok(d)
 }
 
 #[pymethods]
@@ -737,6 +857,157 @@ impl PySolution {
     #[getter]
     fn warnings(&self) -> Vec<String> {
         self.inner.warnings.clone()
+    }
+
+    /// 領域（PID）ごとの統計（SPEC §5.2）。
+    ///
+    /// パーセンタイルは**体積重み**。要素サイズが不均一なので、
+    /// 要素数ベースの分位点では細かく切られた領域の値が過大に効いてしまう。
+    fn region_stats(&self, py: Python<'_>) -> PyResult<Py<PyList>> {
+        let mesh = &self.mesh.get().inner;
+        let stats = self.inner.region_stats(mesh, &self.case).map_err(to_py)?;
+        let list = PyList::empty(py);
+        for s in &stats {
+            list.append(region_stats_dict(py, s)?)?;
+        }
+        Ok(list.unbind())
+    }
+
+    /// 領域統計を CSV に書き出す（SPEC §5.5）。
+    fn write_region_stats_csv(&self, path: PathBuf) -> PyResult<()> {
+        let mesh = &self.mesh.get().inner;
+        self.inner
+            .write_region_stats_csv(&path, mesh, &self.case)
+            .map_err(to_py)
+    }
+
+    /// 収束履歴を CSV に書き出す。
+    fn write_convergence_csv(&self, path: PathBuf) -> PyResult<()> {
+        self.inner.write_convergence_csv(&path).map_err(to_py)
+    }
+
+    /// 実行サマリ JSON（プロビナンス付き）を書き出す（SPEC §5.5）。
+    ///
+    /// 入力メッシュの SHA-256、ケースファイルの全文、Git のコミットハッシュと
+    /// 作業ツリーの汚れ、実行時刻を記録するので、「この図はどの入力から出たか」を
+    /// 後から追える。
+    #[pyo3(signature = (path, case_text = None))]
+    fn write_summary_json(&self, path: PathBuf, case_text: Option<String>) -> PyResult<()> {
+        let mesh = &self.mesh.get().inner;
+        let mut provenance = Provenance::capture();
+        if let Some(source) = &mesh.source {
+            provenance = provenance.with_mesh(source).map_err(to_py)?;
+        }
+        if let Some(text) = case_text {
+            provenance = provenance.with_case_text(text);
+        }
+        self.inner
+            .write_summary_json(&path, mesh, &self.case, &provenance)
+            .map_err(to_py)
+    }
+
+    /// 実行サマリを JSON 文字列として返す。
+    #[pyo3(signature = (case_text = None))]
+    fn summary_json(&self, case_text: Option<String>) -> PyResult<String> {
+        let mesh = &self.mesh.get().inner;
+        let mut provenance = Provenance::capture();
+        if let Some(source) = &mesh.source {
+            provenance = provenance.with_mesh(source).map_err(to_py)?;
+        }
+        if let Some(text) = case_text {
+            provenance = provenance.with_case_text(text);
+        }
+        Ok(self
+            .inner
+            .summary_json(mesh, &self.case, &provenance)
+            .map_err(to_py)?
+            .to_pretty_string())
+    }
+
+    /// 等値面を Marching Tetrahedra で抽出する（SPEC §6.3）。
+    ///
+    /// `quantity` は `"phi"` / `"e_magnitude"` / `"j_magnitude"` / `"power_density"`。
+    /// 要素値の量は表示のために節点へ体積重み平均してから等値面を取る。
+    /// 戻り値は `(頂点 (n, 3), 三角形 (m, 3), 頂点のスカラー (n,))`。
+    fn iso_surface<'py>(
+        &self,
+        py: Python<'py>,
+        quantity: &str,
+        level: f64,
+    ) -> PyResult<IsoSurfaceArrays<'py>> {
+        let mesh = &self.mesh.get().inner;
+        let values = self.nodal_values(quantity)?;
+        let surface =
+            gfem_core::mesh::iso_surface(mesh, &values, level, &[&values]).map_err(to_py)?;
+        let n_points = surface.n_points();
+        let n_triangles = surface.n_triangles();
+        Ok((
+            surface.points.into_pyarray(py).reshape([n_points, 3])?,
+            surface
+                .triangles
+                .into_pyarray(py)
+                .reshape([n_triangles, 3])?,
+            surface
+                .scalars
+                .into_iter()
+                .next()
+                .unwrap_or_default()
+                .into_pyarray(py),
+        ))
+    }
+
+    /// 指定した量の値域 `(最小, 最大)`。等値面のしきい値を決めるのに使う。
+    fn value_range(&self, quantity: &str) -> PyResult<(f64, f64)> {
+        let values = self.nodal_values(quantity)?;
+        Ok((
+            values.iter().copied().fold(f64::INFINITY, f64::min),
+            values.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+        ))
+    }
+
+    /// 電流のストリームラインを引く（SPEC §6.3）。
+    ///
+    /// Tet4 では J が要素内で一定なので、要素ごとに直線として**厳密に**追跡できる。
+    /// `seeds` は始点の配列 `(k, 3)`。戻り値は折れ線の頂点配列のリスト。
+    #[pyo3(signature = (seeds, direction = "forward", max_steps = 100_000, max_length = f64::INFINITY))]
+    fn streamlines(
+        &self,
+        py: Python<'_>,
+        seeds: Vec<[f64; 3]>,
+        direction: &str,
+        max_steps: usize,
+        max_length: f64,
+    ) -> PyResult<Py<PyList>> {
+        let mesh = &self.mesh.get().inner;
+        let options = TraceOptions {
+            max_steps,
+            max_length,
+            direction: match direction.to_ascii_lowercase().as_str() {
+                "forward" => TraceDirection::Forward,
+                "backward" => TraceDirection::Backward,
+                other => {
+                    return Err(GfemError::new_err(format!(
+                        "未知の向きです: \"{other}\"（forward / backward）"
+                    )));
+                }
+            },
+        };
+        let adjacency = gfem_core::mesh::build_face_adjacency(mesh).map_err(to_py)?;
+        let lines = gfem_core::mesh::trace_streamlines(
+            mesh,
+            &adjacency,
+            &self.inner.fields.current_density,
+            &seeds,
+            &options,
+        )
+        .map_err(to_py)?;
+
+        let out = PyList::empty(py);
+        for line in lines {
+            let n = line.n_points();
+            out.append(line.points.into_pyarray(py).reshape([n, 3])?)?;
+        }
+        Ok(out.unbind())
     }
 
     /// 結果を VTU として書き出す（節点値と要素値の両方を含む）。

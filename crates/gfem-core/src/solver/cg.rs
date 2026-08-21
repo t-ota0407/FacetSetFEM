@@ -254,6 +254,7 @@ fn apply_preconditioner<B: LinearBackend>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::case::Backend;
     use crate::solver::backend::CpuSerial;
 
     /// 1 次元の格子ラプラシアン（全 Neumann）。K = tridiag(−1, 2, −1) の端を 1 にしたもの。
@@ -292,6 +293,7 @@ mod tests {
             tolerance: 1.0e-12,
             max_iterations: 5000,
             preconditioner: Preconditioner::Jacobi,
+            backend: Backend::CpuSerial,
         }
     }
 
@@ -407,6 +409,7 @@ mod tests {
             tolerance: 1.0e-14,
             max_iterations: 3,
             preconditioner: Preconditioner::Jacobi,
+            backend: Backend::CpuSerial,
         };
         let report = solve(&CpuSerial, &k, &f, &mut phi, &opts, None).unwrap();
         assert!(!report.converged);
@@ -426,6 +429,7 @@ mod tests {
             tolerance: 1.0e-12,
             max_iterations: 5000,
             preconditioner: Preconditioner::None,
+            backend: Backend::CpuSerial,
         };
         let report = solve(&CpuSerial, &k, &f, &mut phi, &opts, None).unwrap();
         assert!(report.converged, "{:?}", report.failure_reason());

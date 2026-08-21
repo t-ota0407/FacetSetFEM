@@ -69,6 +69,14 @@ impl CsrMatrix {
         &mut self.values
     }
 
+    /// 構造と値を同時に借りる。
+    ///
+    /// 並列アセンブリで「構造を読みながら値を書く」ために要る。
+    /// 別々のフィールドなので同時に借りても安全。
+    pub fn parts_mut(&mut self) -> (&[usize], &[u32], &mut [f64]) {
+        (&self.row_ptr, &self.col_idx, &mut self.values)
+    }
+
     /// 行 `i` の列番号と値。
     pub fn row(&self, i: usize) -> (&[u32], &[f64]) {
         let (s, e) = (self.row_ptr[i], self.row_ptr[i + 1]);

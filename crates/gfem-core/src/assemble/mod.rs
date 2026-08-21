@@ -1,10 +1,12 @@
 //! 線形システムの組み立て（SPEC §4.1 / §4.2）。
 //!
+//! - [`adjacency`] — 節点 → 要素の表と、それを使った並列アセンブリ
 //! - [`csr`] — CSR スパース行列と、そのグラフの連結性検査
 //! - [`sparsity`] — 非ゼロ構造の構築
 //! - [`stiffness`] — 剛性行列 K のアセンブリ
 //! - [`load`] — 電極荷重ベクトル f の構築
 
+pub mod adjacency;
 pub mod csr;
 pub mod load;
 pub mod sparsity;
@@ -14,6 +16,7 @@ use crate::case::Case;
 use crate::error::Result;
 use crate::mesh::Mesh;
 
+pub use adjacency::{NodeElements, assemble_stiffness_parallel, build_node_elements};
 pub use csr::{CsrMatrix, connected_components, require_connected};
 pub use load::{ElectrodeGeometry, assemble_load};
 pub use sparsity::build_sparsity;
@@ -34,10 +37,18 @@ pub struct LinearSystem {
 ///
 /// ケースの整合性は事前に [`Case::validate`] で検査しておくこと。
 /// ここでは連結性（射影 CG の前提。SPEC §2.2）だけ改めて確認する。
-pub fn assemble(mesh: &Mesh, case: &Case) -> Result<LinearSystem> {
+///
+/// `parallel` が true なら行ごとの並列アセンブリを使う。
+/// **どちらでも同じ行列**になる（[`adjacency`] の説明を参照）。
+pub fn assemble(mesh: &Mesh, case: &Case, parallel: bool) -> Result<LinearSystem> {
     let mut matrix = build_sparsity(mesh)?;
     require_connected(&matrix)?;
-    assemble_stiffness(mesh, &case.conductivity, &mut matrix)?;
+    if parallel {
+        let adjacency = build_node_elements(mesh);
+        assemble_stiffness_parallel(mesh, &case.conductivity, &adjacency, &mut matrix)?;
+    } else {
+        assemble_stiffness(mesh, &case.conductivity, &mut matrix)?;
+    }
     let (load, electrodes) = assemble_load(mesh, case)?;
     Ok(LinearSystem {
         matrix,

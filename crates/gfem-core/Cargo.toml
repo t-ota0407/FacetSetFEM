@@ -8,3 +8,7 @@ description = "GenericFEM のコア。CUDA・Python に一切依存しない（S
 
 [dependencies]
 flate2.workspace = true
+# 入力ファイルのハッシュ（SPEC §5.5 のプロビナンス記録）
+sha2.workspace = true
+# CPU 並列（SPEC §4.4 / §8 M4）
+rayon.workspace = true

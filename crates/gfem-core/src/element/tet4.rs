@@ -9,6 +9,7 @@
 //!
 //! この結果として **E は要素内で完全に一定**（区分定数）になる。
 
+use crate::element::shape::{MAX_ELEMENT_NODES, QuadraturePoint, ShapeFunctions};
 use crate::material::Conductivity;
 
 /// Tet4 の形状関数勾配と体積。
@@ -84,6 +85,48 @@ pub fn tet4_electric_field(shape: &Tet4Shape, phi: &[f64; 4]) -> [f64; 3] {
     }
     e
 }
+
+/// Tet4 の 1 点積分則。∇N が要素内で一定なので 1 点で厳密になる。
+static QUADRATURE: [QuadraturePoint; 1] = [QuadraturePoint {
+    local: [0.25, 0.25, 0.25],
+    // 参照四面体の体積
+    weight: 1.0 / 6.0,
+}];
+
+impl ShapeFunctions for Tet4 {
+    const NODES: usize = 4;
+    const CENTRE: [f64; 3] = [0.25, 0.25, 0.25];
+
+    fn quadrature() -> &'static [QuadraturePoint] {
+        &QUADRATURE
+    }
+
+    fn values(local: [f64; 3]) -> [f64; MAX_ELEMENT_NODES] {
+        let mut out = [0.0f64; MAX_ELEMENT_NODES];
+        out[0] = 1.0 - local[0] - local[1] - local[2];
+        out[1] = local[0];
+        out[2] = local[1];
+        out[3] = local[2];
+        out
+    }
+
+    fn local_gradients(_local: [f64; 3]) -> [[f64; 3]; MAX_ELEMENT_NODES] {
+        let mut out = [[0.0f64; 3]; MAX_ELEMENT_NODES];
+        out[0] = [-1.0, -1.0, -1.0];
+        out[1] = [1.0, 0.0, 0.0];
+        out[2] = [0.0, 1.0, 0.0];
+        out[3] = [0.0, 0.0, 1.0];
+        out
+    }
+}
+
+/// Tet4 の形状関数（[`ShapeFunctions`] 用のマーカー）。
+///
+/// Tet4 は ∇N が要素内で一定なので、共通のアイソパラメトリック経路を通さず
+/// [`tet4_shape`] で直接計算する方が速い。この実装は
+/// 「共通経路と結果が一致すること」をテストで確かめるために置いてある。
+#[derive(Debug, Clone, Copy)]
+pub struct Tet4;
 
 #[inline]
 fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
@@ -211,6 +254,59 @@ mod tests {
                 assert!((v - kq[perm[i]][perm[j]]).abs() < 1e-18);
             }
         }
+    }
+
+    #[test]
+    fn matches_the_common_isoparametric_path() {
+        // 専用の解析的な計算と、共通経路（1 点ガウス積分）が一致することを確かめる。
+        // どちらかを直したときにもう一方とずれたら、ここで落ちる
+        use crate::element::shape::{self, MAX_ELEMENT_NODES};
+        let p = [
+            [0.13, -0.4, 0.7],
+            [1.9, 0.2, -0.3],
+            [-0.5, 2.1, 0.4],
+            [0.3, 0.1, 3.3],
+        ];
+        let sigma = Conductivity::isotropic(0.35).unwrap();
+
+        let direct = tet4_stiffness(&tet4_shape(&p), &sigma);
+        let mut common = [[0.0f64; MAX_ELEMENT_NODES]; MAX_ELEMENT_NODES];
+        let volume = shape::stiffness::<Tet4>(&p, &sigma, &mut common).unwrap();
+
+        assert!((volume - tet4_shape(&p).volume).abs() < 1e-15);
+        for i in 0..4 {
+            for j in 0..4 {
+                assert!(
+                    (direct[i][j] - common[i][j]).abs() < 1e-15 * direct[i][i].abs().max(1.0),
+                    "({i},{j}): {} vs {}",
+                    direct[i][j],
+                    common[i][j]
+                );
+            }
+        }
+
+        // 電界も一致する
+        let phi = [1.0, -2.0, 0.5, 3.0];
+        let a = tet4_electric_field(&tet4_shape(&p), &phi);
+        let b = shape::electric_field::<Tet4>(&p, &phi, Tet4::CENTRE);
+        for d in 0..3 {
+            assert!((a[d] - b[d]).abs() < 1e-13, "{a:?} vs {b:?}");
+        }
+    }
+
+    #[test]
+    fn satisfies_the_common_element_checks() {
+        use crate::element::shape::testing;
+        let p = [
+            [0.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+            [0.3, 1.7, 0.0],
+            [0.4, 0.6, 2.5],
+        ];
+        testing::assert_quadrature_weight(1.0 / 6.0, Tet4::quadrature());
+        testing::assert_partition_of_unity::<Tet4>(&p);
+        testing::assert_reproduces_linear_field::<Tet4>(&p, [1.5, -2.0, 0.25], 7.0);
+        testing::assert_stiffness_properties::<Tet4>(&p, 0.35);
     }
 
     #[test]

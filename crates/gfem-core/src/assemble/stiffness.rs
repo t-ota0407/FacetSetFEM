@@ -1,10 +1,11 @@
 //! 剛性行列のアセンブリ（SPEC §2.3 / §4.1）。
 
 use crate::assemble::csr::CsrMatrix;
-use crate::element::{ElementKind, tet4};
+use crate::element::shape::{self, MAX_ELEMENT_NODES};
+use crate::element::{ElementKind, Hex8, Penta6, tet4};
 use crate::error::{GfemError, Result};
 use crate::material::Conductivity;
-use crate::mesh::{Mesh, PropId};
+use crate::mesh::{ElementRef, Mesh, PropId};
 use std::collections::BTreeMap;
 
 /// 剛性行列 K を組み立てる。
@@ -21,6 +22,7 @@ pub fn assemble_stiffness(
     matrix: &mut CsrMatrix,
 ) -> Result<()> {
     matrix.values_mut().fill(0.0);
+    let mut local = [[0.0f64; MAX_ELEMENT_NODES]; MAX_ELEMENT_NODES];
 
     for e in mesh.iter_solids() {
         let Some(sigma) = conductivity.get(&e.pid) else {
@@ -32,38 +34,81 @@ pub fn assemble_stiffness(
             .with_hint("ケースの materials に該当 PID の σ [S/m] を追加してください"));
         };
 
-        match e.kind {
-            ElementKind::Tet4 => {
-                // SPEC §2.3 Tet4 要素剛性
-                let p = mesh.tet4_coords(e.conn);
-                let shape = tet4::tet4_shape(&p);
-                if shape.volume <= 0.0 {
-                    return Err(GfemError::model("体積がゼロの要素があります")
-                        .with_card("CTETRA")
-                        .with_entity(format!("要素 EID={}", e.id))
-                        .with_hint("退化した四面体です。メッシュ生成側で修正してください"));
-                }
-                let ke = tet4::tet4_stiffness(&shape, sigma);
-                scatter(matrix, e.conn, &ke)?;
+        element_stiffness(mesh, &e, sigma, &mut local)?;
+        scatter(matrix, e.conn, &local)?;
+    }
+    Ok(())
+}
+
+/// 1 要素分の剛性行列を `local` に書く。
+///
+/// 要素種ごとに違うのは形状関数と積分則だけなので、Hex8 / Penta6 は共通の
+/// アイソパラメトリック経路（[`shape::stiffness`]）に流す。Tet4 は ∇N が
+/// 要素内で一定で解析的に書けるため、専用の速い経路を使う（結果は一致することを
+/// `element::tet4` のテストで確認している）。
+pub(crate) fn element_stiffness(
+    mesh: &Mesh,
+    e: &ElementRef<'_>,
+    sigma: &Conductivity,
+    local: &mut [[f64; MAX_ELEMENT_NODES]; MAX_ELEMENT_NODES],
+) -> Result<()> {
+    let mut points = [[0.0f64; 3]; MAX_ELEMENT_NODES];
+    let n = e.conn.len();
+    mesh.gather_coords(e.conn, &mut points[..n]);
+
+    match e.kind {
+        ElementKind::Tet4 => {
+            // SPEC §2.3 Tet4 要素剛性
+            let p = mesh.tet4_coords(e.conn);
+            let shape = tet4::tet4_shape(&p);
+            if shape.volume <= 0.0 {
+                return Err(GfemError::model("体積がゼロの要素があります")
+                    .with_card("CTETRA")
+                    .with_entity(format!("要素 EID={}", e.id))
+                    .with_hint("退化した四面体です。メッシュ生成側で修正してください"));
             }
-            other => {
-                return Err(GfemError::unsupported(format!(
-                    "{} の要素剛性は未実装です",
-                    other.card_name()
-                ))
-                .with_entity(format!("要素 EID={}", e.id))
-                .with_hint(
-                    "v1.0 の M1 時点で解けるのは CTETRA（1 次四面体）だけです。\
-                     CHEXA / CPENTA は M4 で対応します（SPEC §8）",
-                ));
+            let ke = tet4::tet4_stiffness(&shape, sigma);
+            for row in local.iter_mut() {
+                row.fill(0.0);
             }
+            for i in 0..4 {
+                local[i][..4].copy_from_slice(&ke[i]);
+            }
+        }
+        // SPEC §2.3 Hex8 / Penta6 アイソパラメトリック要素剛性
+        ElementKind::Hex8 => {
+            shape::stiffness::<Hex8>(&points[..n], sigma, local)
+                .map_err(|e2| with_element(e2, e))?;
+        }
+        ElementKind::Penta6 => {
+            shape::stiffness::<Penta6>(&points[..n], sigma, local)
+                .map_err(|e2| with_element(e2, e))?;
+        }
+        other => {
+            return Err(GfemError::unsupported(format!(
+                "{} は解析に使えません",
+                other.card_name()
+            ))
+            .with_entity(format!("要素 EID={}", e.id))
+            .with_hint("ソリッド要素は CTETRA / CHEXA / CPENTA に対応しています"));
         }
     }
     Ok(())
 }
 
+/// エラーに要素の情報を足す。
+fn with_element(error: GfemError, e: &ElementRef<'_>) -> GfemError {
+    error
+        .with_card(e.kind.card_name())
+        .with_entity(format!("要素 EID={}", e.id))
+}
+
 /// 要素行列を CSR に足し込む。
-fn scatter(matrix: &mut CsrMatrix, conn: &[u32], ke: &[[f64; 4]; 4]) -> Result<()> {
+fn scatter(
+    matrix: &mut CsrMatrix,
+    conn: &[u32],
+    ke: &[[f64; MAX_ELEMENT_NODES]; MAX_ELEMENT_NODES],
+) -> Result<()> {
     for (i, &row) in conn.iter().enumerate() {
         for (j, &col) in conn.iter().enumerate() {
             let Some(k) = matrix.position(row as usize, col) else {
@@ -148,10 +193,7 @@ CTETRA,11,1,5,4,3,2
         assert!(energy > 0.0, "{energy}");
     }
 
-    #[test]
-    fn hex_elements_are_reported_as_not_yet_implemented() {
-        let mesh = read(
-            "GRID,1,,0.0,0.0,0.0
+    const UNIT_CUBE_HEX: &str = "GRID,1,,0.0,0.0,0.0
 GRID,2,,1.0,0.0,0.0
 GRID,3,,1.0,1.0,0.0
 GRID,4,,0.0,1.0,0.0
@@ -162,11 +204,60 @@ GRID,8,,0.0,1.0,1.0
 PSOLID,1,1
 CHEXA,10,1,1,2,3,4,5,6,+C
 +C,7,8
+";
+
+    #[test]
+    fn hex_elements_are_assembled() {
+        let mesh = read(UNIT_CUBE_HEX);
+        let mut k = build_sparsity(&mesh).unwrap();
+        assemble_stiffness(&mesh, &sigma_map(1, 0.35), &mut k).unwrap();
+        assert!(k.is_symmetric(1e-18));
+
+        // K·1 = 0（SPEC §2.2）
+        let ones = vec![1.0; k.n_rows()];
+        let mut y = vec![0.0; k.n_rows()];
+        k.spmv(&ones, &mut y);
+        assert!(y.iter().all(|v| v.abs() < 1e-16), "K·1 = {y:?}");
+        assert!(k.diagonal().iter().all(|&d| d > 0.0));
+    }
+
+    #[test]
+    fn penta_elements_are_assembled() {
+        let mesh = read(
+            "GRID,1,,0.0,0.0,0.0
+GRID,2,,1.0,0.0,0.0
+GRID,3,,0.0,1.0,0.0
+GRID,4,,0.0,0.0,1.0
+GRID,5,,1.0,0.0,1.0
+GRID,6,,0.0,1.0,1.0
+PSOLID,1,1
+CPENTA,10,1,1,2,3,4,5,6
 ",
         );
         let mut k = build_sparsity(&mesh).unwrap();
-        let e = assemble_stiffness(&mesh, &sigma_map(1, 1.0), &mut k).unwrap_err();
+        assemble_stiffness(&mesh, &sigma_map(1, 0.35), &mut k).unwrap();
+        assert!(k.is_symmetric(1e-18));
+        let ones = vec![1.0; k.n_rows()];
+        let mut y = vec![0.0; k.n_rows()];
+        k.spmv(&ones, &mut y);
+        assert!(y.iter().all(|v| v.abs() < 1e-16));
+    }
+
+    #[test]
+    fn inverted_hex_never_reaches_assembly() {
+        // 上面と底面を入れ替えた CHEXA。読み込み時点で弾かれるので、
+        // アセンブリまで届かない（parse::check_isoparametric_geometry）
+        let e = read_nastran_from(
+            UNIT_CUBE_HEX
+                .replace("CHEXA,10,1,1,2,3,4,5,6", "CHEXA,42,1,5,6,7,8,1,2")
+                .replace("+C,7,8", "+C,3,4")
+                .as_bytes(),
+            Path::new("<test>"),
+            LengthUnit::Meter,
+        )
+        .unwrap_err();
+        assert!(e.to_string().contains("ヤコビアン"), "{e}");
+        assert!(e.to_string().contains("42"), "{e}");
         assert!(e.to_string().contains("CHEXA"), "{e}");
-        assert!(e.to_string().contains("M4"), "{e}");
     }
 }

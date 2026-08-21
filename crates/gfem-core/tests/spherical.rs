@@ -26,7 +26,9 @@
 mod common;
 
 use common::{INNER_PID, OUTER_PID, ShellLayer, centroid, spherical_shell, uniform_shell};
-use gfem_core::case::{Case, Electrode, Preconditioner, ReferencePotential, SolverOptions};
+use gfem_core::case::{
+    Backend, Case, Electrode, Preconditioner, ReferencePotential, SolverOptions,
+};
 use gfem_core::solve;
 use std::f64::consts::PI;
 
@@ -50,6 +52,7 @@ fn case_for(sigmas: &[(u32, f64)]) -> Case {
         tolerance: 1.0e-12,
         max_iterations: 50_000,
         preconditioner: Preconditioner::Jacobi,
+        backend: Backend::CpuSerial,
     };
     // 解析解は φ(R) = 0 と揃えてあるので、基準も外側電極に合わせる
     case.reference = ReferencePotential::CathodeMean;

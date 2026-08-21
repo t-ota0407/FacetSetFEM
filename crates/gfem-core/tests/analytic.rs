@@ -9,7 +9,9 @@
 mod common;
 
 use common::{BOTTOM_PID, Layer, TOP_PID, uniform_slab};
-use gfem_core::case::{Case, Electrode, Preconditioner, ReferencePotential, SolverOptions};
+use gfem_core::case::{
+    Backend, Case, Electrode, Preconditioner, ReferencePotential, SolverOptions,
+};
 use gfem_core::{Analysis, solve};
 
 const CURRENT: f64 = 2.0e-3; // A
@@ -22,6 +24,7 @@ fn tight_solver() -> SolverOptions {
         tolerance: 1.0e-13,
         max_iterations: 20_000,
         preconditioner: Preconditioner::Jacobi,
+        backend: Backend::CpuSerial,
     }
 }
 

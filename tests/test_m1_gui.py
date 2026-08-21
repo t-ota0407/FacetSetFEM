@@ -222,7 +222,8 @@ def test_solve_runs_in_a_worker_thread_and_updates_the_ui(window, qt_app):
 
 def test_view_and_screenshot(window, tmp_path):
     window.refresh_view()
-    window.page_result.slice_enabled.setChecked(True)
+    index = window.page_result.mode.findData("slice")
+    window.page_result.mode.setCurrentIndex(index)
     window.refresh_view()
     png = tmp_path / "view.png"
     window.screenshot(png)

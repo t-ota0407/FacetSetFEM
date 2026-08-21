@@ -71,6 +71,42 @@ fn dot_block(a: &[f64], b: &[f64]) -> f64 {
     acc
 }
 
+/// 並列版の総和。逐次版と**ビット単位で一致する**。
+///
+/// ブロック和は互いに独立なので、どのスレッドが計算しても値は同じ。
+/// 集約はブロック和の列に対して逐次版と同じ規則で行うので、木の形も変わらない。
+pub fn par_sum(v: &[f64]) -> f64 {
+    use rayon::prelude::*;
+    if v.len() <= BLOCK {
+        return sum_block(v);
+    }
+    let partial: Vec<f64> = v.par_chunks(BLOCK).map(sum_block).collect();
+    sum(&partial)
+}
+
+/// 並列版の内積。逐次版と**ビット単位で一致する**。
+pub fn par_dot(a: &[f64], b: &[f64]) -> f64 {
+    use rayon::prelude::*;
+    debug_assert_eq!(a.len(), b.len());
+    if a.len() <= BLOCK {
+        return dot_block(a, b);
+    }
+    let partial: Vec<f64> = a
+        .par_chunks(BLOCK)
+        .zip(b.par_chunks(BLOCK))
+        .map(|(x, y)| dot_block(x, y))
+        .collect();
+    sum(&partial)
+}
+
+/// 並列版の平均。逐次版と**ビット単位で一致する**。
+pub fn par_mean(v: &[f64]) -> f64 {
+    if v.is_empty() {
+        return 0.0;
+    }
+    par_sum(v) / v.len() as f64
+}
+
 /// 決定的な 2 ノルム。
 pub fn norm2(v: &[f64]) -> f64 {
     dot(v, v).sqrt()
@@ -141,6 +177,18 @@ mod tests {
         let v = vec![2.5; 3000];
         assert!((mean(&v) - 2.5).abs() < 1e-15);
         assert!((norm2(&[3.0, 4.0]) - 5.0).abs() < 1e-15);
+    }
+
+    #[test]
+    fn parallel_matches_serial_bitwise() {
+        // CLAUDE.md 設計原則 1: 並列化しても結果が変わってはいけない
+        for n in [0, 1, 511, 512, 513, 4096, 100_000] {
+            let a: Vec<f64> = (0..n).map(|i| (i as f64).sin() * 1e3).collect();
+            let b: Vec<f64> = (0..n).map(|i| 1.0 / (i as f64 + 1.0)).collect();
+            assert_eq!(par_sum(&a), sum(&a), "n = {n}");
+            assert_eq!(par_dot(&a, &b), dot(&a, &b), "n = {n}");
+            assert_eq!(par_mean(&a), mean(&a), "n = {n}");
+        }
     }
 
     #[test]

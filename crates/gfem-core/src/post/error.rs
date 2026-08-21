@@ -236,8 +236,10 @@ fn finish(squared_error: f64, squared_reference: f64, gauge_shift: f64) -> Error
 
 fn require_tet4(mesh: &Mesh) -> Result<&crate::mesh::ElementBlock> {
     mesh.block(ElementKind::Tet4).ok_or_else(|| {
-        GfemError::unsupported("誤差評価は 1 次四面体（CTETRA）のみに対応しています")
-            .with_hint("Hex8 / Penta6 の対応は M4 で追加します（SPEC §8）")
+        GfemError::unsupported("誤差評価は 1 次四面体（CTETRA）のみに対応しています").with_hint(
+            "要素種が混ざったメッシュでは、隣り合う要素が共有する四角形面で\
+                 同じ対角線を選ぶ四面体分割が要ります。M7 で対応します（SPEC §5.1 / §8）",
+        )
     })
 }
 

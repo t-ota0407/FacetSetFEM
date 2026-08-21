@@ -17,7 +17,9 @@
 mod common;
 
 use common::{INNER_PID, OUTER_PID, uniform_shell};
-use gfem_core::case::{Case, Electrode, Preconditioner, ReferencePotential, SolverOptions};
+use gfem_core::case::{
+    Backend, Case, Electrode, Preconditioner, ReferencePotential, SolverOptions,
+};
 use gfem_core::post::{convergence_order, l2_error_field, l2_error_potential, mean_element_size};
 use gfem_core::{Mesh, solve};
 use std::f64::consts::PI;
@@ -39,6 +41,7 @@ fn case() -> Case {
         tolerance: 1.0e-12,
         max_iterations: 100_000,
         preconditioner: Preconditioner::Jacobi,
+        backend: Backend::CpuSerial,
     };
     case.reference = ReferencePotential::CathodeMean;
     case

@@ -3,6 +3,7 @@
 //! 内部のメッシュ表現をファイル形式から独立させ、形式ごとにモジュールを分ける
 //! （SPEC §9「他のメッシュ形式」への備え）。
 
+pub mod json;
 pub mod nastran;
 pub mod vtu;
 

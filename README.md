@@ -10,13 +10,15 @@
 
 | フェーズ | 状態 |
 |---|---|
-| 仕様策定 | **完了**（SPEC.md v0.5） |
+| 仕様策定 | **完了**（SPEC.md v0.7） |
 | 開発環境構築 | **完了**（2026-08-18） |
 | M0: 骨組み | **完了**（2026-08-19） |
 | M1: 体験一周（GUI で solve まで） | **完了**（2026-08-20） |
 | M2: 検証（解析解・収束次数） | **完了**（2026-08-20） |
-| M3: ポスト処理の充実 | **未着手 ← 次はここから** |
-| M4 以降 | 未着手 |
+| M3: ポスト処理の充実 | **完了**（2026-08-20） |
+| M4: 要素拡張と CPU 並列 | **完了**（2026-08-21） |
+| M5: CUDA バックエンド | **未着手 ← 次はここから** |
+| M6 以降 | 未着手 |
 
 マイルストーンの定義は SPEC.md §8 を参照。
 
@@ -45,7 +47,13 @@ result = case.solve()
 print(result)                    # <Solution iterations=94 residual=7.12e-11 R=206.3933 ohm>
 print(result.impedance)          # 電極間の等価抵抗 [Ω]
 print(result.j_magnitude.max())  # |J| の最大 [A/m²]（要素値）
-result.write_vtu("out.vtu")      # ParaView で開ける
+
+for s in result.region_stats():  # 領域ごとの統計（体積重みパーセンタイル）
+    print(s["name"], s["j_magnitude"]["p99"], s["hotspot"]["element_id"])
+
+result.write_vtu("out.vtu")              # ParaView で開ける
+result.write_region_stats_csv("stats.csv")
+result.write_summary_json("summary.json")  # 入力ハッシュ・Git の状態つき
 ```
 
 ケースファイル（YAML）から一括で:
@@ -66,9 +74,31 @@ result = gfem.Study.load("tests/models/slab_3layer.yaml").solve()
 | VTU 出力（節点値・要素値の両方、zlib 圧縮） | ✔ |
 | GUI（領域ハイライト・電極選択・断面スライス・収束曲線） | ✔ |
 | ケースファイル（YAML）の保存・読込 | ✔ |
-| Hex8 / Penta6 の要素剛性 | M4 |
-| CPU 並列 / CUDA | M4 / M5 |
-| 領域統計 CSV・等値面・プロビナンス JSON | M3 |
+| 領域統計 CSV（体積重みパーセンタイル・ホットスポット） | ✔ |
+| 等値面（Marching Tetrahedra）・ストリームライン・クリップ | ✔ |
+| プロビナンス JSON（入力ハッシュ・Git の状態・実行時刻） | ✔ |
+| Hex8 / Penta6 の要素剛性（CHEXA / CPENTA） | ✔ |
+| CORD2R / CORD2C / CORD2S の座標変換 | ✔ |
+| CPU 並列（rayon。逐次とビット単位で一致） | ✔ |
+| 等値面・流線・面隣接・L2 誤差評価の Hex8 / Penta6 対応 | M7 |
+| CUDA | M5 |
+| AMG 前処理 | M6 |
+
+### 規模と速度（M4 実測）
+
+20 コア、release ビルド、3 層スラブ（tol = 1e-10）。逐次と並列は**ビット単位で同じ答え**を出す。
+
+| 節点 | 四面体 | 反復 | 逐次 [s] | 並列 [s] | 倍率 |
+|---|---|---|---|---|---|
+| 14,973 | 79,200 | 232 | 0.150 | 0.147 | 1.02 |
+| 151,470 | 855,360 | 421 | 2.95 | 0.91 | 3.2 |
+| 602,775 | 3,474,240 | 633 | 18.2 | 4.3 | 4.2 |
+
+`solver.backend` は `auto`（既定。2 万節点以上で並列）/ `cpu` / `cpu_parallel`。
+
+```bash
+cargo test --release -p gfem-core --test scaling -- --ignored --nocapture
+```
 
 ### 正しさの裏づけ（M2）
 
@@ -179,13 +209,14 @@ Cargo.toml            ワークスペース
 pyproject.toml        maturin（Rust 拡張）と pytest の設定
 crates/
   gfem-core/          Rust コア。CUDA・Python に一切依存しない
-    src/element/      要素の種類・幾何量・Tet4 の要素剛性・面積分
-    src/mesh/         メッシュ表現、ID 索引、外表面抽出
-    src/io/nastran/   バルクデータパーサ（field / reader / parse の 3 層）
+    src/element/      形状関数 trait（shape）、tet4 / hex8 / penta6、面積分
+    src/mesh/         メッシュ表現、ID 索引、外表面抽出、等値面、流線
+    src/io/nastran/   バルクデータパーサ（field / reader / parse / coord の 4 層）
     src/io/vtu.rs     VTU ライタ
-    src/assemble/     CSR、非ゼロ構造、剛性・荷重のアセンブリ
-    src/solver/       決定的リダクション、バックエンド trait、射影 CG
-    src/post/         E・J・保存則チェック・解析解との誤差評価
+    src/assemble/     CSR、非ゼロ構造、剛性・荷重のアセンブリ、並列アセンブリ
+    src/solver/       決定的リダクション、バックエンド trait（逐次 / 並列）、射影 CG
+    src/post/         E・J・保存則チェック・領域統計・解析解との誤差評価
+    src/provenance.rs 入力ハッシュ・Git の状態・実行時刻
     src/analysis.rs   SPEC §4.1 の流れを通す入口
   gfem-cuda/          CUDA バックエンド（M5 で作る。未作成）
   gfem-py/            PyO3 バインディング
@@ -198,16 +229,27 @@ tests/                Python テストとサンプルモデル
 
 ---
 
-## 次にやること（M3）
+## 次にやること（M5）
 
-SPEC.md §8 の M3「ポスト処理の充実」。
+SPEC.md §8 の M5「CUDA バックエンド」。目標は 1000 万節点が回ること。
 
-1. 領域統計 CSV（体積重みパーセンタイル。SPEC §5.2）
-2. 等値面（Marching Tetrahedra）、ストリームライン、クリップ
-3. 節点値／要素値の切り替えと、最大値評価に関する注意表示
-4. プロビナンス JSON（入力ハッシュ・設定・環境・時間。SPEC §5.5）
+1. `gfem-cuda` クレートを作り、cudarc で f64 の CSR SpMV と CG を実装する
+2. CSR と作業ベクトルを VRAM に常駐させる
+3. 内積は決定的な階層リダクション（CPU 版と同じ固定ブロック分割）
+4. VRAM 不足・GPU 非搭載のときは CPU へ自動フォールバックし、ログに明記する
+5. **CPU 版と GPU 版がビット単位で一致することをテストする**
 
-電極間インピーダンスは M1 で先に入れてある。
+`LinearBackend` はいま `&[f64]` のスライスを受け渡している。GPU ではベクトルが
+デバイスメモリに載るので、trait に「ベクトル表現」の関連型を持たせる変更が要る見込み
+（SPEC §4.4）。CG 本体が全てのベクトル演算をこの trait 経由で行っているので、
+その変更は trait 定義と CG のシグネチャに閉じる。
+
+### M4 から持ち越したもの
+
+等値面・流線・面隣接・L2 誤差評価は Tet4 専用のまま。要素種を混ぜるには
+**面共役な四面体分割**（隣り合う要素が共有する四角形面で同じ対角線を選ぶ分割）が
+必要で、選び方がずれると等値面に隙間ができ流線の追跡も壊れる。M7 で対応する
+（SPEC §5.1 / §8）。**解く・数える・書き出す・GUI で表示する経路は要素種を選ばない。**
 
 ---
 

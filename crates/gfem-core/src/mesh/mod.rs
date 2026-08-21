@@ -9,6 +9,8 @@
 //! という利点がある。
 
 pub mod idmap;
+pub mod isosurface;
+pub mod streamline;
 pub mod topology;
 
 use crate::element::{ElementKind, max_edge_length, tet4_signed_volume};
@@ -16,7 +18,9 @@ use crate::units::LengthUnit;
 use std::path::PathBuf;
 
 pub use idmap::IdMap;
-pub use topology::{Surface, SurfaceFace, extract_surface};
+pub use isosurface::{TriangleMesh, iso_surface};
+pub use streamline::{Streamline, TraceDirection, TraceOptions, trace_streamlines};
+pub use topology::{FaceAdjacency, Surface, SurfaceFace, build_face_adjacency, extract_surface};
 
 /// Nastran の節点 ID。
 pub type NodeId = u32;
@@ -249,6 +253,31 @@ impl Mesh {
         iter_blocks(&self.solids)
     }
 
+    /// 通し番号でソリッド要素を引く。
+    ///
+    /// ブロック数は要素種の数だけ（高々 3 個）なので、線形に探しても十分速い。
+    ///
+    /// # パニック
+    ///
+    /// 範囲外の通し番号を渡すとパニックする。
+    pub fn solid(&self, index: usize) -> ElementRef<'_> {
+        let mut offset = 0;
+        for block in &self.solids {
+            if index < offset + block.len() {
+                let i = index - offset;
+                return ElementRef {
+                    index,
+                    kind: block.kind(),
+                    id: block.ids()[i],
+                    pid: block.pids()[i],
+                    conn: block.conn_of(i),
+                };
+            }
+            offset += block.len();
+        }
+        panic!("ソリッド要素の通し番号が範囲外です: {index}");
+    }
+
     /// 全シェル要素（電極候補面）を通し番号つきで走査する。
     pub fn iter_shells(&self) -> impl Iterator<Item = ElementRef<'_>> {
         iter_blocks(&self.shells)
@@ -261,6 +290,19 @@ impl Mesh {
         for (o, &n) in out.iter_mut().zip(conn) {
             *o = self.nodes.coord(n);
         }
+    }
+
+    /// 接続から要素の重心（m）を求める。
+    pub fn element_centroid(&self, conn: &[NodeIndex]) -> [f64; 3] {
+        let mut c = [0.0f64; 3];
+        let scale = 1.0 / conn.len() as f64;
+        for &n in conn {
+            let p = self.nodes.coord(n);
+            for (d, cd) in c.iter_mut().enumerate() {
+                *cd += scale * p[d];
+            }
+        }
+        c
     }
 
     /// Tet4 要素の 4 節点座標（m）。

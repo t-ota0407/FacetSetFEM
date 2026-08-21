@@ -1,15 +1,22 @@
-//! ポスト処理: 導出量と保存則チェック（SPEC §5）、解析解との誤差評価（SPEC §8 M2）。
+//! ポスト処理: 導出量と保存則チェック（SPEC §5）、領域統計（SPEC §5.2）、
+//! 解析解との誤差評価（SPEC §8 M2）。
 
 pub mod error;
+pub mod stats;
 
 pub use error::{
     ErrorNorms, convergence_order, l2_error_field, l2_error_potential, mean_element_size,
+};
+pub use stats::{
+    Hotspot, QuantityStats, RegionStats, region_stats, total_stats, write_convergence_csv,
+    write_region_stats_csv,
 };
 
 use crate::assemble::csr::CsrMatrix;
 use crate::assemble::load::ElectrodeGeometry;
 use crate::case::ElectrodeRole;
-use crate::element::{ElementKind, tet4};
+use crate::element::shape::{self, MAX_ELEMENT_NODES, ShapeFunctions};
+use crate::element::{ElementKind, Hex8, Penta6, tet4};
 use crate::error::{GfemError, Result};
 use crate::material::Conductivity;
 use crate::mesh::{Mesh, PropId};
@@ -85,24 +92,36 @@ pub fn compute_fields(
                 format!("PID={} に導電率が設定されていません", e.pid),
             ));
         };
+        let n = e.conn.len();
+        let mut points = [[0.0f64; 3]; MAX_ELEMENT_NODES];
+        mesh.gather_coords(e.conn, &mut points[..n]);
+        let mut nodal = [0.0f64; MAX_ELEMENT_NODES];
+        for (k, &node) in e.conn.iter().enumerate() {
+            nodal[k] = phi[node as usize];
+        }
+
+        // Tet4 は E が要素内で一定。Hex8 / Penta6 は要素内で変化するので、
+        // 要素の代表値としては**中心での値**を採る（SPEC §5.1）
         let (field, volume) = match e.kind {
             ElementKind::Tet4 => {
                 let p = mesh.tet4_coords(e.conn);
                 let shape = tet4::tet4_shape(&p);
-                let nodal = [
-                    phi[e.conn[0] as usize],
-                    phi[e.conn[1] as usize],
-                    phi[e.conn[2] as usize],
-                    phi[e.conn[3] as usize],
-                ];
+                let nodal = [nodal[0], nodal[1], nodal[2], nodal[3]];
                 (tet4::tet4_electric_field(&shape, &nodal), shape.volume)
             }
+            ElementKind::Hex8 => (
+                shape::electric_field::<Hex8>(&points[..n], &nodal[..n], Hex8::CENTRE),
+                shape::volume::<Hex8>(&points[..n])?,
+            ),
+            ElementKind::Penta6 => (
+                shape::electric_field::<Penta6>(&points[..n], &nodal[..n], Penta6::CENTRE),
+                shape::volume::<Penta6>(&points[..n])?,
+            ),
             other => {
                 return Err(GfemError::unsupported(format!(
-                    "{} のポスト処理は未実装です",
+                    "{} はソリッド要素として扱えません",
                     other.card_name()
-                ))
-                .with_hint("M1 時点で解けるのは CTETRA だけです（SPEC §8）"));
+                )));
             }
         };
         let j = sigma.apply(field);

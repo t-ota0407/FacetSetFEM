@@ -9,8 +9,12 @@
 //! | バックエンド | 状態 |
 //! |---|---|
 //! | [`CpuSerial`] | M1 で実装 |
-//! | `CpuParallel`（rayon） | M4 |
+//! | [`CpuParallel`]（rayon） | M4 で実装 |
 //! | `Cuda`（cudarc） | M5 |
+//!
+//! **[`CpuSerial`] と [`CpuParallel`] はビット単位で同じ結果を出す。**
+//! 総和は [`reduce`] の固定ブロック分割で行うので、どのスレッドがどのブロックを
+//! 担当しても値が変わらない。SpMV も行ごとに独立なので順序の問題が起きない。
 //!
 //! # M5 に向けた注意
 //!
@@ -109,6 +113,104 @@ impl LinearBackend for CpuSerial {
     }
 }
 
+/// CPU 並列バックエンド（rayon）。
+///
+/// [`CpuSerial`] と**ビット単位で同じ結果**を出す。総和は固定ブロック分割
+/// （[`reduce::par_sum`]）、SpMV は行ごとに独立なので、担当の割り振り方に
+/// 結果が依存しない。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CpuParallel;
+
+/// 並列処理で 1 タスクが担当する要素数。小さすぎるとタスク投入の方が高くつく。
+const CHUNK: usize = 4096;
+
+impl LinearBackend for CpuParallel {
+    fn name(&self) -> &'static str {
+        "cpu_parallel"
+    }
+
+    fn spmv(&self, a: &CsrMatrix, x: &[f64], y: &mut [f64]) {
+        use rayon::prelude::*;
+        debug_assert_eq!(x.len(), a.n_rows());
+        let (row_ptr, col_idx, values) = (a.row_ptr(), a.col_idx(), a.values());
+        y.par_chunks_mut(CHUNK)
+            .enumerate()
+            .for_each(|(chunk, out)| {
+                let offset = chunk * CHUNK;
+                for (local, yi) in out.iter_mut().enumerate() {
+                    let i = offset + local;
+                    let (s, e) = (row_ptr[i], row_ptr[i + 1]);
+                    // 行内は列番号の昇順に逐次加算（逐次版と同じ順序）
+                    let mut acc = 0.0;
+                    for k in s..e {
+                        acc += values[k] * x[col_idx[k] as usize];
+                    }
+                    *yi = acc;
+                }
+            });
+    }
+
+    fn axpy(&self, alpha: f64, x: &[f64], y: &mut [f64]) {
+        use rayon::prelude::*;
+        debug_assert_eq!(x.len(), y.len());
+        y.par_chunks_mut(CHUNK)
+            .zip(x.par_chunks(CHUNK))
+            .for_each(|(out, xs)| {
+                for (yi, &xi) in out.iter_mut().zip(xs) {
+                    *yi += alpha * xi;
+                }
+            });
+    }
+
+    fn xpby(&self, x: &[f64], beta: f64, y: &mut [f64]) {
+        use rayon::prelude::*;
+        debug_assert_eq!(x.len(), y.len());
+        y.par_chunks_mut(CHUNK)
+            .zip(x.par_chunks(CHUNK))
+            .for_each(|(out, xs)| {
+                for (yi, &xi) in out.iter_mut().zip(xs) {
+                    *yi = xi + beta * *yi;
+                }
+            });
+    }
+
+    fn dot(&self, x: &[f64], y: &[f64]) -> f64 {
+        reduce::par_dot(x, y)
+    }
+
+    fn scale(&self, alpha: f64, x: &mut [f64]) {
+        use rayon::prelude::*;
+        x.par_chunks_mut(CHUNK).for_each(|chunk| {
+            for xi in chunk {
+                *xi *= alpha;
+            }
+        });
+    }
+
+    fn multiply(&self, a: &[f64], x: &[f64], y: &mut [f64]) {
+        use rayon::prelude::*;
+        debug_assert_eq!(a.len(), x.len());
+        y.par_chunks_mut(CHUNK)
+            .zip(a.par_chunks(CHUNK))
+            .zip(x.par_chunks(CHUNK))
+            .for_each(|((out, av), xv)| {
+                for ((yi, &ai), &xi) in out.iter_mut().zip(av).zip(xv) {
+                    *yi = ai * xi;
+                }
+            });
+    }
+
+    fn project_mean_zero(&self, x: &mut [f64]) {
+        use rayon::prelude::*;
+        let m = reduce::par_mean(x);
+        x.par_chunks_mut(CHUNK).for_each(|chunk| {
+            for xi in chunk {
+                *xi -= m;
+            }
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -141,6 +243,84 @@ mod tests {
             "2 回目の射影で {shift} 動きました（許容 {}）",
             16.0 * f64::EPSILON * scale
         );
+    }
+
+    /// 3 重対角行列（テスト用）。
+    fn tridiagonal(n: usize) -> CsrMatrix {
+        let mut row_ptr = vec![0usize];
+        let mut col_idx: Vec<u32> = Vec::new();
+        let mut values: Vec<f64> = Vec::new();
+        for i in 0..n {
+            for (c, v) in [(i.wrapping_sub(1), -1.0), (i, 2.0), (i + 1, -1.0)] {
+                if c < n {
+                    col_idx.push(c as u32);
+                    values.push(v);
+                }
+            }
+            row_ptr.push(col_idx.len());
+        }
+        let mut m = CsrMatrix::from_structure(n, row_ptr, col_idx);
+        m.values_mut().copy_from_slice(&values);
+        m
+    }
+
+    #[test]
+    fn parallel_backend_matches_serial_bitwise() {
+        // CLAUDE.md 設計原則 1: CPU 逐次と CPU 並列でビット単位で同じ結果
+        let n = 20_000;
+        let matrix = tridiagonal(n);
+        let x: Vec<f64> = (0..n).map(|i| (i as f64 * 0.37).sin()).collect();
+        let z: Vec<f64> = (0..n).map(|i| 1.0 / (i as f64 + 1.0)).collect();
+
+        let (serial, parallel) = (CpuSerial, CpuParallel);
+
+        let mut ys = vec![0.0; n];
+        let mut yp = vec![0.0; n];
+        serial.spmv(&matrix, &x, &mut ys);
+        parallel.spmv(&matrix, &x, &mut yp);
+        assert_eq!(ys, yp, "SpMV");
+
+        assert_eq!(serial.dot(&x, &z), parallel.dot(&x, &z), "内積");
+        assert_eq!(serial.norm2(&x), parallel.norm2(&x), "ノルム");
+
+        let mut a = x.clone();
+        let mut b = x.clone();
+        serial.axpy(1.5, &z, &mut a);
+        parallel.axpy(1.5, &z, &mut b);
+        assert_eq!(a, b, "axpy");
+
+        serial.xpby(&z, 0.25, &mut a);
+        parallel.xpby(&z, 0.25, &mut b);
+        assert_eq!(a, b, "xpby");
+
+        serial.scale(0.5, &mut a);
+        parallel.scale(0.5, &mut b);
+        assert_eq!(a, b, "scale");
+
+        let mut c = vec![0.0; n];
+        let mut d = vec![0.0; n];
+        serial.multiply(&z, &x, &mut c);
+        parallel.multiply(&z, &x, &mut d);
+        assert_eq!(c, d, "multiply");
+
+        let mut e = x.clone();
+        let mut f = x.clone();
+        serial.project_mean_zero(&mut e);
+        parallel.project_mean_zero(&mut f);
+        assert_eq!(e, f, "射影");
+    }
+
+    #[test]
+    fn parallel_backend_handles_sizes_that_are_not_multiples_of_the_chunk() {
+        for n in [1usize, 7, CHUNK - 1, CHUNK, CHUNK + 1] {
+            let matrix = tridiagonal(n);
+            let x: Vec<f64> = (0..n).map(|i| i as f64).collect();
+            let mut ys = vec![0.0; n];
+            let mut yp = vec![0.0; n];
+            CpuSerial.spmv(&matrix, &x, &mut ys);
+            CpuParallel.spmv(&matrix, &x, &mut yp);
+            assert_eq!(ys, yp, "n = {n}");
+        }
     }
 
     #[test]

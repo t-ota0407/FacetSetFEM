@@ -2,11 +2,19 @@
 //!
 //! M0 の時点では「要素の識別」と「幾何チェックに必要な最小限の量」だけを持つ。
 //! 要素剛性（SPEC §2.3）は要素種ごとのサブモジュールに置く:
-//! Tet4 は [`tet4`]（M1）、Hex8 / Penta6 は M4 で追加する。
+//! [`tet4`]・[`hex8`]・[`penta6`]。共通のアイソパラメトリック処理は [`shape`] にあり、
+//! 新しい要素種は [`ShapeFunctions`] を実装したファイルを 1 つ足すだけで入る（SPEC §7）。
 //! 面要素（電極荷重に使う）は [`shell`]。
 
+pub mod hex8;
+pub mod penta6;
+pub mod shape;
 pub mod shell;
 pub mod tet4;
+
+pub use hex8::Hex8;
+pub use penta6::Penta6;
+pub use shape::{MAX_ELEMENT_NODES, QuadraturePoint, ShapeFunctions};
 
 /// 対応する要素の種類（SPEC §1.3 / §3.1）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -66,6 +74,23 @@ impl ElementKind {
             ElementKind::Hex8 => 12,
             ElementKind::Tria3 => 5,
             ElementKind::Quad4 => 9,
+        }
+    }
+
+    /// VTK のセルに書くときの節点の並び替え（局所節点番号）。
+    ///
+    /// CTETRA / CHEXA / CTRIA3 / CQUAD4 は VTK と同じ並びだが、
+    /// **CPENTA だけは向きが逆**。VTK_WEDGE は 1 枚目の三角形の法線が
+    /// 2 枚目の三角形から**遠ざかる**向きを要求するのに対し、Nastran の CPENTA は
+    /// G1〜G3 の法線が G4〜G6 の側を向く。そのまま書くと ParaView 側で
+    /// 体積が負の反転セルになるため、三角形の 2 番目と 3 番目を入れ替える。
+    pub const fn vtk_node_order(self) -> &'static [usize] {
+        match self {
+            ElementKind::Tet4 => &[0, 1, 2, 3],
+            ElementKind::Penta6 => &[0, 2, 1, 3, 5, 4],
+            ElementKind::Hex8 => &[0, 1, 2, 3, 4, 5, 6, 7],
+            ElementKind::Tria3 => &[0, 1, 2],
+            ElementKind::Quad4 => &[0, 1, 2, 3],
         }
     }
 
@@ -230,5 +255,67 @@ mod tests {
     fn max_edge_of_unit_cube_diagonal() {
         let p = [[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]];
         assert!((max_edge_length(&p) - 3.0f64.sqrt()).abs() < 1e-15);
+    }
+
+    #[test]
+    fn vtk_node_order_is_a_permutation() {
+        for kind in [
+            ElementKind::Tet4,
+            ElementKind::Penta6,
+            ElementKind::Hex8,
+            ElementKind::Tria3,
+            ElementKind::Quad4,
+        ] {
+            let order = kind.vtk_node_order();
+            assert_eq!(order.len(), kind.node_count(), "{kind:?}");
+            let mut sorted = order.to_vec();
+            sorted.sort_unstable();
+            assert!(
+                sorted.iter().copied().eq(0..kind.node_count()),
+                "{kind:?}: {order:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn wedge_is_flipped_for_vtk() {
+        // VTK_WEDGE は 1 枚目の三角形の法線が 2 枚目の三角形から**遠ざかる**向きを
+        // 要求する。Nastran の CPENTA は逆（G1〜G3 の法線が G4〜G6 の側を向く）なので、
+        // そのまま書くと ParaView で体積が負の反転セルになる
+        let cpenta = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [1.0, 0.0, 1.0],
+            [0.0, 1.0, 1.0],
+        ];
+        // 1 枚目の三角形の法線と、2 枚目へ向かうベクトルの内積
+        let facing = |p: &[[f64; 3]; 6]| {
+            let u = [p[1][0] - p[0][0], p[1][1] - p[0][1], p[1][2] - p[0][2]];
+            let v = [p[2][0] - p[0][0], p[2][1] - p[0][1], p[2][2] - p[0][2]];
+            let n = [
+                u[1] * v[2] - u[2] * v[1],
+                u[2] * v[0] - u[0] * v[2],
+                u[0] * v[1] - u[1] * v[0],
+            ];
+            let w = [p[3][0] - p[0][0], p[3][1] - p[0][1], p[3][2] - p[0][2]];
+            n[0] * w[0] + n[1] * w[1] + n[2] * w[2]
+        };
+        assert!(facing(&cpenta) > 0.0, "CPENTA の前提が変わっています");
+
+        let order = ElementKind::Penta6.vtk_node_order();
+        let mut vtk = [[0.0f64; 3]; 6];
+        for (i, &local) in order.iter().enumerate() {
+            vtk[i] = cpenta[local];
+        }
+        assert!(facing(&vtk) < 0.0, "VTK_WEDGE の向きになっていません");
+
+        // 他の要素は並び替え不要
+        assert_eq!(ElementKind::Tet4.vtk_node_order(), &[0, 1, 2, 3]);
+        assert_eq!(
+            ElementKind::Hex8.vtk_node_order(),
+            &[0, 1, 2, 3, 4, 5, 6, 7]
+        );
     }
 }

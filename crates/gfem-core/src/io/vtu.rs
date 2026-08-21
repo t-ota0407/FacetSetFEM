@@ -191,10 +191,12 @@ pub fn write_vtu(
     for block in mesh.blocks() {
         let nn = block.kind().node_count();
         let ty = block.kind().vtk_cell_type();
-        for &node in block.conn() {
-            connectivity.push(node as i64);
-        }
-        for _ in 0..block.len() {
+        let order = block.kind().vtk_node_order();
+        for e in 0..block.len() {
+            let conn = block.conn_of(e);
+            for &local in order {
+                connectivity.push(conn[local] as i64);
+            }
             acc += nn as i64;
             offsets.push(acc);
             types.push(ty);

@@ -85,6 +85,273 @@ pub fn box_mesh(
     cell_pid: &[PropId],
     patches: &[Patch],
 ) -> Mesh {
+    box_mesh_of(ElementKind::Tet4, xs, ys, zs, cell_pid, patches)
+}
+
+/// 要素種を選んで直方体メッシュを作る（SPEC §8 M4 の検証用）。
+///
+/// - `Tet4`: Kuhn の 6 分割。電極面は CTRIA3
+/// - `Hex8`: 格子セルをそのまま 1 要素に。電極面は CQUAD4
+/// - `Penta6`: セルを対角線で 2 つの三角柱に割る。電極面は CTRIA3
+///
+/// どの分け方でも「セルごとに同じ規則で対角線を選ぶ」ので適合メッシュになる。
+pub fn box_mesh_of(
+    kind: ElementKind,
+    xs: &[f64],
+    ys: &[f64],
+    zs: &[f64],
+    cell_pid: &[PropId],
+    patches: &[Patch],
+) -> Mesh {
+    match kind {
+        ElementKind::Tet4 => box_mesh_tet4(xs, ys, zs, cell_pid, patches),
+        ElementKind::Hex8 => box_mesh_hex8(xs, ys, zs, cell_pid, patches),
+        ElementKind::Penta6 => box_mesh_penta6(xs, ys, zs, cell_pid, patches),
+        other => panic!("ソリッド要素ではありません: {other:?}"),
+    }
+}
+
+/// 直方体を六面体そのままで刻む。電極面は CQUAD4。
+fn box_mesh_hex8(
+    xs: &[f64],
+    ys: &[f64],
+    zs: &[f64],
+    cell_pid: &[PropId],
+    patches: &[Patch],
+) -> Mesh {
+    let (nx, ny, nz) = (xs.len() - 1, ys.len() - 1, zs.len() - 1);
+    assert_eq!(cell_pid.len(), nz);
+    let nid = |i: usize, j: usize, k: usize| -> u32 { (i + (nx + 1) * (j + (ny + 1) * k)) as u32 };
+    let coords = grid_coords(xs, ys, zs);
+
+    let mut conn: Vec<u32> = Vec::new();
+    let mut pids: Vec<PropId> = Vec::new();
+    let mut ids: Vec<u32> = Vec::new();
+    let mut next_eid = 1u32;
+    for (k, &pid) in cell_pid.iter().enumerate() {
+        for j in 0..ny {
+            for i in 0..nx {
+                // CHEXA G1..G4 が底面、G5..G8 が上面（どちらも反時計回り）
+                conn.extend_from_slice(&[
+                    nid(i, j, k),
+                    nid(i + 1, j, k),
+                    nid(i + 1, j + 1, k),
+                    nid(i, j + 1, k),
+                    nid(i, j, k + 1),
+                    nid(i + 1, j, k + 1),
+                    nid(i + 1, j + 1, k + 1),
+                    nid(i, j + 1, k + 1),
+                ]);
+                pids.push(pid);
+                ids.push(next_eid);
+                next_eid += 1;
+            }
+        }
+    }
+
+    let mut shell_conn: Vec<u32> = Vec::new();
+    let mut shell_pids: Vec<PropId> = Vec::new();
+    let mut shell_ids: Vec<u32> = Vec::new();
+    for patch in patches {
+        let k = if patch.top { nz } else { 0 };
+        for j in 0..ny {
+            for i in 0..nx {
+                if !patch.covers(xs[i], xs[i + 1], ys[j], ys[j + 1]) {
+                    continue;
+                }
+                let quad = [
+                    nid(i, j, k),
+                    nid(i + 1, j, k),
+                    nid(i + 1, j + 1, k),
+                    nid(i, j + 1, k),
+                ];
+                shell_conn.extend_from_slice(&quad);
+                shell_pids.push(patch.pid);
+                shell_ids.push(next_eid);
+                next_eid += 1;
+            }
+        }
+    }
+
+    assemble_mesh(
+        coords,
+        ElementKind::Hex8,
+        ids,
+        pids,
+        conn,
+        ElementKind::Quad4,
+        shell_ids,
+        shell_pids,
+        shell_conn,
+        cell_pid,
+        patches,
+    )
+}
+
+/// 直方体を三角柱で刻む。各セルを対角線 (i,j)-(i+1,j+1) で 2 つに割る。
+fn box_mesh_penta6(
+    xs: &[f64],
+    ys: &[f64],
+    zs: &[f64],
+    cell_pid: &[PropId],
+    patches: &[Patch],
+) -> Mesh {
+    let (nx, ny, nz) = (xs.len() - 1, ys.len() - 1, zs.len() - 1);
+    assert_eq!(cell_pid.len(), nz);
+    let nid = |i: usize, j: usize, k: usize| -> u32 { (i + (nx + 1) * (j + (ny + 1) * k)) as u32 };
+    let coords = grid_coords(xs, ys, zs);
+
+    let mut conn: Vec<u32> = Vec::new();
+    let mut pids: Vec<PropId> = Vec::new();
+    let mut ids: Vec<u32> = Vec::new();
+    let mut next_eid = 1u32;
+    for (k, &pid) in cell_pid.iter().enumerate() {
+        for j in 0..ny {
+            for i in 0..nx {
+                // 底面の四角形を対角線 (i,j)-(i+1,j+1) で 2 つに割る。
+                // 全セルで同じ規則なので隣接セルと整合する
+                let corners = [
+                    [(i, j), (i + 1, j), (i + 1, j + 1)],
+                    [(i, j), (i + 1, j + 1), (i, j + 1)],
+                ];
+                for tri in corners {
+                    // CPENTA G1..G3 が底面、G4..G6 が上面
+                    for level in [k, k + 1] {
+                        for (a, b) in tri {
+                            conn.push(nid(a, b, level));
+                        }
+                    }
+                    pids.push(pid);
+                    ids.push(next_eid);
+                    next_eid += 1;
+                }
+            }
+        }
+    }
+
+    let mut shell_conn: Vec<u32> = Vec::new();
+    let mut shell_pids: Vec<PropId> = Vec::new();
+    let mut shell_ids: Vec<u32> = Vec::new();
+    for patch in patches {
+        let k = if patch.top { nz } else { 0 };
+        for j in 0..ny {
+            for i in 0..nx {
+                if !patch.covers(xs[i], xs[i + 1], ys[j], ys[j + 1]) {
+                    continue;
+                }
+                let (a, b, c, d) = (
+                    nid(i, j, k),
+                    nid(i + 1, j, k),
+                    nid(i + 1, j + 1, k),
+                    nid(i, j + 1, k),
+                );
+                let faces = if patch.top {
+                    [[a, b, c], [a, c, d]]
+                } else {
+                    [[a, c, b], [a, d, c]]
+                };
+                for f in faces {
+                    shell_conn.extend_from_slice(&f);
+                    shell_pids.push(patch.pid);
+                    shell_ids.push(next_eid);
+                    next_eid += 1;
+                }
+            }
+        }
+    }
+
+    assemble_mesh(
+        coords,
+        ElementKind::Penta6,
+        ids,
+        pids,
+        conn,
+        ElementKind::Tria3,
+        shell_ids,
+        shell_pids,
+        shell_conn,
+        cell_pid,
+        patches,
+    )
+}
+
+/// 格子の節点座標を作る。
+fn grid_coords(xs: &[f64], ys: &[f64], zs: &[f64]) -> Vec<f64> {
+    let mut coords = Vec::with_capacity(xs.len() * ys.len() * zs.len() * 3);
+    for &z in zs {
+        for &y in ys {
+            for &x in xs {
+                coords.push(x);
+                coords.push(y);
+                coords.push(z);
+            }
+        }
+    }
+    coords
+}
+
+/// ブロックから `Mesh` を組み立てる。
+#[allow(clippy::too_many_arguments)]
+fn assemble_mesh(
+    coords: Vec<f64>,
+    solid_kind: ElementKind,
+    solid_ids: Vec<u32>,
+    solid_pids: Vec<PropId>,
+    solid_conn: Vec<u32>,
+    shell_kind: ElementKind,
+    shell_ids: Vec<u32>,
+    shell_pids: Vec<PropId>,
+    shell_conn: Vec<u32>,
+    cell_pid: &[PropId],
+    patches: &[Patch],
+) -> Mesh {
+    let n_nodes = coords.len() / 3;
+    let ids: Vec<u32> = (1..=n_nodes as u32).collect();
+
+    let mut solid_properties: Vec<Property> = cell_pid
+        .iter()
+        .map(|&pid| Property {
+            pid,
+            mid: None,
+            card: "PSOLID",
+        })
+        .collect();
+    solid_properties.sort_by_key(|p| p.pid);
+    solid_properties.dedup_by_key(|p| p.pid);
+
+    let mut shell_properties: Vec<Property> = patches
+        .iter()
+        .map(|p| Property {
+            pid: p.pid,
+            mid: None,
+            card: "PSHELL",
+        })
+        .collect();
+    shell_properties.sort_by_key(|p| p.pid);
+    shell_properties.dedup_by_key(|p| p.pid);
+
+    Mesh {
+        nodes: Nodes::new(ids, coords),
+        solids: vec![ElementBlock::new(
+            solid_kind, solid_ids, solid_pids, solid_conn,
+        )],
+        shells: vec![ElementBlock::new(
+            shell_kind, shell_ids, shell_pids, shell_conn,
+        )],
+        solid_properties,
+        shell_properties,
+        length_unit: LengthUnit::Meter,
+        source: None,
+    }
+}
+
+fn box_mesh_tet4(
+    xs: &[f64],
+    ys: &[f64],
+    zs: &[f64],
+    cell_pid: &[PropId],
+    patches: &[Patch],
+) -> Mesh {
     let (nx, ny, nz) = (xs.len() - 1, ys.len() - 1, zs.len() - 1);
     assert_eq!(cell_pid.len(), nz);
     let nid = |i: usize, j: usize, k: usize| -> u32 { (i + (nx + 1) * (j + (ny + 1) * k)) as u32 };
@@ -251,6 +518,34 @@ pub fn slab(lx: f64, ly: f64, nx: usize, ny: usize, layers: &[Layer]) -> Mesh {
         }
     }
     box_mesh(
+        &linear_grid(0.0, lx, nx),
+        &linear_grid(0.0, ly, ny),
+        &zs,
+        &cell_pid,
+        &[Patch::whole(TOP_PID, true), Patch::whole(BOTTOM_PID, false)],
+    )
+}
+
+/// 要素種を選べる多層スラブ（SPEC §8 M4 の検証用）。
+pub fn slab_of(
+    kind: ElementKind,
+    lx: f64,
+    ly: f64,
+    nx: usize,
+    ny: usize,
+    layers: &[Layer],
+) -> Mesh {
+    let mut zs = vec![0.0f64];
+    let mut cell_pid: Vec<PropId> = Vec::new();
+    for layer in layers {
+        let z0 = *zs.last().unwrap();
+        for k in 1..=layer.divisions {
+            zs.push(z0 + layer.thickness * k as f64 / layer.divisions as f64);
+            cell_pid.push(layer.pid);
+        }
+    }
+    box_mesh_of(
+        kind,
         &linear_grid(0.0, lx, nx),
         &linear_grid(0.0, ly, ny),
         &zs,

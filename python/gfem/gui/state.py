@@ -30,6 +30,8 @@ class DisplayField:
     location: str
     #: 結果が無くても表示できるか
     needs_solution: bool = True
+    #: 等値面を取るときに使う量の名前。等値面にできない量は None
+    iso_quantity: str | None = None
 
     @property
     def is_element_value(self) -> bool:
@@ -39,12 +41,49 @@ class DisplayField:
 #: 表示量の一覧。要素値と節点値の両方を出す（SPEC §5.1）
 DISPLAY_FIELDS: list[DisplayField] = [
     DisplayField("PID", "領域 (PID)", "cell", needs_solution=False),
-    DisplayField("phi [V]", "電位 φ [V]", "point"),
-    DisplayField("|E| [V/m]", "電界 |E| [V/m]（要素値）", "cell"),
-    DisplayField("|J| [A/m2]", "電流密度 |J| [A/m²]（要素値）", "cell"),
-    DisplayField("power density [W/m3]", "電力密度 σ|E|² [W/m³]（要素値）", "cell"),
-    DisplayField("|E| (nodal) [V/m]", "電界 |E| [V/m]（節点値・平滑化）", "point"),
-    DisplayField("|J| (nodal) [A/m2]", "電流密度 |J| [A/m²]（節点値・平滑化）", "point"),
+    DisplayField("phi [V]", "電位 φ [V]", "point", iso_quantity="phi"),
+    DisplayField("|E| [V/m]", "電界 |E| [V/m]（要素値）", "cell", iso_quantity="e_magnitude"),
+    DisplayField("|J| [A/m2]", "電流密度 |J| [A/m²]（要素値）", "cell", iso_quantity="j_magnitude"),
+    DisplayField(
+        "power density [W/m3]",
+        "電力密度 σ|E|² [W/m³]（要素値）",
+        "cell",
+        iso_quantity="power_density",
+    ),
+    DisplayField(
+        "|E| (nodal) [V/m]", "電界 |E| [V/m]（節点値・平滑化）", "point", iso_quantity="e_magnitude"
+    ),
+    DisplayField(
+        "|J| (nodal) [A/m2]",
+        "電流密度 |J| [A/m²]（節点値・平滑化）",
+        "point",
+        iso_quantity="j_magnitude",
+    ),
+]
+
+
+def field_by_key(key: str) -> DisplayField | None:
+    """表示量を鍵から引く。"""
+    for f in DISPLAY_FIELDS:
+        if f.key == key:
+            return f
+    return None
+
+#: 領域統計の表の見出し（SPEC §5.2）
+REGION_STATS_COLUMNS = [
+    "PID",
+    "名前",
+    "σ [S/m]",
+    "要素数",
+    "体積 [mm³]",
+    "電力 [mW]",
+    "|J| 最大",
+    "|J| 平均",
+    "|J| 中央",
+    "|J| 99%",
+    "|E| 最大",
+    "|E| 99%",
+    "ホットスポット EID",
 ]
 
 #: 節点値は平滑化されているという注意（SPEC §5.1 で GUI 上に明示することになっている）
@@ -196,11 +235,8 @@ class Session:
             return self._grid
         mesh = self._require_mesh()
         points = mesh.points()
-        tets = mesh.tetrahedra().astype(np.int64)
-        cells = np.hstack(
-            [np.full((len(tets), 1), 4, dtype=np.int64), tets]
-        ).ravel()
-        types = np.full(len(tets), pv.CellType.TETRA, dtype=np.uint8)
+        # CTETRA / CHEXA / CPENTA がそのまま VTK のセル型に対応する
+        cells, types = mesh.solid_cells()
         grid = pv.UnstructuredGrid(cells, types, points)
         grid.cell_data["PID"] = mesh.solid_pid_array()
 
@@ -260,6 +296,103 @@ class Session:
         for name, values in cell_arrays.items():
             poly.cell_data[name] = values
         return poly
+
+    # --- M3: 統計と可視化 ---------------------------------------------------
+
+    def region_stats(self) -> list[dict]:
+        """領域ごとの統計（SPEC §5.2）。まだ解いていなければ空。"""
+        if self.solution is None:
+            return []
+        return self.solution.region_stats()
+
+    def value_range(self, quantity: str) -> tuple[float, float]:
+        """等値面のしきい値を決めるための値域。"""
+        if self.solution is None:
+            return (0.0, 1.0)
+        return self.solution.value_range(quantity)
+
+    def iso_surface(self, quantity: str, level: float) -> pv.PolyData:
+        """等値面（Marching Tetrahedra、SPEC §6.3）。"""
+        if self.solution is None:
+            return pv.PolyData()
+        points, triangles, scalars = self.solution.iso_surface(quantity, level)
+        poly = self._polydata(points, triangles, {})
+        if poly.n_cells:
+            poly.point_data[quantity] = scalars
+        return poly
+
+    def streamlines(self, seeds, direction: str = "forward") -> pv.PolyData:
+        """電流のストリームライン（SPEC §6.3）。折れ線をまとめた PolyData を返す。"""
+        if self.solution is None or len(seeds) == 0:
+            return pv.PolyData()
+        lines = self.solution.streamlines(
+            [list(map(float, s)) for s in seeds], direction=direction
+        )
+        lines = [line for line in lines if len(line) >= 2]
+        if not lines:
+            return pv.PolyData()
+        points = np.vstack(lines)
+        cells: list[int] = []
+        offset = 0
+        for line in lines:
+            n = len(line)
+            cells.append(n)
+            cells.extend(range(offset, offset + n))
+            offset += n
+        poly = pv.PolyData()
+        poly.points = points
+        poly.lines = np.array(cells, dtype=np.int64)
+        return poly
+
+    def electrode_seed_points(self, name: str, count: int = 24):
+        """電極面から少し内側に入った位置に、ストリームラインの種を撒く。
+
+        面の上ちょうどだと要素の探索が境界に載って不安定になるので、
+        モデルの中心へ向かってわずかに寄せる。
+        """
+        faces = self.electrode_polydata(name)
+        if faces.n_cells == 0:
+            return np.empty((0, 3))
+        centres = np.asarray(faces.cell_centers().points)
+        if len(centres) > count:
+            step = max(1, len(centres) // count)
+            centres = centres[::step][:count]
+        grid = self.grid()
+        model_centre = np.asarray(grid.center)
+        diagonal = float(np.linalg.norm(np.array(grid.bounds[1::2]) - np.array(grid.bounds[0::2])))
+        direction = model_centre - centres
+        norms = np.linalg.norm(direction, axis=1, keepdims=True)
+        norms[norms == 0.0] = 1.0
+        return centres + (direction / norms) * (1.0e-3 * diagonal)
+
+    def default_seed_points(self, count: int = 24):
+        """陽極があればそこから、無ければモデル中央付近から種を撒く。"""
+        study = self.study
+        if study is not None:
+            for electrode in study.electrodes:
+                if electrode.role == "anode":
+                    seeds = self.electrode_seed_points(electrode.name, count)
+                    if len(seeds):
+                        return seeds
+        grid = self.grid()
+        return np.asarray([grid.center])
+
+    def write_region_stats_csv(self, path) -> None:
+        self._require_solution().write_region_stats_csv(path)
+
+    def write_convergence_csv(self, path) -> None:
+        self._require_solution().write_convergence_csv(path)
+
+    def write_summary_json(self, path) -> None:
+        """実行サマリ JSON（プロビナンス付き。SPEC §5.5）。"""
+        text = None
+        study = self.study
+        if study is not None and study.path is not None and Path(study.path).exists():
+            text = Path(study.path).read_text(encoding="utf-8")
+        self._require_solution().write_summary_json(path, case_text=text)
+
+    def write_vtu(self, path) -> None:
+        self._require_solution().write_vtu(path)
 
     def available_fields(self) -> list[DisplayField]:
         """いま表示できる量。"""
@@ -325,12 +458,43 @@ class Session:
         timings = result.timings
         lines += [
             "",
-            "所要時間 [秒]: "
-            + ", ".join(f"{k} {v:.3f}" for k, v in timings.items()),
+            "所要時間 [秒]: " + ", ".join(f"{k} {v:.3f}" for k, v in timings.items()),
         ]
         return "\n".join(lines)
 
+    def region_stats_rows(self) -> list[list[str]]:
+        """領域統計を表に出すための行（SPEC §5.2）。"""
+        rows = []
+        for s in self.region_stats():
+            j, e = s["j_magnitude"], s["e_magnitude"]
+            rows.append(
+                [
+                    str(s["pid"]),
+                    s["name"],
+                    f"{s['sigma']:.4g}",
+                    f"{s['n_elements']:,}",
+                    f"{s['volume'] * 1e6:.4g}",
+                    f"{s['power'] * 1e3:.4g}",
+                    f"{j['max']:.4g}",
+                    f"{j['mean']:.4g}",
+                    f"{j['median']:.4g}",
+                    f"{j['p99']:.4g}",
+                    f"{e['max']:.4g}",
+                    f"{e['p99']:.4g}",
+                    str(s["hotspot"]["element_id"]),
+                ]
+            )
+        return rows
+
     # --- 内部 ---------------------------------------------------------------
+
+    def _require_solution(self) -> Solution:
+        if self.solution is None:
+            raise GfemError(
+                "[設定エラー] まだ solve を実行していません"
+                "\n  対処: 「実行 → solve」で計算してから書き出してください"
+            )
+        return self.solution
 
     def _require_mesh(self) -> Mesh:
         if self.mesh is None:

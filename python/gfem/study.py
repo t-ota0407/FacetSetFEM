@@ -92,10 +92,16 @@ class ElectrodeSpec:
         }
 
 
+#: 指定できるバックエンド（SPEC §4.4）。
+#: どれを選んでも結果はビット単位で同じで、速度だけが変わる。
+KNOWN_BACKENDS = frozenset({"auto", "cpu", "cpu_serial", "cpu_parallel", "parallel", "serial"})
+
+
 @dataclass
 class SolverSpec:
     """ソルバ設定（SPEC §4.3）。"""
 
+    #: "auto"（規模で自動選択）/ "cpu"（逐次）/ "cpu_parallel"（rayon）
     backend: str = "auto"
     method: str = "cg"
     preconditioner: str = "jacobi"
@@ -118,16 +124,23 @@ class SolverSpec:
 class OutputSpec:
     """出力設定（SPEC §5.5）。"""
 
+    #: 結果の VTU（ParaView で開ける）
     vtu: str | None = None
+    #: 領域統計 CSV（SPEC §5.2）
     region_stats: str | None = None
+    #: 収束履歴 CSV
+    convergence: str | None = None
+    #: 実行サマリ JSON（プロビナンス付き）
+    summary_json: str | None = None
+    #: 表示に使う電位の基準
     reference_potential: str = "zero_mean"
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {}
-        if self.vtu:
-            d["vtu"] = self.vtu
-        if self.region_stats:
-            d["region_stats"] = self.region_stats
+        for key in ("vtu", "region_stats", "convergence", "summary_json"):
+            value = getattr(self, key)
+            if value:
+                d[key] = value
         d["reference_potential"] = self.reference_potential
         return d
 
@@ -262,6 +275,9 @@ class Study:
         mesh = mesh if mesh is not None else self.read_mesh()
         case = Case(mesh)
         case.set_conductivity({m.pid: m.sigma for m in self.materials})
+        for m in self.materials:
+            if m.name:
+                case.set_region_name(m.pid, m.name)
         for e in self.electrodes:
             case.add_electrode(
                 e.name,
@@ -274,6 +290,7 @@ class Study:
             tolerance=self.solver.tolerance,
             max_iterations=self.solver.max_iterations,
             preconditioner=self.solver.preconditioner,
+            backend=self.solver.backend,
         )
         case.set_reference_potential(self.output.reference_potential)
         return case
@@ -283,13 +300,37 @@ class Study:
         mesh: Mesh | None = None,
         progress: Callable[[int, float], bool] | None = None,
     ) -> Solution:
-        """メッシュを読み、ケースを組み立てて解く。"""
+        """メッシュを読み、ケースを組み立てて解き、`output` の指定を書き出す。"""
         case = self.build_case(mesh)
         result = case.solve(progress=progress)
-        if self.output.vtu:
-            base = self.path.parent if self.path else Path.cwd()
-            result.write_vtu(base / self.output.vtu)
+        self.write_outputs(result)
         return result
+
+    def write_outputs(self, result: Solution) -> list[Path]:
+        """`output` 節で指定されたファイルを書き出し、そのパスを返す。"""
+        base = self.path.parent if self.path else Path.cwd()
+        written: list[Path] = []
+        if self.output.vtu:
+            path = base / self.output.vtu
+            result.write_vtu(path)
+            written.append(path)
+        if self.output.region_stats:
+            path = base / self.output.region_stats
+            result.write_region_stats_csv(path)
+            written.append(path)
+        if self.output.convergence:
+            path = base / self.output.convergence
+            result.write_convergence_csv(path)
+            written.append(path)
+        if self.output.summary_json:
+            path = base / self.output.summary_json
+            # ケースファイルの全文をプロビナンスに残す（SPEC §5.5）
+            text = None
+            if self.path and self.path.exists():
+                text = self.path.read_text(encoding="utf-8")
+            result.write_summary_json(path, case_text=text)
+            written.append(path)
+        return written
 
     def region_names(self) -> dict[int, str]:
         """PID → 領域名。GUI のツリー表示に使う（コアは名前を持たない）。"""
@@ -381,11 +422,11 @@ def _solver_from(data: Any, where_: str) -> SolverSpec:
             f"{where_} の gauge",
             "射影による mean_zero のみです。1 節点ピン留めは採用しません（SPEC §2.2）",
         )
-    if spec.backend not in {"auto", "cpu", "cpu_serial"}:
+    if spec.backend not in KNOWN_BACKENDS:
         raise _error(
             f"このビルドでは使えないバックエンドです: {spec.backend}",
             f"{where_} の backend",
-            "M1 時点では cpu（CPU 逐次）だけです。cpu_parallel は M4、cuda は M5 で対応します",
+            "auto / cpu / cpu_parallel のいずれかです。cuda は M5 で対応します（SPEC §8）",
         )
     return spec
 
@@ -396,5 +437,7 @@ def _output_from(data: Any, where_: str) -> OutputSpec:
     return OutputSpec(
         vtu=data.get("vtu"),
         region_stats=data.get("region_stats"),
+        convergence=data.get("convergence"),
+        summary_json=data.get("summary_json"),
         reference_potential=str(data.get("reference_potential", "zero_mean")),
     )

@@ -8,5 +8,5 @@ pub mod backend;
 pub mod cg;
 pub mod reduce;
 
-pub use backend::{CpuSerial, LinearBackend};
+pub use backend::{CpuParallel, CpuSerial, LinearBackend};
 pub use cg::{CgReport, ProgressFn};

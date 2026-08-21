@@ -6,8 +6,12 @@
 //! 方針は SPEC §3.1 の「厳しく、かつ親切に」。
 //! 未対応カードは黙って捨てず、カード名・件数・最初の行番号を集計して報告する。
 
+use super::coord::{self, CoordDefinition, CoordKind};
 use super::field::{parse_int, parse_real};
 use super::reader::{BulkReader, Card};
+use crate::element::hex8::Hex8;
+use crate::element::penta6::Penta6;
+use crate::element::shape;
 use crate::element::{ElementKind, tet4_signed_volume};
 use crate::error::{ErrorKind, GfemError, Result, format_sample_list};
 use crate::mesh::{ElemId, ElementBlock, IdMap, Mesh, NodeId, NodeIndex, Nodes, PropId, Property};
@@ -139,7 +143,12 @@ impl RawBlock {
 struct Builder {
     unit: LengthUnit,
     node_ids: Vec<NodeId>,
+    /// ファイルに書かれたままの座標。単位換算と座標変換は `finish()` でまとめて行う
     node_coords: Vec<f64>,
+    /// CP が 0 でない節点だけの `(節点索引, CID)`。ほとんどの入力では空
+    node_cp: Vec<(u32, u32)>,
+    /// CORD2R / CORD2C / CORD2S の定義
+    coord_definitions: BTreeMap<u32, CoordDefinition>,
     blocks: BTreeMap<ElementKind, RawBlock>,
     properties: BTreeMap<PropId, Property>,
     card_counts: BTreeMap<String, usize>,
@@ -153,6 +162,8 @@ impl Builder {
             unit,
             node_ids: Vec::new(),
             node_coords: Vec::new(),
+            node_cp: Vec::new(),
+            coord_definitions: BTreeMap::new(),
             blocks: BTreeMap::new(),
             properties: BTreeMap::new(),
             card_counts: BTreeMap::new(),
@@ -172,12 +183,9 @@ impl Builder {
             "CQUAD4" => self.count_and(name, |s| s.shell(card, ElementKind::Quad4)),
             "PSOLID" => self.count_and(name, |s| s.property(card, "PSOLID")),
             "PSHELL" => self.count_and(name, |s| s.property(card, "PSHELL")),
-            "CORD2R" | "CORD2C" | "CORD2S" => {
-                // 座標系カード自体は M4 で対応する。GRID から参照されていれば
-                // grid() 側でエラーになるので、ここでは件数を数えるだけでよい
-                self.note_unsupported(name, card.line());
-                Ok(())
-            }
+            "CORD2R" => self.count_and(name, |s| s.coord(card, CoordKind::Rectangular)),
+            "CORD2C" => self.count_and(name, |s| s.coord(card, CoordKind::Cylindrical)),
+            "CORD2S" => self.count_and(name, |s| s.coord(card, CoordKind::Spherical)),
             "INCLUDE" => Err(GfemError::unsupported(
                 "INCLUDE による外部ファイルの取り込みは未対応です",
             )
@@ -218,28 +226,68 @@ impl Builder {
     fn grid(&mut self, card: &Card) -> Result<()> {
         let id = field_id(card, 1, "節点 ID")?;
         let cp = field_int(card, 2)?.unwrap_or(0);
-        if cp != 0 {
-            return Err(GfemError::unsupported(format!(
-                "GRID の定義座標系 CP={cp} は未対応です（デカルト座標の直接指定のみ対応）"
-            ))
-            .with_line(card.line())
-            .with_card("GRID")
-            .with_field(2)
-            .with_entity(format!("節点 ID={id}"))
-            .with_hint(
-                "CORD2R / CORD2C / CORD2S による座標変換は M4 で対応します。\
-                 それまではデカルト座標に展開したファイルを使ってください",
-            ));
+        if !(0..=u32::MAX as i64).contains(&cp) {
+            return Err(
+                GfemError::syntax(format!("定義座標系 CP が範囲外です: {cp}"))
+                    .with_line(card.line())
+                    .with_card("GRID")
+                    .with_field(2)
+                    .with_entity(format!("節点 ID={id}"))
+                    .with_hint("CP には 0 以上の座標系 ID を書いてください"),
+            );
         }
         // CD（変位座標系）はスカラー場では意味を持たないので読み飛ばす（SPEC §3.1）
-        let f = self.unit.to_meters();
         let x = field_real(card, 3, 0.0)?;
         let y = field_real(card, 4, 0.0)?;
         let z = field_real(card, 5, 0.0)?;
+        if cp != 0 {
+            self.node_cp.push((self.node_ids.len() as u32, cp as u32));
+        }
         self.node_ids.push(id);
-        self.node_coords.push(x * f);
-        self.node_coords.push(y * f);
-        self.node_coords.push(z * f);
+        // 座標変換と単位換算は全カードを読んでからまとめて行う（SPEC §3.1）
+        self.node_coords.push(x);
+        self.node_coords.push(y);
+        self.node_coords.push(z);
+        Ok(())
+    }
+
+    /// `CORD2R / CORD2C / CORD2S CID RID A1 A2 A3 B1 B2 B3 / C1 C2 C3`
+    fn coord(&mut self, card: &Card, kind: CoordKind) -> Result<()> {
+        let cid = field_id(card, 1, "座標系 ID (CID)")?;
+        let rid = field_int(card, 2)?.unwrap_or(0);
+        if !(0..=u32::MAX as i64).contains(&rid) {
+            return Err(
+                GfemError::syntax(format!("参照座標系 RID が範囲外です: {rid}"))
+                    .with_line(card.line())
+                    .with_card(kind.card_name())
+                    .with_field(2)
+                    .with_entity(format!("CID={cid}"))
+                    .with_hint("RID には 0 以上の座標系 ID を書いてください"),
+            );
+        }
+        let point = |start: usize| -> Result<[f64; 3]> {
+            Ok([
+                field_real(card, start, 0.0)?,
+                field_real(card, start + 1, 0.0)?,
+                field_real(card, start + 2, 0.0)?,
+            ])
+        };
+        let definition = CoordDefinition {
+            cid,
+            rid: rid as u32,
+            kind,
+            a: point(3)?,
+            b: point(6)?,
+            c: point(9)?,
+            line: card.line(),
+        };
+        if self.coord_definitions.insert(cid, definition).is_some() {
+            self.warnings.push(format!(
+                "{} の CID={cid} が複数回定義されています（{} 行目のものを使います）",
+                kind.card_name(),
+                card.line()
+            ));
+        }
         Ok(())
     }
 
@@ -329,13 +377,42 @@ impl Builder {
         let Builder {
             unit,
             node_ids,
-            node_coords,
+            mut node_coords,
+            node_cp,
+            coord_definitions,
             blocks,
             properties,
             card_counts,
             unsupported,
             mut warnings,
         } = self;
+
+        // --- 座標変換と単位換算（SPEC §3.1 / §3.2）---
+        //
+        // CORD2* の A・B・C はファイルの単位で書かれているので、変換を先に済ませ、
+        // SI への換算は最後にまとめて掛ける
+        if !node_cp.is_empty() {
+            let systems = coord::resolve(&coord_definitions)?;
+            for &(index, cid) in &node_cp {
+                let Some(system) = systems.get(cid) else {
+                    return Err(GfemError::model(format!(
+                        "GRID が参照する座標系 CID={cid} が定義されていません"
+                    ))
+                    .with_card("GRID")
+                    .with_entity(format!("節点 ID={}", node_ids[index as usize]))
+                    .with_hint("CORD2R / CORD2C / CORD2S でその CID を定義してください"));
+                };
+                let k = index as usize * 3;
+                let local = [node_coords[k], node_coords[k + 1], node_coords[k + 2]];
+                node_coords[k..k + 3].copy_from_slice(&system.to_basic(local));
+            }
+        }
+        let scale = unit.to_meters();
+        if scale != 1.0 {
+            for value in &mut node_coords {
+                *value *= scale;
+            }
+        }
 
         if node_ids.is_empty() {
             return Err(
@@ -510,6 +587,7 @@ impl Builder {
             );
         }
         check_tet4_geometry(&mesh, &mut warnings)?;
+        check_isoparametric_geometry(&mesh)?;
 
         let report = ReadReport {
             file: name.to_path_buf(),
@@ -534,7 +612,8 @@ impl Builder {
 /// - 体積が数値的にゼロ ＝ 潰れた要素。剛性行列が作れないのでエラー
 /// - 体積が負 ＝ 節点順序の反転。要素剛性は |V| を使うので計算は可能。警告に留める
 ///
-/// Hex8 / Penta6 のヤコビアン検査（SPEC §2.3）は、要素の形状関数を実装する M4 で追加する。
+/// Hex8 / Penta6 は積分点ごとにヤコビアンを見る必要があるので
+/// [`check_isoparametric_geometry`] で別に扱う。
 fn check_tet4_geometry(mesh: &Mesh, warnings: &mut Vec<String>) -> Result<()> {
     let Some(block) = mesh.block(ElementKind::Tet4) else {
         return Ok(());
@@ -576,6 +655,65 @@ fn check_tet4_geometry(mesh: &Mesh, warnings: &mut Vec<String>) -> Result<()> {
             inverted.len(),
             format_sample_list(&inverted, SAMPLE_LIMIT)
         ));
+    }
+    Ok(())
+}
+
+/// Hex8 / Penta6 のヤコビアンを検査する（SPEC §2.3 / §3.1）。
+///
+/// これらの要素は Tet4 と違い `det J` が要素内で一定でないため、
+/// **全ての積分点**で正であることを確かめる必要がある。1 点でも `det J ≤ 0` なら
+/// 要素剛性が作れないので、EID を挙げてエラーにする。
+///
+/// Tet4 の「符号付き体積が負なら警告」（節点順序の反転にすぎない）と扱いが違うのは、
+/// 六面体・五面体では負のヤコビアンが単なる反転とは限らず、
+/// 面がねじれて自己交差している場合があるため。どちらなのかを読み込み時に
+/// 判定するより、EID を出して直してもらうほうが確実で親切。
+///
+/// アセンブリでも同じ検査をしているが（`element::shape::stiffness`）、
+/// ここで見ておくと**全ての不正要素を一度に**報告できる。
+fn check_isoparametric_geometry(mesh: &Mesh) -> Result<()> {
+    for kind in [ElementKind::Hex8, ElementKind::Penta6] {
+        let Some(block) = mesh.block(kind) else {
+            continue;
+        };
+        let mut bad: Vec<String> = Vec::new();
+        for e in 0..block.len() {
+            let points: Vec<[f64; 3]> = block
+                .conn_of(e)
+                .iter()
+                .map(|&n| mesh.nodes.coord(n))
+                .collect();
+            let volume = match kind {
+                ElementKind::Hex8 => shape::volume::<Hex8>(&points),
+                _ => shape::volume::<Penta6>(&points),
+            };
+            let h = mesh.element_max_edge(block, e);
+            let degenerate = match volume {
+                Ok(v) => h <= 0.0 || v <= DEGENERATE_VOLUME_RATIO * h * h * h,
+                Err(_) => true,
+            };
+            if degenerate {
+                bad.push(block.ids()[e].to_string());
+            }
+        }
+        if !bad.is_empty() {
+            let card = kind.card_name();
+            let order = match kind {
+                ElementKind::Hex8 => "G1〜G4 が底面、G5〜G8 がその真上（底面から見て反時計回り）",
+                _ => "G1〜G3 が底面、G4〜G6 がその真上（底面から見て反時計回り）",
+            };
+            return Err(GfemError::model(format!(
+                "ヤコビアンが正でない {card} があります（{} 件）: EID={}",
+                bad.len(),
+                format_sample_list(&bad, SAMPLE_LIMIT)
+            ))
+            .with_card(card)
+            .with_hint(format!(
+                "節点の並びが逆か、要素が潰れている／ねじれています。{card} の並びは {order} です。\
+                 メッシュ生成側で該当要素を修正してください"
+            )));
+        }
     }
     Ok(())
 }
@@ -785,12 +923,70 @@ CTETRA,10,1,1,2,3,4,5,6,7,8
     }
 
     #[test]
-    fn cp_field_is_rejected_with_guidance() {
+    fn grid_in_a_cylindrical_system_is_converted() {
+        // CID 7 は基本座標系に揃えた円筒座標。(r=2, θ=90°, z=3) → (0, 2, 3)
+        let text = "\
+CORD2C,7,0,0.0,0.0,0.0,0.0,0.0,1.0
+,1.0,0.0,0.0
+GRID,1,7,2.0,90.0,3.0
+GRID,2,,1.0,0.0,0.0
+GRID,3,,0.0,1.0,0.0
+GRID,4,,0.0,0.0,1.0
+PSOLID,1,1
+CTETRA,10,1,1,2,3,4
+";
+        let (mesh, report) = read(text, LengthUnit::Meter).unwrap();
+        let p = mesh.nodes.coord(0);
+        assert!(p[0].abs() < 1e-12, "{p:?}");
+        assert!((p[1] - 2.0).abs() < 1e-12, "{p:?}");
+        assert!((p[2] - 3.0).abs() < 1e-12, "{p:?}");
+        // CP を使わない節点はそのまま
+        assert_eq!(mesh.nodes.coord(1), [1.0, 0.0, 0.0]);
+        assert!(report.unsupported.is_empty(), "{:?}", report.unsupported);
+    }
+
+    #[test]
+    fn coordinate_transform_happens_before_the_unit_conversion() {
+        // 円筒座標の r は長さなので単位換算の対象、θ は度なので対象外
+        let text = "\
+CORD2C,7,0,0.0,0.0,0.0,0.0,0.0,1.0
+,1.0,0.0,0.0
+GRID,1,7,2.0,90.0,3.0
+GRID,2,,1.0,0.0,0.0
+GRID,3,,0.0,1.0,0.0
+GRID,4,,0.0,0.0,1.0
+PSOLID,1,1
+CTETRA,10,1,1,2,3,4
+";
+        let (mesh, _) = read(text, LengthUnit::Millimeter).unwrap();
+        let p = mesh.nodes.coord(0);
+        assert!((p[1] - 2.0e-3).abs() < 1e-18, "{p:?}");
+        assert!((p[2] - 3.0e-3).abs() < 1e-18, "{p:?}");
+    }
+
+    #[test]
+    fn grid_referencing_an_undefined_system_is_reported() {
         let text = "GRID,1,7,0.0,0.0,0.0\n";
         let e = read(text, LengthUnit::Meter).unwrap_err();
         let s = e.to_string();
-        assert!(s.contains("CP=7"), "{s}");
-        assert!(s.contains("M4"), "{s}");
+        assert!(s.contains("CID=7"), "{s}");
+        assert!(s.contains("節点 ID=1"), "{s}");
+    }
+
+    #[test]
+    fn rectangular_system_shifts_the_origin() {
+        let text = "\
+CORD2R,5,0,10.0,20.0,30.0,10.0,20.0,31.0
+,11.0,20.0,30.0
+GRID,1,5,1.0,2.0,3.0
+GRID,2,,1.0,0.0,0.0
+GRID,3,,0.0,1.0,0.0
+GRID,4,,0.0,0.0,1.0
+PSOLID,1,1
+CTETRA,10,1,1,2,3,4
+";
+        let (mesh, _) = read(text, LengthUnit::Meter).unwrap();
+        assert_eq!(mesh.nodes.coord(0), [11.0, 22.0, 33.0]);
     }
 
     #[test]

@@ -40,6 +40,8 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QSplitter,
     QStackedWidget,
+    QTableWidget,
+    QTableWidgetItem,
     QTabWidget,
     QTreeWidget,
     QTreeWidgetItem,
@@ -49,7 +51,14 @@ from PySide6.QtWidgets import (
 
 from .. import GfemError
 from .solver_thread import SolverThread
-from .state import DISPLAY_FIELDS, NODAL_VALUE_WARNING, TISSUE_HINTS, Session
+from .state import (
+    DISPLAY_FIELDS,
+    NODAL_VALUE_WARNING,
+    REGION_STATS_COLUMNS,
+    TISSUE_HINTS,
+    Session,
+    field_by_key,
+)
 from .widgets import ConvergencePlot, UnitSelector
 
 __all__ = ["MainWindow"]
@@ -59,6 +68,14 @@ ROLE_KIND = Qt.ItemDataRole.UserRole
 ROLE_KEY = Qt.ItemDataRole.UserRole + 1
 
 COLORMAPS = ["viridis", "plasma", "coolwarm", "turbo", "gray"]
+
+#: 3D ビューの表示モード（表示名, 内部名）
+VIEW_MODES = [
+    ("全体", "volume"),
+    ("断面スライス", "slice"),
+    ("クリップ", "clip"),
+    ("等値面", "isosurface"),
+]
 
 
 class MainWindow(QMainWindow):
@@ -117,10 +134,16 @@ class MainWindow(QMainWindow):
         self.checks_view = QPlainTextEdit()
         self.checks_view.setReadOnly(True)
 
+        self.stats_table = QTableWidget()
+        self.stats_table.setColumnCount(len(REGION_STATS_COLUMNS))
+        self.stats_table.setHorizontalHeaderLabels(REGION_STATS_COLUMNS)
+        self.stats_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+
         self.bottom = QTabWidget()
         self.bottom.addTab(self.log_view, "ログ")
         self.bottom.addTab(self.convergence, "収束曲線")
         self.bottom.addTab(self.checks_view, "保存則チェック")
+        self.bottom.addTab(self.stats_table, "領域統計")
         self.bottom.setMaximumHeight(240)
 
         central = QWidget()
@@ -138,6 +161,15 @@ class MainWindow(QMainWindow):
         file_menu.addSeparator()
         self._add_action(file_menu, "ケースを保存...", self.save_case_dialog, "Ctrl+S")
         self._add_action(file_menu, "結果を VTU に書き出す...", self.export_vtu_dialog)
+        self._add_action(
+            file_menu, "領域統計を CSV に書き出す...", self.export_region_stats_dialog
+        )
+        self._add_action(
+            file_menu, "収束履歴を CSV に書き出す...", self.export_convergence_dialog
+        )
+        self._add_action(
+            file_menu, "実行サマリを JSON に書き出す...", self.export_summary_dialog
+        )
         self._add_action(file_menu, "スクリーンショット...", self.screenshot_dialog)
         file_menu.addSeparator()
         self._add_action(file_menu, "終了", self.close)
@@ -257,6 +289,44 @@ class MainWindow(QMainWindow):
             return
         self.log(f"VTU を書き出しました: {path}")
 
+    def export_region_stats_dialog(self) -> None:
+        self._export_dialog(
+            "領域統計を書き出す",
+            "region_stats.csv",
+            "CSV (*.csv)",
+            self.session.write_region_stats_csv,
+        )
+
+    def export_convergence_dialog(self) -> None:
+        self._export_dialog(
+            "収束履歴を書き出す",
+            "convergence.csv",
+            "CSV (*.csv)",
+            self.session.write_convergence_csv,
+        )
+
+    def export_summary_dialog(self) -> None:
+        self._export_dialog(
+            "実行サマリを書き出す",
+            "summary.json",
+            "JSON (*.json)",
+            self.session.write_summary_json,
+        )
+
+    def _export_dialog(self, title: str, default: str, filters: str, writer) -> None:
+        if self.session.solution is None:
+            QMessageBox.information(self, title, "先に solve を実行してください。")
+            return
+        path, _ = QFileDialog.getSaveFileName(self, title, default, filters)
+        if not path:
+            return
+        try:
+            writer(path)
+        except Exception as exc:  # noqa: BLE001
+            self.show_error(exc)
+            return
+        self.log(f"書き出しました: {path}")
+
     def screenshot_dialog(self) -> None:
         path, _ = QFileDialog.getSaveFileName(self, "スクリーンショット", "view.png", "PNG (*.png)")
         if path:
@@ -348,6 +418,7 @@ class MainWindow(QMainWindow):
         self.session.set_solution(solution)
         self.convergence.set_history(solution.history)
         self.checks_view.setPlainText(self.session.result_summary())
+        self.refresh_stats_table()
         self.bottom.setCurrentWidget(self.checks_view)
         self.log(
             f"solve 完了: {solution.iterations} 反復, "
@@ -368,7 +439,20 @@ class MainWindow(QMainWindow):
     def refresh_all(self) -> None:
         self.refresh_tree()
         self.page_result.reload()
+        self.refresh_stats_table()
         self.refresh_view()
+
+    def refresh_stats_table(self) -> None:
+        """領域統計の表を作り直す（SPEC §5.2）。"""
+        try:
+            rows = self.session.region_stats_rows()
+        except Exception:  # noqa: BLE001 - まだ解いていない場合など
+            rows = []
+        self.stats_table.setRowCount(len(rows))
+        for r, row in enumerate(rows):
+            for c, value in enumerate(row):
+                self.stats_table.setItem(r, c, QTableWidgetItem(value))
+        self.stats_table.resizeColumnsToContents()
 
     def refresh_tree(self) -> None:
         self.tree.clear()
@@ -450,14 +534,33 @@ class MainWindow(QMainWindow):
         grid = self.session.grid()
 
         target = grid
-        if options["slice"]:
+        scalars = options["field"]
+        mode = options["mode"]
+        if mode == "slice":
             target = grid.slice(
                 normal=options["slice_normal"], origin=self._slice_origin(grid, options)
             )
-            if target.n_cells == 0:
-                target = grid
+        elif mode == "clip":
+            target = grid.clip(
+                normal=options["slice_normal"],
+                origin=self._slice_origin(grid, options),
+                invert=True,
+            )
+        elif mode == "isosurface":
+            field = field_by_key(scalars)
+            quantity = field.iso_quantity if field else None
+            if quantity is None:
+                self.log("この量では等値面を作れません（領域 PID など）。全体表示に戻します")
+            else:
+                lo, hi = self.session.value_range(quantity)
+                level = lo + (hi - lo) * options["iso_level"]
+                target = self.session.iso_surface(quantity, level)
+                scalars = quantity
+                self.statusBar().showMessage(f"等値面 {quantity} = {level:.4g}")
+        if target.n_cells == 0:
+            target = grid
+            scalars = options["field"]
 
-        scalars = options["field"]
         if scalars not in target.array_names:
             scalars = "PID" if "PID" in target.array_names else None
 
@@ -469,6 +572,15 @@ class MainWindow(QMainWindow):
             scalar_bar_args={"title": scalars or ""} if scalars else None,
             categories=scalars == "PID",
         )
+
+        if options["streamlines"] and self.session.solution is not None:
+            try:
+                seeds = self.session.default_seed_points(options["n_seeds"])
+                lines = self.session.streamlines(seeds)
+                if lines.n_cells:
+                    self.plotter.add_mesh(lines, color="black", line_width=2)
+            except Exception as exc:  # noqa: BLE001
+                self.log(f"ストリームラインを引けませんでした: {exc}")
 
         if highlight_pid is not None:
             region = self.session.region_grid(highlight_pid)
@@ -753,30 +865,55 @@ class ResultPage(QWidget):
         layout.addWidget(QLabel("<b>表示</b>"))
         form = QFormLayout()
         self.field = QComboBox()
+        self.mode = QComboBox()
+        for label, key in VIEW_MODES:
+            self.mode.addItem(label, key)
         self.cmap = QComboBox()
         self.cmap.addItems(COLORMAPS)
         form.addRow("表示量", self.field)
+        form.addRow("表示モード", self.mode)
         form.addRow("カラーマップ", self.cmap)
         layout.addLayout(form)
 
         self.edges = QCheckBox("要素の稜線を表示")
         layout.addWidget(self.edges)
 
-        slice_box = QGroupBox("断面")
+        slice_box = QGroupBox("断面 / クリップ")
         slice_layout = QVBoxLayout(slice_box)
-        self.slice_enabled = QCheckBox("断面で切る")
         self.slice_normal = QComboBox()
         self.slice_normal.addItems(["x", "y", "z"])
         self.slice_position = QSlider(Qt.Orientation.Horizontal)
         self.slice_position.setRange(0, 100)
         self.slice_position.setValue(50)
-        slice_layout.addWidget(self.slice_enabled)
         row = QHBoxLayout()
         row.addWidget(QLabel("法線"))
         row.addWidget(self.slice_normal)
         slice_layout.addLayout(row)
+        slice_layout.addWidget(QLabel("位置"))
         slice_layout.addWidget(self.slice_position)
         layout.addWidget(slice_box)
+
+        iso_box = QGroupBox("等値面")
+        iso_layout = QVBoxLayout(iso_box)
+        self.iso_level = QSlider(Qt.Orientation.Horizontal)
+        self.iso_level.setRange(0, 100)
+        self.iso_level.setValue(50)
+        iso_layout.addWidget(QLabel("しきい値（値域に対する割合）"))
+        iso_layout.addWidget(self.iso_level)
+        layout.addWidget(iso_box)
+
+        stream_box = QGroupBox("ストリームライン")
+        stream_layout = QVBoxLayout(stream_box)
+        self.streamlines = QCheckBox("電流の流線を重ねる")
+        self.n_seeds = QSpinBox()
+        self.n_seeds.setRange(1, 500)
+        self.n_seeds.setValue(24)
+        stream_layout.addWidget(self.streamlines)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("本数"))
+        row.addWidget(self.n_seeds)
+        stream_layout.addLayout(row)
+        layout.addWidget(stream_box)
 
         self.note = QLabel(NODAL_VALUE_WARNING)
         self.note.setWordWrap(True)
@@ -787,11 +924,13 @@ class ResultPage(QWidget):
         self.summary.setReadOnly(True)
         layout.addWidget(self.summary, stretch=1)
 
-        for widget in (self.field, self.cmap, self.slice_normal):
+        for widget in (self.field, self.mode, self.cmap, self.slice_normal):
             widget.currentTextChanged.connect(self._refresh)
         self.edges.toggled.connect(self._refresh)
-        self.slice_enabled.toggled.connect(self._refresh)
+        self.streamlines.toggled.connect(self._refresh)
         self.slice_position.valueChanged.connect(self._refresh)
+        self.iso_level.valueChanged.connect(self._refresh)
+        self.n_seeds.valueChanged.connect(self._refresh)
 
     def reload(self) -> None:
         session = self.window.session
@@ -812,11 +951,14 @@ class ResultPage(QWidget):
     def options(self) -> dict:
         return {
             "field": self.field.currentData() or "PID",
+            "mode": self.mode.currentData() or "volume",
             "cmap": self.cmap.currentText(),
             "edges": self.edges.isChecked(),
-            "slice": self.slice_enabled.isChecked(),
             "slice_normal": self.slice_normal.currentText(),
             "slice_position": self.slice_position.value() / 100.0,
+            "iso_level": self.iso_level.value() / 100.0,
+            "streamlines": self.streamlines.isChecked(),
+            "n_seeds": self.n_seeds.value(),
         }
 
     def _refresh(self) -> None:

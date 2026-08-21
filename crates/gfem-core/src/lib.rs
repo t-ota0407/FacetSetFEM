@@ -24,6 +24,7 @@ pub mod io;
 pub mod material;
 pub mod mesh;
 pub mod post;
+pub mod provenance;
 pub mod solver;
 pub mod units;
 
@@ -37,6 +38,7 @@ pub use io::vtu::{VtuData, VtuOptions, write_mesh_vtu, write_vtu};
 pub use material::Conductivity;
 pub use mesh::{ElementBlock, ElementRef, Mesh, Nodes, Property};
 pub use post::{ConservationReport, ErrorNorms, FieldResult, convergence_order};
+pub use provenance::Provenance;
 pub use solver::{CgReport, CpuSerial, LinearBackend};
 pub use units::LengthUnit;
 

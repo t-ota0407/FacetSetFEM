@@ -127,6 +127,68 @@ pub enum Preconditioner {
     Jacobi,
 }
 
+/// 計算バックエンド（SPEC §3.3 / §4.4）。
+///
+/// **どれを選んでも結果はビット単位で同じ**（CLAUDE.md 設計原則 1）。
+/// 速度だけが変わる。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum Backend {
+    /// 規模を見て自動で選ぶ
+    #[default]
+    Auto,
+    /// CPU 逐次
+    CpuSerial,
+    /// CPU 並列（rayon）
+    CpuParallel,
+}
+
+impl Backend {
+    /// 表示・記録用の名前。
+    pub const fn label(self) -> &'static str {
+        match self {
+            Backend::Auto => "auto",
+            Backend::CpuSerial => "cpu_serial",
+            Backend::CpuParallel => "cpu_parallel",
+        }
+    }
+
+    /// 文字列から解釈する。
+    pub fn parse(value: &str) -> Result<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "auto" => Ok(Backend::Auto),
+            "cpu" | "cpu_serial" | "serial" => Ok(Backend::CpuSerial),
+            "cpu_parallel" | "parallel" => Ok(Backend::CpuParallel),
+            other => Err(GfemError::new(
+                ErrorKind::Case,
+                format!("このビルドでは使えないバックエンドです: \"{other}\""),
+            )
+            .with_hint(
+                "auto / cpu / cpu_parallel のいずれかを指定してください。\
+                 cuda は M5 で対応します（SPEC §8）",
+            )),
+        }
+    }
+
+    /// `Auto` を実際のバックエンドに解決する。
+    ///
+    /// 小さい問題では並列化のオーバーヘッドの方が高くつくので、しきい値で切り替える。
+    /// どちらでも結果は同じなので、この判断が答えを変えることはない。
+    pub fn resolve(self, n_nodes: usize) -> Backend {
+        const PARALLEL_THRESHOLD: usize = 20_000;
+        match self {
+            Backend::Auto => {
+                if n_nodes >= PARALLEL_THRESHOLD {
+                    Backend::CpuParallel
+                } else {
+                    Backend::CpuSerial
+                }
+            }
+            other => other,
+        }
+    }
+}
+
 /// ソルバ設定（SPEC §3.3 の `solver` 節）。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SolverOptions {
@@ -136,6 +198,8 @@ pub struct SolverOptions {
     pub max_iterations: usize,
     /// 前処理
     pub preconditioner: Preconditioner,
+    /// 計算バックエンド
+    pub backend: Backend,
 }
 
 impl Default for SolverOptions {
@@ -144,6 +208,7 @@ impl Default for SolverOptions {
             tolerance: 1.0e-10,
             max_iterations: 50_000,
             preconditioner: Preconditioner::Jacobi,
+            backend: Backend::Auto,
         }
     }
 }
@@ -153,6 +218,8 @@ impl Default for SolverOptions {
 pub struct Case {
     /// PID → 導電率。PSOLID の PID が領域の単位（SPEC §3.1）
     pub conductivity: BTreeMap<PropId, Conductivity>,
+    /// PID → 領域名。計算には使わないが、領域統計（SPEC §5.2）や GUI の表示に出す
+    pub region_names: BTreeMap<PropId, String>,
     /// 電極
     pub electrodes: Vec<Electrode>,
     /// ソルバ設定
@@ -172,6 +239,11 @@ impl Case {
         self.conductivity
             .insert(pid, Conductivity::isotropic(sigma)?);
         Ok(())
+    }
+
+    /// PID に領域名を付ける（表示と統計出力のためだけに使う）。
+    pub fn set_region_name(&mut self, pid: PropId, name: impl Into<String>) {
+        self.region_names.insert(pid, name.into());
     }
 
     /// 電極を追加する。

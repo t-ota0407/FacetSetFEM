@@ -55,3 +55,8 @@ solver:
 
 output:
   reference_potential: cathode_mean
+  # 出力ファイル（ケースファイルからの相対パス）。要らないものは消してよい
+  # vtu: result.vtu
+  # region_stats: stats.csv
+  # convergence: convergence.csv
+  # summary_json: summary.json

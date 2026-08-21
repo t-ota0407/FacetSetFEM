@@ -38,7 +38,9 @@
 mod common;
 
 use common::{Patch, box_mesh, graded_grid, nearest_node, symmetric_graded_grid};
-use gfem_core::case::{Case, Electrode, Preconditioner, ReferencePotential, SolverOptions};
+use gfem_core::case::{
+    Backend, Case, Electrode, Preconditioner, ReferencePotential, SolverOptions,
+};
 use gfem_core::mesh::PropId;
 use gfem_core::{Mesh, solve};
 use std::f64::consts::PI;
@@ -132,6 +134,7 @@ fn apparent_resistivity(mesh: &Mesh, sigma_upper: f64, sigma_lower: f64) -> f64 
         tolerance: 1.0e-11,
         max_iterations: 200_000,
         preconditioner: Preconditioner::Jacobi,
+        backend: Backend::CpuSerial,
     };
     case.reference = ReferencePotential::ZeroMean;
 

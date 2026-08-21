@@ -175,7 +175,7 @@ pub fn extract_surface(mesh: &Mesh) -> Result<Surface> {
         let count = j - i;
         if count == 1 {
             let (key, elem, local_face) = entries[i];
-            let e = solid_at(mesh, elem as usize);
+            let e = mesh.solid(elem as usize);
             let local = e.kind.faces()[local_face as usize];
             let mut nodes = [NO_NODE; 4];
             for (k, &l) in local.iter().enumerate() {
@@ -191,7 +191,7 @@ pub fn extract_surface(mesh: &Mesh) -> Result<Surface> {
         } else if count > 2 {
             let ids: Vec<String> = entries[i..j]
                 .iter()
-                .map(|&(_, elem, _)| solid_at(mesh, elem as usize).id.to_string())
+                .map(|&(_, elem, _)| mesh.solid(elem as usize).id.to_string())
                 .collect();
             non_manifold.push(format!("要素 EID={}", ids.join("/")));
         }
@@ -213,27 +213,90 @@ pub fn extract_surface(mesh: &Mesh) -> Result<Surface> {
     Ok(Surface { faces, keys })
 }
 
-/// 通し番号でソリッド要素を引く。
+/// 隣接要素が無いことを表す番兵。
+pub const NO_NEIGHBOUR: u32 = u32::MAX;
+
+/// 要素の面ごとの隣接関係。
 ///
-/// 外表面抽出のときだけ使う補助。要素数に比例した走査になるが、
-/// 呼ばれるのは非多様体の報告と面の再構成のときだけなので、
-/// ブロック単位の飛ばし読みで十分速い。
-fn solid_at(mesh: &Mesh, index: usize) -> crate::mesh::ElementRef<'_> {
-    let mut offset = 0;
-    for block in &mesh.solids {
-        if index < offset + block.len() {
-            let i = index - offset;
-            return crate::mesh::ElementRef {
-                index,
-                kind: block.kind(),
-                id: block.ids()[i],
-                pid: block.pids()[i],
-                conn: block.conn_of(i),
-            };
+/// ストリームラインの追跡（SPEC §6.3）で「面を越えて隣の要素へ移る」ために使う。
+#[derive(Debug, Clone, Default)]
+pub struct FaceAdjacency {
+    /// `element * 4 + local_face` の位置に隣接要素の通し番号
+    neighbours: Vec<u32>,
+    /// 同じ位置に、隣接要素側から見たときの局所面番号
+    neighbour_faces: Vec<u8>,
+}
+
+impl FaceAdjacency {
+    /// 面 `local_face` の向こう側の要素と、その要素から見た局所面番号。
+    ///
+    /// 外表面なら `None`。
+    pub fn neighbour(&self, element: usize, local_face: usize) -> Option<(u32, u8)> {
+        let k = element * 4 + local_face;
+        match self.neighbours.get(k) {
+            Some(&n) if n != NO_NEIGHBOUR => Some((n, self.neighbour_faces[k])),
+            _ => None,
         }
-        offset += block.len();
     }
-    panic!("ソリッド要素の通し番号が範囲外です: {index}");
+
+    /// 要素数。
+    pub fn len(&self) -> usize {
+        self.neighbours.len() / 4
+    }
+
+    /// 空か。
+    pub fn is_empty(&self) -> bool {
+        self.neighbours.is_empty()
+    }
+}
+
+/// 面の隣接関係を作る（Tet4 のみ）。
+pub fn build_face_adjacency(mesh: &Mesh) -> Result<FaceAdjacency> {
+    let block = mesh.block(ElementKind::Tet4).ok_or_else(|| {
+        GfemError::unsupported("面の隣接関係は 1 次四面体（CTETRA）のみに対応しています").with_hint(
+            "要素種が混ざったメッシュでは、隣り合う要素が共有する四角形面で\
+                 同じ対角線を選ぶ四面体分割が要ります。M7 で対応します（SPEC §5.1 / §8）",
+        )
+    })?;
+    if mesh.solids.len() > 1 {
+        return Err(GfemError::unsupported(
+            "複数の要素種が混ざったメッシュの面隣接は未対応です",
+        ));
+    }
+
+    let mut entries: Vec<(FaceKey, u32, u8)> = Vec::with_capacity(block.len() * 4);
+    for e in 0..block.len() {
+        let conn = block.conn_of(e);
+        for (lf, face) in ElementKind::Tet4.faces().iter().enumerate() {
+            let nodes: Vec<NodeIndex> = face.iter().map(|&l| conn[l]).collect();
+            entries.push((face_key(&nodes), e as u32, lf as u8));
+        }
+    }
+    entries.sort_unstable();
+
+    let mut adjacency = FaceAdjacency {
+        neighbours: vec![NO_NEIGHBOUR; block.len() * 4],
+        neighbour_faces: vec![0u8; block.len() * 4],
+    };
+    let mut i = 0;
+    while i < entries.len() {
+        let mut j = i + 1;
+        while j < entries.len() && entries[j].0 == entries[i].0 {
+            j += 1;
+        }
+        if j - i == 2 {
+            let (_, ea, fa) = entries[i];
+            let (_, eb, fb) = entries[i + 1];
+            let ka = ea as usize * 4 + fa as usize;
+            let kb = eb as usize * 4 + fb as usize;
+            adjacency.neighbours[ka] = eb;
+            adjacency.neighbour_faces[ka] = fb;
+            adjacency.neighbours[kb] = ea;
+            adjacency.neighbour_faces[kb] = fa;
+        }
+        i = j;
+    }
+    Ok(adjacency)
 }
 
 #[cfg(test)]
@@ -327,6 +390,38 @@ CTETRA,10,1,1,2,3,4
         // 四面体 1 個の外表面は三角形 4 枚
         assert_eq!(tris.len(), 4);
         assert!(owners.iter().all(|&o| o == 0));
+    }
+
+    #[test]
+    fn face_adjacency_pairs_shared_faces() {
+        let mesh = read(
+            "GRID,1,,0.0,0.0,0.0
+GRID,2,,1.0,0.0,0.0
+GRID,3,,0.0,1.0,0.0
+GRID,4,,0.0,0.0,1.0
+GRID,5,,1.0,1.0,1.0
+PSOLID,1,1
+CTETRA,10,1,1,2,3,4
+CTETRA,11,1,5,4,3,2
+",
+        );
+        let adjacency = build_face_adjacency(&mesh).unwrap();
+        assert_eq!(adjacency.len(), 2);
+
+        // 共有面はちょうど 1 組
+        let shared: Vec<(usize, usize)> = (0..2)
+            .flat_map(|e| (0..4).map(move |f| (e, f)))
+            .filter(|&(e, f)| adjacency.neighbour(e, f).is_some())
+            .collect();
+        assert_eq!(shared.len(), 2, "{shared:?}");
+
+        // 相互に指し合っている
+        let (e, f) = shared[0];
+        let (other, other_face) = adjacency.neighbour(e, f).unwrap();
+        assert_eq!(
+            adjacency.neighbour(other as usize, other_face as usize),
+            Some((e as u32, f as u8))
+        );
     }
 
     #[test]
