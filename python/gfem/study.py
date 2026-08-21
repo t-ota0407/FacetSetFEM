@@ -94,14 +94,16 @@ class ElectrodeSpec:
 
 #: 指定できるバックエンド（SPEC §4.4）。
 #: どれを選んでも結果はビット単位で同じで、速度だけが変わる。
-KNOWN_BACKENDS = frozenset({"auto", "cpu", "cpu_serial", "cpu_parallel", "parallel", "serial"})
+KNOWN_BACKENDS = frozenset(
+    {"auto", "cpu", "cpu_serial", "serial", "cpu_parallel", "parallel", "cuda", "gpu"}
+)
 
 
 @dataclass
 class SolverSpec:
     """ソルバ設定（SPEC §4.3）。"""
 
-    #: "auto"（規模で自動選択）/ "cpu"（逐次）/ "cpu_parallel"（rayon）
+    #: "auto"（規模で自動選択）/ "cpu"（逐次）/ "cpu_parallel"（rayon）/ "cuda"（GPU）
     backend: str = "auto"
     method: str = "cg"
     preconditioner: str = "jacobi"
@@ -426,7 +428,8 @@ def _solver_from(data: Any, where_: str) -> SolverSpec:
         raise _error(
             f"このビルドでは使えないバックエンドです: {spec.backend}",
             f"{where_} の backend",
-            "auto / cpu / cpu_parallel のいずれかです。cuda は M5 で対応します（SPEC §8）",
+            "auto / cpu / cpu_parallel / cuda のいずれかです。"
+            "cuda が使えるかは gfem.describe_gpus() で確認できます",
         )
     return spec
 

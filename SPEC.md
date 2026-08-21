@@ -1,6 +1,6 @@
 # GenericFEM — 経皮電気刺激シミュレーション 仕様書
 
-版: 0.7／最終更新: 2026-08-21
+版: 0.8／最終更新: 2026-08-21
 
 ---
 
@@ -292,7 +292,7 @@ electrodes:
       shell_pids: [201]
 
 solver:
-  backend: auto            # cpu | cpu_parallel | auto（cuda は M5）
+  backend: auto            # auto | cpu | cpu_parallel | cuda
   method: cg
   preconditioner: jacobi   # jacobi | (将来) amg
   gauge: mean_zero
@@ -378,11 +378,32 @@ VRAM 8 GB のカードでも 1000 万節点が載る。ワークステーショ�
 
 ```rust
 trait LinearBackend {
-    fn spmv(&self, a: &CsrMatrix, x: &Vector, y: &mut Vector);
-    fn axpy(&self, alpha: f64, x: &Vector, y: &mut Vector);
-    fn dot(&self, x: &Vector, y: &Vector) -> f64;
-    fn scale(&self, alpha: f64, x: &mut Vector);
-    fn project_mean_zero(&self, x: &mut Vector);
+    /// ベクトルの表現。CPU では Vec<f64>、GPU では VRAM 上の確保
+    type Vector;
+    /// 行列の表現。CPU では &CsrMatrix、GPU では VRAM 上の CSR
+    type Matrix<'a>;
+
+    // 生成と転送
+    fn upload_matrix<'a>(&self, a: &'a CsrMatrix) -> Result<Self::Matrix<'a>>;
+    fn zeros(&self, n: usize) -> Result<Self::Vector>;
+    fn upload(&self, host: &[f64]) -> Result<Self::Vector>;
+    fn download(&self, x: &Self::Vector, host: &mut [f64]) -> Result<()>;
+    fn copy_from(&self, src: &Self::Vector, dst: &mut Self::Vector) -> Result<()>;
+    fn len(&self, x: &Self::Vector) -> usize;
+
+    // 演算（スカラーは常にホストの f64 でやりとりする）
+    fn spmv(&self, a: &Self::Matrix<'_>, x: &Self::Vector, y: &mut Self::Vector) -> Result<()>;
+    fn axpy(&self, alpha: f64, x: &Self::Vector, y: &mut Self::Vector) -> Result<()>;
+    fn xpby(&self, x: &Self::Vector, beta: f64, y: &mut Self::Vector) -> Result<()>;
+    fn dot(&self, x: &Self::Vector, y: &Self::Vector) -> Result<f64>;
+    fn sum(&self, x: &Self::Vector) -> Result<f64>;
+    fn scale(&self, alpha: f64, x: &mut Self::Vector) -> Result<()>;
+    fn multiply(&self, a: &Self::Vector, x: &Self::Vector, y: &mut Self::Vector) -> Result<()>;
+    fn shift(&self, delta: f64, x: &mut Self::Vector) -> Result<()>;
+
+    // 既定実装（sum と shift から作れるので、実装ごとにずれようがない）
+    fn norm2(&self, x: &Self::Vector) -> Result<f64> { Ok(self.dot(x, x)?.sqrt()) }
+    fn project_mean_zero(&self, x: &mut Self::Vector) -> Result<()> { /* x −= sum(x)/n */ }
 }
 ```
 
@@ -403,7 +424,29 @@ M4 時点で `CpuSerial` と `CpuParallel` が動く。
 キャッシュに載る小さな計算であり、要素剛性を全部保存する方式（Tet4 で CSR の 2.5 倍の
 メモリ。§4.2）より安い。
 
-M1 の実装ではベクトルを `&[f64]` のスライスで受け渡している。GPU ではベクトルがデバイスメモリ上に載るため、M5 でこの trait に「ベクトル表現」の関連型を持たせる必要が出る見込み。**CG 本体が全てのベクトル演算をこの trait 経由で行っている限り、その変更は trait 定義と CG のシグネチャに閉じる。**
+**ベクトルはバックエンドが持つ**（M5 で確定）。M1〜M4 はベクトルを `&[f64]` のスライスで
+受け渡していたが、GPU ではベクトルがデバイスメモリ上に載るため、M5 で関連型に持ち上げた。
+予告どおり、変更は trait 定義と CG の内部に閉じ、`analysis::solve` の呼び出し側からは
+何も変わっていない。CPU バックエンドでは `Vector = Vec<f64>` / `Matrix<'a> = &'a CsrMatrix`
+なので、この抽象化による複製やコピーは一切発生しない。
+
+**スカラーは常にホストの `f64`**。CG の α・β・残差の割り算はホスト側で行う。
+この境界の置き方だけで「スカラー演算の順序がバックエンドによって変わりようがない」
+ことが保証される。GPU からホストへ落ちるのは内積・総和の結果 1 個だけで、
+作業ベクトルは反復の間 VRAM に置いたままになる。
+
+**外部バックエンドの差し込み方**（M5 で確定）。`gfem-core` は CUDA に依存しない
+（設計原則 5）ので、`analysis::solve` が自分で CUDA を選ぶことはできない。そこで
+ホスト側のスライスだけを受け渡す**オブジェクト安全な `LinearSolver`** を用意し、
+`analysis::solve_with(mesh, case, progress, Some(&solver))` で外から渡せるようにした。
+`BackendSolver<B>` が任意の `LinearBackend` をこれに包む。GPU を使うかどうかの判断は
+`gfem-py` が行う（下記）。
+
+```text
+gfem-cuda  →  CudaBackend（LinearBackend）→ BackendSolver → LinearSolver
+gfem-py    →  GPU を使うか判断して solve_with に渡す
+gfem-core  →  CUDA を知らないまま、渡されたソルバで解く
+```
 
 **内積の再現性**: 並列内積は加算順序が非決定的になるため、**ペアワイズ総和（決定的な木構造リダクション）**を用いる。GPU も固定ブロック分割 + 決定的な階層リダクションで実装する。
 実装は固定長ブロック（512 要素）ごとに和を取り、そのブロック和の列を逐次版と同じ規則で
@@ -412,6 +455,32 @@ M1 の実装ではベクトルを `&[f64]` のスライスで受け渡してい�
 順序の問題は起きない。
 
 **CUDA 要件**: 倍精度演算を使うため Compute Capability 6.0 以上を要求する。GPU が使えない・VRAM が足りない場合は CPU バックエンドに自動フォールバックし、その旨をログに明記する。
+
+**CUDA でビット単位一致を保つ方法**（M5 で確定）。順序を崩す要因は 2 つあり、両方を潰す。
+
+1. **FMA への縮約を禁じる。** `a += b * c` を fused multiply-add にまとめると途中の丸めが
+   1 回減り、CPU と値が変わる。Rust は勝手に FMA を作らないので、GPU 側も作らせない。
+   カーネルは `__dmul_rn` / `__dadd_rn`（CUDA が「FMA に融合しない」と明記している
+   丸め指定つき演算）を明示的に書き、コンパイル時にも `--fmad=false` を渡す
+2. **総和の木を CPU と揃える。** ワープ内リダクションは加算順序が CPU と違うので使えない。
+   長さ 512 の連続ブロックを**スレッド 1 本が先頭から順に**足し、ブロック和の列に
+   同じ規則を再帰的に適用する。長さが 512 以下になったらホストへ戻し、CPU 側の
+   `reduce::sum` をそのまま呼ぶ
+
+**SpMV は 1 行 1 スレッドにする。** 行内の加算順序を守る必要があるため、
+1 行を複数スレッドで分担して部分和を作る（ワープあたり 1 行）方式は採れない。
+連続する行を別スレッドが読むのでメモリアクセスは合体しないが、
+**再現性を速度より優先する**（設計原則 1）。将来 ELLPACK 系のレイアウトに変えれば、
+各スレッドが自分の行を順にたどるという性質を保ったまま合体させられる余地はある。
+
+**バックエンドの自動選択**（M5 時点）。`gfem-core` は GPU の有無を知らないので、
+`Auto` が解決するのは CPU 逐次か CPU 並列まで。GPU を試すかどうかは `gfem-py` が
+`Backend::wants_gpu(n)` で判断する（`cuda` 指定なら常に、`auto` なら 25 万節点以上）。
+実際に使えるか（GPU の有無・CC・空き VRAM）は `gfem-cuda` が答える。
+
+**フォールバックは黙って行わない。** `backend: cuda` を明示したのに GPU が使えなかった
+場合は、理由（GPU が無い／CC 不足／VRAM 不足）を結果の警告に必ず載せる。
+`auto` のときは CPU で解くのが当たり前なので警告は出さない。
 
 ---
 
@@ -627,8 +696,14 @@ GenericFEM/
 │   │       ├── provenance.rs    # 入力ハッシュ・Git の状態・実行時刻
 │   │       ├── case.rs          # ケース定義とバリデーション
 │   │       └── analysis.rs      # §4.1 の流れを通す入口と結果の型
-│   ├── gfem-cuda/               # CUDA バックエンド（M5。未作成）
-│   └── gfem-py/                 # PyO3 バインディング
+│   ├── gfem-cuda/               # CUDA バックエンド（gfem-core にのみ依存）
+│   │   └── src/
+│   │       ├── kernels.cu       # f64 の CSR SpMV・ベクトル演算・決定的リダクション
+│   │       ├── device.rs        # コンテキスト初期化, カーネル読み込み, GPU の素性
+│   │       ├── backend.rs       # LinearBackend の実装（VRAM 常駐）
+│   │       └── lib.rs           # VRAM 見積りと CPU へのフォールバック判定
+│   └── gfem-py/                 # PyO3 バインディング（cuda フィーチャで GPU 対応）
+│       └── src/cuda.rs          # GPU を使うかの判断。CUDA 無しでもビルドできる
 ├── python/
 │   └── gfem/
 │       ├── __init__.py          # 高レベル Python API
@@ -812,7 +887,7 @@ end-to-end のテストで確認している（`crates/gfem-core/tests/parallel.
 
 **残した制約**: 等値面・流線・面隣接・L2 誤差評価は Tet4 専用のまま（§5.1）。
 
-### M5 — CUDA バックエンド
+### M5 — CUDA バックエンド（**完了: 2026-08-21**）
 
 - cudarc による f64 CSR SpMV と CG
 - CSR + 作業ベクトルの VRAM 常駐
@@ -820,6 +895,41 @@ end-to-end のテストで確認している（`crates/gfem-core/tests/parallel.
 - VRAM 不足時の CPU 自動フォールバック
 - **CPU 版と GPU 版でビット単位一致することをテストする**
 - 目標: 1000 万節点が回る
+
+**実測**（RTX A6000 / 20 コア、release ビルド。3 層スラブ、tol = 1e-12）:
+
+| 節点 | 四面体 | 反復 | 逐次 [s] | 並列 [s] | GPU [s] | CG だけ 逐次 / 並列 / GPU [s] |
+|---|---|---|---|---|---|---|
+| 3,780 | 18,480 | 166 | 0.03 | 0.08 | 0.09 | 0.015 / 0.066 / 0.078 |
+| 14,973 | 79,200 | 287 | 0.16 | 0.20 | 0.20 | 0.103 / 0.151 / 0.139 |
+| 41,055 | 224,400 | 342 | 0.49 | 0.32 | 0.32 | 0.357 / 0.192 / 0.188 |
+| 151,470 | 855,360 | 517 | 3.15 | 1.02 | 1.33 | 2.632 / 0.506 / 0.813 |
+| 301,070 | 1,715,472 | 638 | 7.87 | 2.18 | 2.09 | 6.822 / 1.129 / 1.042 |
+| 602,775 | 3,474,240 | 776 | 20.2 | 4.88 | 3.83 | 18.065 / 2.725 / 1.671 |
+
+CG 単体では 60 万節点で**逐次の 10.8 倍・20 コア並列の 1.6 倍**。全体の倍率が
+それより低いのは、外表面抽出・アセンブリ・ポスト処理が CPU 側に残っているため。
+CPU 並列との損益分岐は 15 万〜30 万節点の間にあり、`auto` のしきい値（25 万節点）は
+そこから決めた。**それ以下の規模では CPU 並列のほうが速い**——GPU は万能ではない。
+
+**1000 万節点の実測**（`ten_million_nodes_fit_on_the_gpu`、tol = 1e-9）:
+
+| 項目 | 値 |
+|---|---|
+| 規模 | 10,022,646 節点 / 59,099,040 四面体 |
+| VRAM | 6.3 GB（48 GB 中） |
+| 所要時間 | 57.2 秒（準備 25.1 / アセンブリ 10.4 / **CG 17.5** / ポスト 4.0） |
+| 反復 | 1,423 |
+| 精度 | 解析解との相対誤差 6.5e-14 |
+
+目標の「1000 万節点が回る」は達成。残る時間の内訳を見ると、**CG より前後の
+CPU 処理（外表面抽出 25 秒）のほうが重い**——次に効くのはそちらの並列化。
+
+**再現性の検証**（設計原則 1）: 演算 1 つずつ（`tests/bitwise.rs`）と
+end-to-end（`tests/end_to_end.rs`）の両方で、CPU 逐次・CPU 並列・GPU が
+**ビット単位で一致する**ことを確認している。end-to-end のほうは 500 反復以上まわして
+電位・E・J・反復回数・収束履歴・等価抵抗・消費電力を突き合わせる——
+1 ビットでもずれれば反復のたびに増幅されるので、この一致は偶然では起きない。
 
 ### M6 — AMG 前処理
 
@@ -883,6 +993,15 @@ end-to-end のテストで確認している（`crates/gfem-core/tests/parallel.
 **FP64 スループットについて**: RTX A6000（Ampere GA102）の FP64 演算性能は FP32 の 1/32（約 1.2 TFLOPS）しかない。しかし **CG はメモリ帯域（768 GB/s）で律速される**演算強度の低い処理なので、この弱さは実効性能にほとんど影響しない。単精度に落としても速くならないため、§10 の「全計算 f64」の要件を緩める理由はない。
 
 **CUDA Toolkit のバージョン**: 11.8 は 2022 年版だが Compute Capability 8.6 は正式サポート内であり、M5 の実装は可能。ドライバ 596.72 は CUDA 12 系にも対応しているため、必要になった時点でツールキットのみ追加できる。
+
+---
+
+**CUDA の版について**（M5 で確定）。カーネルは NVRTC で実行時にコンパイルする。
+CUDA 11.8 の NVRTC は `nvrtc64_112_0.dll`（ABI 11.2）という名前で配布されており、
+cudarc の `cuda-11080` の探索リストに載っていないため、同居している **CUDA 12.5** の
+バインディングを使う設定にしてある。ドライバ（596.72 / CUDA 13.2 対応）が
+上位互換なので実害はない。ビルドは `fallback-dynamic-loading` で行うので、
+**CUDA が無いマシンでもビルド自体は通る**（実行時に CPU へ落ちる）。
 
 ---
 

@@ -15,6 +15,8 @@
 //! result.write_vtu("out.vtu")
 //! ```
 
+mod cuda;
+
 use gfem_core::case::{Backend, Electrode, ElectrodeRole, Preconditioner, ReferencePotential};
 use gfem_core::mesh::streamline::{TraceDirection, TraceOptions};
 use gfem_core::post::RegionStats;
@@ -602,8 +604,13 @@ impl PyCase {
                     }
                 })
             };
-            gfem_core::analysis::solve(mesh, case, Some(&mut cb))
+            // GPU を使うかはここで決める。gfem-core は CUDA を知らない（SPEC §7）
+            let (solver, note) = cuda::pick(case.solver.backend, mesh.nodes.len(), None);
+            let analysis =
+                gfem_core::analysis::solve_with(mesh, case, Some(&mut cb), solver.as_deref());
+            (analysis, note)
         });
+        let (analysis, note) = analysis;
 
         if let Some(e) = callback_error
             .into_inner()
@@ -611,7 +618,11 @@ impl PyCase {
         {
             return Err(e);
         }
-        let analysis = analysis.map_err(to_py)?;
+        let mut analysis = analysis.map_err(to_py)?;
+        // GPU に落ちた理由は必ず結果に残す（SPEC §4.4 のフォールバック）
+        if let Some(note) = note {
+            analysis.warnings.push(note);
+        }
         Ok(PySolution {
             mesh: self.mesh.clone_ref(py),
             case: case.clone(),
@@ -1084,6 +1095,41 @@ fn length_units() -> Vec<&'static str> {
     LengthUnit::ALL.iter().map(|u| u.symbol()).collect()
 }
 
+/// このビルドに CUDA バックエンドが入っているか（SPEC §8 M5）。
+#[pyfunction]
+fn cuda_available() -> bool {
+    cuda::built_with_cuda()
+}
+
+/// 見えている GPU の一覧。
+///
+/// 各要素は `{"ordinal", "name", "compute_capability", "total_memory", "free_memory",
+/// "usable"}`。`usable` は倍精度が使えるか（Compute Capability 6.0 以上）。
+#[pyfunction]
+fn cuda_devices(py: Python<'_>) -> PyResult<Py<PyList>> {
+    let out = PyList::empty(py);
+    for (ordinal, name, major, minor, total, free) in cuda::device_list() {
+        let d = PyDict::new(py);
+        d.set_item("ordinal", ordinal)?;
+        d.set_item("name", name)?;
+        d.set_item("compute_capability", (major, minor))?;
+        d.set_item("total_memory", total)?;
+        d.set_item("free_memory", free)?;
+        d.set_item("usable", (major, minor) >= (6, 0))?;
+        out.append(d)?;
+    }
+    Ok(out.unbind())
+}
+
+/// 節点数 `n_nodes` の問題を GPU で解けるか。
+///
+/// 解けるなら `None`、駄目ならその理由（日本語）を返す。
+#[pyfunction]
+#[pyo3(signature = (n_nodes, nnz = None))]
+fn cuda_check(n_nodes: usize, nnz: Option<usize>) -> Option<String> {
+    cuda::check(n_nodes, nnz)
+}
+
 #[pymodule]
 fn _gfem(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", gfem_core::VERSION)?;
@@ -1095,5 +1141,8 @@ fn _gfem(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySolution>()?;
     m.add_function(wrap_pyfunction!(read_nastran, m)?)?;
     m.add_function(wrap_pyfunction!(length_units, m)?)?;
+    m.add_function(wrap_pyfunction!(cuda_available, m)?)?;
+    m.add_function(wrap_pyfunction!(cuda_devices, m)?)?;
+    m.add_function(wrap_pyfunction!(cuda_check, m)?)?;
     Ok(())
 }

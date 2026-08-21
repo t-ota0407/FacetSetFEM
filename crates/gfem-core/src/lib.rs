@@ -28,7 +28,7 @@ pub mod provenance;
 pub mod solver;
 pub mod units;
 
-pub use analysis::{Analysis, Timings, solve, write_analysis_vtu};
+pub use analysis::{Analysis, Timings, solve, solve_with, write_analysis_vtu};
 pub use assemble::{CsrMatrix, LinearSystem, assemble};
 pub use case::{Case, Electrode, ElectrodeRole, Preconditioner, ReferencePotential, SolverOptions};
 pub use element::ElementKind;
@@ -39,7 +39,7 @@ pub use material::Conductivity;
 pub use mesh::{ElementBlock, ElementRef, Mesh, Nodes, Property};
 pub use post::{ConservationReport, ErrorNorms, FieldResult, convergence_order};
 pub use provenance::Provenance;
-pub use solver::{CgReport, CpuSerial, LinearBackend};
+pub use solver::{BackendSolver, CgReport, CpuParallel, CpuSerial, LinearBackend, LinearSolver};
 pub use units::LengthUnit;
 
 /// gfem-core のバージョン。出力 JSON のプロビナンス記録に使う（SPEC §5.5）。

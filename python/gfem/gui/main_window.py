@@ -49,7 +49,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import GfemError
+from .. import GfemError, describe_gpus
 from .solver_thread import SolverThread
 from .state import (
     DISPLAY_FIELDS,
@@ -809,11 +809,14 @@ class SolverPage(QWidget):
         self.max_iterations.setRange(1, 10_000_000)
         self.preconditioner = QComboBox()
         self.preconditioner.addItems(["jacobi", "none"])
+        self.backend = QComboBox()
+        self.backend.addItems(["auto", "cpu", "cpu_parallel", "cuda"])
         self.reference = QComboBox()
         self.reference.addItems(["zero_mean", "cathode_mean"])
         form.addRow("相対残差の収束判定", self.tolerance)
         form.addRow("最大反復回数", self.max_iterations)
         form.addRow("前処理", self.preconditioner)
+        form.addRow("計算バックエンド", self.backend)
         form.addRow("基準電位", self.reference)
         layout.addLayout(form)
         layout.addWidget(
@@ -822,11 +825,20 @@ class SolverPage(QWidget):
                 "1 節点ピン留めは解を歪めるため採用しません（SPEC §2.2）。"
             )
         )
+        # どのバックエンドでも答えはビット単位で同じ（CLAUDE.md 設計原則 1）。
+        # 迷わせないよう、そのことと GPU の有無をここに書いておく
+        self.environment = QLabel(describe_gpus())
+        self.environment.setWordWrap(True)
+        layout.addWidget(
+            QLabel("バックエンドを変えても結果は 1 ビットも変わりません（速度だけが変わります）。")
+        )
+        layout.addWidget(self.environment)
         layout.addStretch(1)
 
         self.tolerance.editingFinished.connect(self._commit)
         self.max_iterations.valueChanged.connect(self._commit)
         self.preconditioner.currentTextChanged.connect(self._commit)
+        self.backend.currentTextChanged.connect(self._commit)
         self.reference.currentTextChanged.connect(self._commit)
 
     def reload(self) -> None:
@@ -837,6 +849,9 @@ class SolverPage(QWidget):
         self.tolerance.setText(f"{study.solver.tolerance:g}")
         self.max_iterations.setValue(study.solver.max_iterations)
         self.preconditioner.setCurrentText(study.solver.preconditioner)
+        if self.backend.findText(study.solver.backend) < 0:
+            self.backend.addItem(study.solver.backend)
+        self.backend.setCurrentText(study.solver.backend)
         self.reference.setCurrentText(study.output.reference_potential)
         self._loading = False
 
@@ -850,6 +865,7 @@ class SolverPage(QWidget):
             self.tolerance.setText(f"{study.solver.tolerance:g}")
         study.solver.max_iterations = self.max_iterations.value()
         study.solver.preconditioner = self.preconditioner.currentText()
+        study.solver.backend = self.backend.currentText()
         study.output.reference_potential = self.reference.currentText()
 
 

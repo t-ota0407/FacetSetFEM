@@ -11,7 +11,7 @@
 仕様に関わる判断を変更した場合は、コードだけでなく **SPEC.md も更新する**こと。
 
 # 現在の進捗
-- 仕様策定: 完了（SPEC.md v0.7）
+- 仕様策定: 完了（SPEC.md v0.8）
 - 開発環境構築: 完了（2026-08-18）
 - M0（骨組み）: 完了（2026-08-19）— Nastran パーサ / VTU ライタ / サンプルモデル / PyO3 疎通
 - M1（体験一周）: 完了（2026-08-20）— Tet4 アセンブリ / 射影付き Jacobi-CG / 電極荷重 /
@@ -26,14 +26,24 @@
   （`ShapeFunctions` trait）/ CORD2R・CORD2C・CORD2S の座標変換 / rayon による
   行ごとの並列アセンブリと並列 SpMV / `Backend` の選択。60 万節点が並列 4.3 秒。
   **逐次と並列はビット単位で一致する**
-- **次は M5（CUDA バックエンド）。cudarc で f64 の CSR SpMV と CG、VRAM 常駐、
-  CPU 版とのビット単位一致テスト（SPEC §8）**
+- M5（CUDA バックエンド）: 完了（2026-08-21）— `LinearBackend` を関連型
+  （Vector / Matrix）に持ち上げ、`gfem-cuda` クレートで cudarc の f64 カーネルを実装。
+  CSR と作業ベクトルは VRAM 常駐。**CPU 逐次・CPU 並列・GPU がビット単位で一致する**。
+  1000 万節点が GPU で 57 秒（CG 17.5 秒）。60 万節点で CG は逐次の 10.8 倍
+- **次は M6（AMG 前処理）。導電率コントラストが大きいケースでの反復回数削減、
+  CPU / GPU 両対応（SPEC §8）**
 
 M4 から持ち越し: 等値面・流線・面隣接・L2 誤差評価は Tet4 専用のまま（面共役な
 四面体分割が要るため。M7 で対応。SPEC §5.1）。解く・書き出す・GUI 表示は要素種を選ばない。
 
-重いテスト（二層半無限媒質）は `#[ignore]` にしてあるので、検証一式を回すときは
-`cargo test --release -- --include-ignored` を使う。
+M5 で見えた課題: 1000 万節点では**外表面抽出（25 秒）が CG（17.5 秒）より重い**。
+アセンブリ・ポスト処理と合わせて、CPU 側の前後処理の並列化が次に効く。
+
+重いテスト（二層半無限媒質・規模の計測・1000 万節点）は `#[ignore]` にしてあるので、
+検証一式を回すときは `cargo test --release -- --include-ignored` を使う。
+
+GPU のテストは GPU が無ければ黙って通る（`gfem-core` は CPU だけで完全にテストできる
+状態を保つ。設計原則 5）。GPU があるのに落ちたら本物の不具合。
 
 # 環境の使い方
 
@@ -53,7 +63,12 @@ Rust 拡張のビルドは maturin。Git Bash からは `VIRTUAL_ENV` を明示�
 VIRTUAL_ENV='C:\Users\t-ota\Desktop\GenericFEM\.venv' .venv/Scripts/maturin.exe develop --release
 ```
 
-GPU は RTX A6000 × 2（各 48 GB、CC 8.6）、CUDA Toolkit 11.8。CPU 20 コア、RAM 128 GB。
+GPU は RTX A6000 × 2（各 48 GB、CC 8.6）、CPU 20 コア、RAM 128 GB。
+
+CUDA は 11.8 / 12.1 / 12.5 が入っていて、ドライバは 596.72（CUDA 13.2 対応）。
+cudarc は **12.5 のバインディング**を使う設定にしてある——11.8 の NVRTC は
+`nvrtc64_112_0.dll` という名前で、cudarc の `cuda-11080` の探索リストに載っていないため
+（SPEC §10.1）。CUDA が無いマシンでもビルド自体は通り、実行時に CPU へ落ちる。
 
 # 設計上の譲れない原則
 

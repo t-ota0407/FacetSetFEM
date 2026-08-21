@@ -160,14 +160,17 @@ fn backend_names_round_trip() {
         ("cpu_serial", Backend::CpuSerial),
         ("cpu_parallel", Backend::CpuParallel),
         ("  CPU_PARALLEL ", Backend::CpuParallel),
+        ("cuda", Backend::Cuda),
+        ("gpu", Backend::Cuda),
     ] {
         assert_eq!(Backend::parse(text).unwrap(), expected, "{text}");
     }
     assert_eq!(Backend::CpuParallel.label(), "cpu_parallel");
+    assert_eq!(Backend::Cuda.label(), "cuda");
 
-    let e = Backend::parse("cuda").unwrap_err();
+    let e = Backend::parse("opencl").unwrap_err();
+    assert!(e.to_string().contains("opencl"), "{e}");
     assert!(e.to_string().contains("cuda"), "{e}");
-    assert!(e.to_string().contains("M5"), "{e}");
 }
 
 #[test]

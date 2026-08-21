@@ -349,11 +349,15 @@ def test_case_reports_and_validates_the_backend(tmp_path):
     case.set_solver(backend="cpu_parallel")
     assert case.solver["backend"] == "cpu_parallel"
 
+    # cuda は M5 で受け付けるようになった
+    case.set_solver(backend="cuda")
+    assert case.solver["backend"] == "cuda"
+
     with pytest.raises(gfem.GfemError) as excinfo:
-        case.set_solver(backend="cuda")
-    assert "cuda" in str(excinfo.value)
+        case.set_solver(backend="opencl")
+    assert "opencl" in str(excinfo.value)
     # 弾かれた後も設定は元のまま
-    assert case.solver["backend"] == "cpu_parallel"
+    assert case.solver["backend"] == "cuda"
 
 
 def test_study_accepts_cpu_parallel(tmp_path):

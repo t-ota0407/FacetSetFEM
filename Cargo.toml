@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/gfem-core", "crates/gfem-py"]
+members = ["crates/gfem-core", "crates/gfem-cuda", "crates/gfem-py"]
 
 [workspace.package]
 version = "0.1.0"
@@ -10,6 +10,7 @@ publish = false
 
 [workspace.dependencies]
 gfem-core = { path = "crates/gfem-core" }
+gfem-cuda = { path = "crates/gfem-cuda" }
 # VTU の圧縮に使う。C ライブラリに依存しない純 Rust 実装（miniz_oxide）を選ぶ
 flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
 # CPU 並列（SPEC §4.4）。総和はブロック分割なので逐次とビット単位で一致する
@@ -18,6 +19,21 @@ sha2 = "0.11"
 pyo3 = "0.29.2"
 # 大規模データを numpy 配列として Python に渡す（SPEC §6.3）
 numpy = "0.29.0"
+# CUDA バックエンド（SPEC §8 M5）。driver（メモリ・カーネル起動）と
+# nvrtc（カーネルの実行時コンパイル）だけを使う。cuBLAS 等は総和の順序を
+# こちらで決められないので使わない
+cudarc = { version = "0.19", default-features = false, features = [
+    "std",
+    "driver",
+    "nvrtc",
+    # CUDA 11.8 の NVRTC は nvrtc64_112_0.dll という名前で、cudarc の
+    # cuda-11080 の探索リストに載っていない。同居している 12.5 を使う
+    # （ドライバ 596.72 は CUDA 13.2 まで対応しているので問題ない）
+    "cuda-12050",
+    # ビルド時にリンクできなければ実行時にドライバを読み込む。
+    # CUDA が無いマシンでもビルド自体は通る
+    "fallback-dynamic-loading",
+] }
 
 [profile.release]
 opt-level = 3

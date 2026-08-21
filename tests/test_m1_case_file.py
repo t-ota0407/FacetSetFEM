@@ -220,13 +220,15 @@ def test_pin_gauge_is_refused(tmp_path):
     assert "SPEC §2.2" in message
 
 
-def test_cuda_backend_says_when_it_arrives(tmp_path):
+def test_unknown_backend_lists_what_is_available(tmp_path):
     message = _load_bad(
         tmp_path,
-        "version: 1\nmesh: {file: m.bdf, length_unit: mm}\nsolver: {backend: cuda}\n",
+        "version: 1\nmesh: {file: m.bdf, length_unit: mm}\nsolver: {backend: opencl}\n",
     )
+    assert "opencl" in message
+    # 使える選択肢を挙げる（CLAUDE.md 設計原則 6）
     assert "cuda" in message
-    assert "M5" in message
+    assert "cpu_parallel" in message
 
 
 def test_broken_yaml_is_reported(tmp_path):

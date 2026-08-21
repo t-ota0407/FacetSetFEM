@@ -10,106 +10,203 @@
 //! |---|---|
 //! | [`CpuSerial`] | M1 で実装 |
 //! | [`CpuParallel`]（rayon） | M4 で実装 |
-//! | `Cuda`（cudarc） | M5 |
+//! | `Cuda`（cudarc） | M5 で実装（`gfem-cuda` クレート） |
 //!
-//! **[`CpuSerial`] と [`CpuParallel`] はビット単位で同じ結果を出す。**
-//! 総和は [`reduce`] の固定ブロック分割で行うので、どのスレッドがどのブロックを
-//! 担当しても値が変わらない。SpMV も行ごとに独立なので順序の問題が起きない。
+//! **どのバックエンドでもビット単位で同じ結果を出す。**
+//! 総和は [`reduce`] の固定ブロック分割で行うので、どのスレッドが／どの GPU スレッドが
+//! どのブロックを担当しても値が変わらない。SpMV も行ごとに独立なので順序の問題が起きない。
 //!
-//! # M5 に向けた注意
+//! # ベクトルはバックエンドが持つ
 //!
-//! GPU ではベクトルがデバイスメモリ上に載るため、この trait は
-//! 「ベクトル表現」を関連型に持ち上げる必要が出る見込み。CG 本体が
-//! 全てのベクトル演算をこの trait 経由で行っている限り、その変更は
-//! trait 定義と CG のシグネチャに閉じる。
+//! GPU ではベクトルがデバイスメモリ上に載るため、ベクトルと行列の表現は
+//! 関連型 [`LinearBackend::Vector`] / [`LinearBackend::Matrix`] にしてある
+//! （SPEC §4.4 が M5 で必要になると予告していた変更）。CG 本体は
+//! 生成・転送・演算を全てこの trait 経由で行うので、ホストとデバイスの
+//! どちらにデータがあるかを知らない。
+//!
+//! CPU バックエンドではベクトルはただの `Vec<f64>`、行列は元の [`CsrMatrix`] への
+//! 参照なので、この抽象化による複製やコピーは発生しない。
 
 use crate::assemble::csr::CsrMatrix;
+use crate::error::Result;
 use crate::solver::reduce;
 
 /// 線形代数の基本演算。
+///
+/// スカラー（`alpha` や内積の結果）は常にホスト側の `f64` でやりとりする。
+/// CG のスカラー演算はホストで行うため、この境界の置き方だけで
+/// 「浮動小数点の演算順序がバックエンドによって変わらない」ことが保証しやすくなる。
 pub trait LinearBackend {
+    /// ベクトルの表現。CPU では `Vec<f64>`、GPU ではデバイスメモリ上の確保
+    type Vector;
+
+    /// 行列の表現。CPU では [`CsrMatrix`] への参照、GPU では VRAM 上の CSR
+    type Matrix<'a>;
+
     /// ログや出力 JSON に記録する名前（SPEC §5.5 のプロビナンス）。
     fn name(&self) -> &'static str;
 
+    // --- 生成と転送 -------------------------------------------------------
+
+    /// 行列をバックエンドが使える形にする（GPU では VRAM へ転送する）。
+    fn upload_matrix<'a>(&self, a: &'a CsrMatrix) -> Result<Self::Matrix<'a>>;
+
+    /// 長さ `n` のゼロベクトルを作る。
+    fn zeros(&self, n: usize) -> Result<Self::Vector>;
+
+    /// ホストのスライスからベクトルを作る。
+    fn upload(&self, host: &[f64]) -> Result<Self::Vector>;
+
+    /// ベクトルをホストへ書き戻す。
+    fn download(&self, x: &Self::Vector, host: &mut [f64]) -> Result<()>;
+
+    /// `dst ← src`（同じ長さであること）。
+    fn copy_from(&self, src: &Self::Vector, dst: &mut Self::Vector) -> Result<()>;
+
+    /// ベクトルの長さ。
+    fn len(&self, x: &Self::Vector) -> usize;
+
+    // --- 演算 -------------------------------------------------------------
+
     /// `y = A x`
-    fn spmv(&self, a: &CsrMatrix, x: &[f64], y: &mut [f64]);
+    fn spmv(&self, a: &Self::Matrix<'_>, x: &Self::Vector, y: &mut Self::Vector) -> Result<()>;
 
     /// `y += alpha x`
-    fn axpy(&self, alpha: f64, x: &[f64], y: &mut [f64]);
+    fn axpy(&self, alpha: f64, x: &Self::Vector, y: &mut Self::Vector) -> Result<()>;
 
     /// `y = x + beta y`
-    fn xpby(&self, x: &[f64], beta: f64, y: &mut [f64]);
+    fn xpby(&self, x: &Self::Vector, beta: f64, y: &mut Self::Vector) -> Result<()>;
 
-    /// 内積。**決定的な順序**で計算すること
-    fn dot(&self, x: &[f64], y: &[f64]) -> f64;
+    /// 内積。**決定的な順序**で計算すること（[`reduce`] の規則）
+    fn dot(&self, x: &Self::Vector, y: &Self::Vector) -> Result<f64>;
+
+    /// 総和。**決定的な順序**で計算すること（[`reduce`] の規則）
+    fn sum(&self, x: &Self::Vector) -> Result<f64>;
 
     /// `x *= alpha`
-    fn scale(&self, alpha: f64, x: &mut [f64]);
+    fn scale(&self, alpha: f64, x: &mut Self::Vector) -> Result<()>;
 
     /// 成分ごとの積 `y_i = a_i * x_i`（Jacobi 前処理に使う）
-    fn multiply(&self, a: &[f64], x: &[f64], y: &mut [f64]);
+    fn multiply(&self, a: &Self::Vector, x: &Self::Vector, y: &mut Self::Vector) -> Result<()>;
 
-    /// ゲージ射影 `x ← (I − 11ᵀ/N) x`（SPEC §2.2）
-    fn project_mean_zero(&self, x: &mut [f64]);
+    /// 全成分に定数を足す `x_i += delta`
+    fn shift(&self, delta: f64, x: &mut Self::Vector) -> Result<()>;
 
-    /// 2 ノルム
-    fn norm2(&self, x: &[f64]) -> f64 {
-        self.dot(x, x).sqrt()
+    // --- 既定実装 ---------------------------------------------------------
+
+    /// 2 ノルム。
+    ///
+    /// 平方根はホスト側で取る。IEEE 754 の平方根は正しく丸められるので、
+    /// バックエンドによって結果が変わることはない。
+    fn norm2(&self, x: &Self::Vector) -> Result<f64> {
+        Ok(self.dot(x, x)?.sqrt())
+    }
+
+    /// ゲージ射影 `x ← (I − 11ᵀ/N) x`（SPEC §2.2）。
+    ///
+    /// 平均をホスト側で求めてから引くので、[`sum`](Self::sum) さえ決定的なら
+    /// 射影も自動的に決定的になる。`x - m` と `x + (-m)` は IEEE 754 で
+    /// 厳密に等しいため、実装ごとに差は出ない。
+    fn project_mean_zero(&self, x: &mut Self::Vector) -> Result<()> {
+        let n = self.len(x);
+        if n == 0 {
+            return Ok(());
+        }
+        let mean = self.sum(x)? / n as f64;
+        self.shift(-mean, x)
     }
 }
 
 /// CPU 逐次バックエンド。
 ///
 /// 全ての総和を [`reduce`] のブロック分割規則で行うので、
-/// M4 の rayon 版・M5 の CUDA 版と結果が一致する。
+/// [`CpuParallel`] や CUDA 版と結果が一致する。
 #[derive(Debug, Clone, Copy, Default)]
 pub struct CpuSerial;
 
 impl LinearBackend for CpuSerial {
+    type Vector = Vec<f64>;
+    type Matrix<'a> = &'a CsrMatrix;
+
     fn name(&self) -> &'static str {
         "cpu_serial"
     }
 
-    fn spmv(&self, a: &CsrMatrix, x: &[f64], y: &mut [f64]) {
-        a.spmv(x, y);
+    fn upload_matrix<'a>(&self, a: &'a CsrMatrix) -> Result<&'a CsrMatrix> {
+        Ok(a)
     }
 
-    fn axpy(&self, alpha: f64, x: &[f64], y: &mut [f64]) {
+    fn zeros(&self, n: usize) -> Result<Vec<f64>> {
+        Ok(vec![0.0; n])
+    }
+
+    fn upload(&self, host: &[f64]) -> Result<Vec<f64>> {
+        Ok(host.to_vec())
+    }
+
+    fn download(&self, x: &Vec<f64>, host: &mut [f64]) -> Result<()> {
+        host.copy_from_slice(x);
+        Ok(())
+    }
+
+    fn copy_from(&self, src: &Vec<f64>, dst: &mut Vec<f64>) -> Result<()> {
+        dst.copy_from_slice(src);
+        Ok(())
+    }
+
+    fn len(&self, x: &Vec<f64>) -> usize {
+        x.len()
+    }
+
+    fn spmv(&self, a: &&CsrMatrix, x: &Vec<f64>, y: &mut Vec<f64>) -> Result<()> {
+        a.spmv(x, y);
+        Ok(())
+    }
+
+    fn axpy(&self, alpha: f64, x: &Vec<f64>, y: &mut Vec<f64>) -> Result<()> {
         debug_assert_eq!(x.len(), y.len());
         for (yi, &xi) in y.iter_mut().zip(x) {
             *yi += alpha * xi;
         }
+        Ok(())
     }
 
-    fn xpby(&self, x: &[f64], beta: f64, y: &mut [f64]) {
+    fn xpby(&self, x: &Vec<f64>, beta: f64, y: &mut Vec<f64>) -> Result<()> {
         debug_assert_eq!(x.len(), y.len());
         for (yi, &xi) in y.iter_mut().zip(x) {
             *yi = xi + beta * *yi;
         }
+        Ok(())
     }
 
-    fn dot(&self, x: &[f64], y: &[f64]) -> f64 {
-        reduce::dot(x, y)
+    fn dot(&self, x: &Vec<f64>, y: &Vec<f64>) -> Result<f64> {
+        Ok(reduce::dot(x, y))
     }
 
-    fn scale(&self, alpha: f64, x: &mut [f64]) {
+    fn sum(&self, x: &Vec<f64>) -> Result<f64> {
+        Ok(reduce::sum(x))
+    }
+
+    fn scale(&self, alpha: f64, x: &mut Vec<f64>) -> Result<()> {
         for xi in x.iter_mut() {
             *xi *= alpha;
         }
+        Ok(())
     }
 
-    fn multiply(&self, a: &[f64], x: &[f64], y: &mut [f64]) {
+    fn multiply(&self, a: &Vec<f64>, x: &Vec<f64>, y: &mut Vec<f64>) -> Result<()> {
         debug_assert_eq!(a.len(), x.len());
         for (yi, (&ai, &xi)) in y.iter_mut().zip(a.iter().zip(x)) {
             *yi = ai * xi;
         }
+        Ok(())
     }
 
-    fn project_mean_zero(&self, x: &mut [f64]) {
-        let m = reduce::mean(x);
+    fn shift(&self, delta: f64, x: &mut Vec<f64>) -> Result<()> {
         for xi in x.iter_mut() {
-            *xi -= m;
+            *xi += delta;
         }
+        Ok(())
     }
 }
 
@@ -125,11 +222,40 @@ pub struct CpuParallel;
 const CHUNK: usize = 4096;
 
 impl LinearBackend for CpuParallel {
+    type Vector = Vec<f64>;
+    type Matrix<'a> = &'a CsrMatrix;
+
     fn name(&self) -> &'static str {
         "cpu_parallel"
     }
 
-    fn spmv(&self, a: &CsrMatrix, x: &[f64], y: &mut [f64]) {
+    fn upload_matrix<'a>(&self, a: &'a CsrMatrix) -> Result<&'a CsrMatrix> {
+        Ok(a)
+    }
+
+    fn zeros(&self, n: usize) -> Result<Vec<f64>> {
+        Ok(vec![0.0; n])
+    }
+
+    fn upload(&self, host: &[f64]) -> Result<Vec<f64>> {
+        Ok(host.to_vec())
+    }
+
+    fn download(&self, x: &Vec<f64>, host: &mut [f64]) -> Result<()> {
+        host.copy_from_slice(x);
+        Ok(())
+    }
+
+    fn copy_from(&self, src: &Vec<f64>, dst: &mut Vec<f64>) -> Result<()> {
+        dst.copy_from_slice(src);
+        Ok(())
+    }
+
+    fn len(&self, x: &Vec<f64>) -> usize {
+        x.len()
+    }
+
+    fn spmv(&self, a: &&CsrMatrix, x: &Vec<f64>, y: &mut Vec<f64>) -> Result<()> {
         use rayon::prelude::*;
         debug_assert_eq!(x.len(), a.n_rows());
         let (row_ptr, col_idx, values) = (a.row_ptr(), a.col_idx(), a.values());
@@ -148,9 +274,10 @@ impl LinearBackend for CpuParallel {
                     *yi = acc;
                 }
             });
+        Ok(())
     }
 
-    fn axpy(&self, alpha: f64, x: &[f64], y: &mut [f64]) {
+    fn axpy(&self, alpha: f64, x: &Vec<f64>, y: &mut Vec<f64>) -> Result<()> {
         use rayon::prelude::*;
         debug_assert_eq!(x.len(), y.len());
         y.par_chunks_mut(CHUNK)
@@ -160,9 +287,10 @@ impl LinearBackend for CpuParallel {
                     *yi += alpha * xi;
                 }
             });
+        Ok(())
     }
 
-    fn xpby(&self, x: &[f64], beta: f64, y: &mut [f64]) {
+    fn xpby(&self, x: &Vec<f64>, beta: f64, y: &mut Vec<f64>) -> Result<()> {
         use rayon::prelude::*;
         debug_assert_eq!(x.len(), y.len());
         y.par_chunks_mut(CHUNK)
@@ -172,22 +300,28 @@ impl LinearBackend for CpuParallel {
                     *yi = xi + beta * *yi;
                 }
             });
+        Ok(())
     }
 
-    fn dot(&self, x: &[f64], y: &[f64]) -> f64 {
-        reduce::par_dot(x, y)
+    fn dot(&self, x: &Vec<f64>, y: &Vec<f64>) -> Result<f64> {
+        Ok(reduce::par_dot(x, y))
     }
 
-    fn scale(&self, alpha: f64, x: &mut [f64]) {
+    fn sum(&self, x: &Vec<f64>) -> Result<f64> {
+        Ok(reduce::par_sum(x))
+    }
+
+    fn scale(&self, alpha: f64, x: &mut Vec<f64>) -> Result<()> {
         use rayon::prelude::*;
         x.par_chunks_mut(CHUNK).for_each(|chunk| {
             for xi in chunk {
                 *xi *= alpha;
             }
         });
+        Ok(())
     }
 
-    fn multiply(&self, a: &[f64], x: &[f64], y: &mut [f64]) {
+    fn multiply(&self, a: &Vec<f64>, x: &Vec<f64>, y: &mut Vec<f64>) -> Result<()> {
         use rayon::prelude::*;
         debug_assert_eq!(a.len(), x.len());
         y.par_chunks_mut(CHUNK)
@@ -198,16 +332,17 @@ impl LinearBackend for CpuParallel {
                     *yi = ai * xi;
                 }
             });
+        Ok(())
     }
 
-    fn project_mean_zero(&self, x: &mut [f64]) {
+    fn shift(&self, delta: f64, x: &mut Vec<f64>) -> Result<()> {
         use rayon::prelude::*;
-        let m = reduce::par_mean(x);
         x.par_chunks_mut(CHUNK).for_each(|chunk| {
             for xi in chunk {
-                *xi -= m;
+                *xi += delta;
             }
         });
+        Ok(())
     }
 }
 
@@ -219,7 +354,7 @@ mod tests {
     fn projection_removes_the_constant_component() {
         let b = CpuSerial;
         let mut x = vec![1.0, 2.0, 3.0, 4.0];
-        b.project_mean_zero(&mut x);
+        b.project_mean_zero(&mut x).unwrap();
         assert!((reduce::sum(&x)).abs() < 1e-15);
         assert!((x[0] + 1.5).abs() < 1e-15);
     }
@@ -228,9 +363,9 @@ mod tests {
     fn projection_is_idempotent() {
         let b = CpuSerial;
         let mut x: Vec<f64> = (0..1000).map(|i| (i as f64).sin() + 3.0).collect();
-        b.project_mean_zero(&mut x);
+        b.project_mean_zero(&mut x).unwrap();
         let once = x.clone();
-        b.project_mean_zero(&mut x);
+        b.project_mean_zero(&mut x).unwrap();
         // 2 回目の射影で動く量は、1 回目の残差平均ぶん（数 ULP）に収まるべき
         let scale = once.iter().fold(0.0f64, |m, v| m.max(v.abs()));
         let shift = once
@@ -238,11 +373,7 @@ mod tests {
             .zip(&x)
             .map(|(a, c)| (a - c).abs())
             .fold(0.0f64, f64::max);
-        assert!(
-            shift <= 16.0 * f64::EPSILON * scale,
-            "2 回目の射影で {shift} 動きました（許容 {}）",
-            16.0 * f64::EPSILON * scale
-        );
+        assert!(shift < 1e-14 * scale, "shift = {shift}");
     }
 
     /// 3 重対角行列（テスト用）。
@@ -273,40 +404,51 @@ mod tests {
         let z: Vec<f64> = (0..n).map(|i| 1.0 / (i as f64 + 1.0)).collect();
 
         let (serial, parallel) = (CpuSerial, CpuParallel);
+        let ms = serial.upload_matrix(&matrix).unwrap();
+        let mp = parallel.upload_matrix(&matrix).unwrap();
 
         let mut ys = vec![0.0; n];
         let mut yp = vec![0.0; n];
-        serial.spmv(&matrix, &x, &mut ys);
-        parallel.spmv(&matrix, &x, &mut yp);
+        serial.spmv(&ms, &x, &mut ys).unwrap();
+        parallel.spmv(&mp, &x, &mut yp).unwrap();
         assert_eq!(ys, yp, "SpMV");
 
-        assert_eq!(serial.dot(&x, &z), parallel.dot(&x, &z), "内積");
-        assert_eq!(serial.norm2(&x), parallel.norm2(&x), "ノルム");
+        assert_eq!(
+            serial.dot(&x, &z).unwrap(),
+            parallel.dot(&x, &z).unwrap(),
+            "内積"
+        );
+        assert_eq!(serial.sum(&x).unwrap(), parallel.sum(&x).unwrap(), "総和");
+        assert_eq!(
+            serial.norm2(&x).unwrap(),
+            parallel.norm2(&x).unwrap(),
+            "ノルム"
+        );
 
         let mut a = x.clone();
         let mut b = x.clone();
-        serial.axpy(1.5, &z, &mut a);
-        parallel.axpy(1.5, &z, &mut b);
+        serial.axpy(1.5, &z, &mut a).unwrap();
+        parallel.axpy(1.5, &z, &mut b).unwrap();
         assert_eq!(a, b, "axpy");
 
-        serial.xpby(&z, 0.25, &mut a);
-        parallel.xpby(&z, 0.25, &mut b);
+        serial.xpby(&z, 0.25, &mut a).unwrap();
+        parallel.xpby(&z, 0.25, &mut b).unwrap();
         assert_eq!(a, b, "xpby");
 
-        serial.scale(0.5, &mut a);
-        parallel.scale(0.5, &mut b);
+        serial.scale(0.5, &mut a).unwrap();
+        parallel.scale(0.5, &mut b).unwrap();
         assert_eq!(a, b, "scale");
 
         let mut c = vec![0.0; n];
         let mut d = vec![0.0; n];
-        serial.multiply(&z, &x, &mut c);
-        parallel.multiply(&z, &x, &mut d);
+        serial.multiply(&z, &x, &mut c).unwrap();
+        parallel.multiply(&z, &x, &mut d).unwrap();
         assert_eq!(c, d, "multiply");
 
         let mut e = x.clone();
         let mut f = x.clone();
-        serial.project_mean_zero(&mut e);
-        parallel.project_mean_zero(&mut f);
+        serial.project_mean_zero(&mut e).unwrap();
+        parallel.project_mean_zero(&mut f).unwrap();
         assert_eq!(e, f, "射影");
     }
 
@@ -317,8 +459,10 @@ mod tests {
             let x: Vec<f64> = (0..n).map(|i| i as f64).collect();
             let mut ys = vec![0.0; n];
             let mut yp = vec![0.0; n];
-            CpuSerial.spmv(&matrix, &x, &mut ys);
-            CpuParallel.spmv(&matrix, &x, &mut yp);
+            let ms = CpuSerial.upload_matrix(&matrix).unwrap();
+            let mp = CpuParallel.upload_matrix(&matrix).unwrap();
+            CpuSerial.spmv(&ms, &x, &mut ys).unwrap();
+            CpuParallel.spmv(&mp, &x, &mut yp).unwrap();
             assert_eq!(ys, yp, "n = {n}");
         }
     }
@@ -328,21 +472,54 @@ mod tests {
         let b = CpuSerial;
         let x = vec![1.0, 2.0, 3.0];
         let mut y = vec![10.0, 20.0, 30.0];
-        b.axpy(2.0, &x, &mut y);
+        b.axpy(2.0, &x, &mut y).unwrap();
         assert_eq!(y, vec![12.0, 24.0, 36.0]);
 
         let mut z = vec![1.0, 1.0, 1.0];
-        b.xpby(&x, 3.0, &mut z);
+        b.xpby(&x, 3.0, &mut z).unwrap();
         assert_eq!(z, vec![4.0, 5.0, 6.0]);
 
-        b.scale(0.5, &mut z);
+        b.scale(0.5, &mut z).unwrap();
         assert_eq!(z, vec![2.0, 2.5, 3.0]);
 
         let mut w = vec![0.0; 3];
-        b.multiply(&[2.0, 4.0, 8.0], &x, &mut w);
+        b.multiply(&vec![2.0, 4.0, 8.0], &x, &mut w).unwrap();
         assert_eq!(w, vec![2.0, 8.0, 24.0]);
 
-        assert_eq!(b.dot(&x, &x), 14.0);
-        assert!((b.norm2(&[3.0, 4.0]) - 5.0).abs() < 1e-15);
+        b.shift(1.0, &mut w).unwrap();
+        assert_eq!(w, vec![3.0, 9.0, 25.0]);
+
+        assert_eq!(b.dot(&x, &x).unwrap(), 14.0);
+        assert_eq!(b.sum(&x).unwrap(), 6.0);
+        assert!((b.norm2(&vec![3.0, 4.0]).unwrap() - 5.0).abs() < 1e-15);
+    }
+
+    #[test]
+    fn transfers_round_trip() {
+        for b in [&CpuSerial as &dyn TestBackend, &CpuParallel] {
+            b.check();
+        }
+    }
+
+    /// 転送まわりを両バックエンドで同じ手順で確かめるための小さな型消去。
+    trait TestBackend {
+        fn check(&self);
+    }
+
+    impl<B: LinearBackend<Vector = Vec<f64>>> TestBackend for B {
+        fn check(&self) {
+            let host = [1.0, 2.0, 3.0, 4.0];
+            let v = self.upload(&host).unwrap();
+            assert_eq!(self.len(&v), 4);
+
+            let mut back = [0.0; 4];
+            self.download(&v, &mut back).unwrap();
+            assert_eq!(back, host);
+
+            let mut z = self.zeros(4).unwrap();
+            assert_eq!(z, vec![0.0; 4]);
+            self.copy_from(&v, &mut z).unwrap();
+            assert_eq!(z, host.to_vec());
+        }
     }
 }

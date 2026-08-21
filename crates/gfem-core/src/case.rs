@@ -141,6 +141,12 @@ pub enum Backend {
     CpuSerial,
     /// CPU 並列（rayon）
     CpuParallel,
+    /// CUDA（`gfem-cuda` クレート）
+    ///
+    /// `gfem-core` は CUDA に依存しないので、この値を指定しただけでは GPU では動かない。
+    /// 呼び出し側が [`crate::solve_with`] に `gfem-cuda` のソルバを渡す必要がある
+    /// （SPEC §7 の設計原則）。渡されなければ理由つきのエラーになる。
+    Cuda,
 }
 
 impl Backend {
@@ -150,6 +156,7 @@ impl Backend {
             Backend::Auto => "auto",
             Backend::CpuSerial => "cpu_serial",
             Backend::CpuParallel => "cpu_parallel",
+            Backend::Cuda => "cuda",
         }
     }
 
@@ -159,32 +166,54 @@ impl Backend {
             "auto" => Ok(Backend::Auto),
             "cpu" | "cpu_serial" | "serial" => Ok(Backend::CpuSerial),
             "cpu_parallel" | "parallel" => Ok(Backend::CpuParallel),
+            "cuda" | "gpu" => Ok(Backend::Cuda),
             other => Err(GfemError::new(
                 ErrorKind::Case,
                 format!("このビルドでは使えないバックエンドです: \"{other}\""),
             )
-            .with_hint(
-                "auto / cpu / cpu_parallel のいずれかを指定してください。\
-                 cuda は M5 で対応します（SPEC §8）",
-            )),
+            .with_hint("auto / cpu / cpu_parallel / cuda のいずれかを指定してください")),
         }
     }
 
-    /// `Auto` を実際のバックエンドに解決する。
+    /// 並列アセンブリと CPU 並列に切り替える節点数（実測の損益分岐点。SPEC §8 M4）。
+    pub const PARALLEL_THRESHOLD: usize = 20_000;
+
+    /// GPU に載せる価値が出る節点数（実測の損益分岐点。SPEC §8 M5）。
+    ///
+    /// これより小さいと、VRAM への転送とカーネル起動の往復が効いて、
+    /// 20 コアの CPU 並列に負ける。実測では 15 万節点で CPU 並列が、
+    /// 30 万節点で GPU が勝つので、その間に置いてある。
+    pub const GPU_THRESHOLD: usize = 250_000;
+
+    /// `Auto` を CPU のバックエンドに解決する。
     ///
     /// 小さい問題では並列化のオーバーヘッドの方が高くつくので、しきい値で切り替える。
     /// どちらでも結果は同じなので、この判断が答えを変えることはない。
+    ///
+    /// **`Auto` がここで `Cuda` を選ぶことはない。** `gfem-core` は GPU があるか
+    /// どうかを知らないため、GPU を使う判断は呼び出し側（`gfem-py`）が行う。
     pub fn resolve(self, n_nodes: usize) -> Backend {
-        const PARALLEL_THRESHOLD: usize = 20_000;
         match self {
             Backend::Auto => {
-                if n_nodes >= PARALLEL_THRESHOLD {
+                if n_nodes >= Self::PARALLEL_THRESHOLD {
                     Backend::CpuParallel
                 } else {
                     Backend::CpuSerial
                 }
             }
             other => other,
+        }
+    }
+
+    /// `Auto` のとき、この規模なら GPU を試す価値があるか。
+    ///
+    /// 判断材料を 1 箇所にまとめておくための小さな関数。実際に GPU が使えるかは
+    /// `gfem-cuda` に聞く。
+    pub fn wants_gpu(self, n_nodes: usize) -> bool {
+        match self {
+            Backend::Cuda => true,
+            Backend::Auto => n_nodes >= Self::GPU_THRESHOLD,
+            _ => false,
         }
     }
 }

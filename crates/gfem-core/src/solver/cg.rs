@@ -13,6 +13,14 @@
 //!
 //! アルゴリズム本体はここ 1 箇所だけに書く（SPEC §4.4）。CPU 逐次・CPU 並列・GPU の
 //! どれで走らせても同じ結果になるよう、ベクトル演算は全て [`LinearBackend`] 経由で行う。
+//!
+//! # ホストとデバイスの境目
+//!
+//! 作業ベクトル（r, z, p, Ap と解）はバックエンドが持つ表現で確保し、
+//! **反復の間は一度もホストへ戻さない**。GPU では VRAM に常駐することになる（SPEC §8 M5）。
+//! ホストへ戻すのは内積・総和の結果というスカラーだけで、α・β・残差の割り算は
+//! ホストの `f64` で行う。こうしておくと、スカラー演算の順序がバックエンドによって
+//! 変わりようがない。
 
 use crate::assemble::csr::CsrMatrix;
 use crate::case::{Preconditioner, SolverOptions};
@@ -91,7 +99,7 @@ pub fn solve<B: LinearBackend>(
     }
     let mut progress = progress;
 
-    // 前処理（対角の逆数）
+    // 前処理（対角の逆数）。ホスト側で作ってから転送する
     let inv_diag = match options.preconditioner {
         Preconditioner::None => None,
         Preconditioner::Jacobi => {
@@ -110,13 +118,20 @@ pub fn solve<B: LinearBackend>(
         }
     };
 
+    let a = backend.upload_matrix(matrix)?;
+    let inv_diag = match inv_diag {
+        Some(d) => Some(backend.upload(&d)?),
+        None => None,
+    };
+
     // 右辺と初期値を零空間に直交させる。
     // f は解析的には 1ᵀf = 0 を満たすが、面積按分の丸めでわずかにずれるため落としておく
-    let mut f = rhs.to_vec();
-    backend.project_mean_zero(&mut f);
-    backend.project_mean_zero(phi);
+    let mut f = backend.upload(rhs)?;
+    backend.project_mean_zero(&mut f)?;
+    let mut x = backend.upload(phi)?;
+    backend.project_mean_zero(&mut x)?;
 
-    let norm_f = backend.norm2(&f);
+    let norm_f = backend.norm2(&f)?;
     let mut history = Vec::new();
     if norm_f == 0.0 {
         // 電流が入っていない。解は恒等的にゼロ
@@ -132,20 +147,21 @@ pub fn solve<B: LinearBackend>(
         });
     }
 
-    let mut r = vec![0.0; n];
-    let mut z = vec![0.0; n];
-    let mut p = vec![0.0; n];
-    let mut ap = vec![0.0; n];
+    let mut r = backend.zeros(n)?;
+    let mut z = backend.zeros(n)?;
+    let mut p = backend.zeros(n)?;
+    let mut ap = backend.zeros(n)?;
 
     // r = P (f − K φ)
-    backend.spmv(matrix, phi, &mut r);
-    backend.scale(-1.0, &mut r);
-    backend.axpy(1.0, &f, &mut r);
-    backend.project_mean_zero(&mut r);
+    backend.spmv(&a, &x, &mut r)?;
+    backend.scale(-1.0, &mut r)?;
+    backend.axpy(1.0, &f, &mut r)?;
+    backend.project_mean_zero(&mut r)?;
 
-    let mut residual = backend.norm2(&r) / norm_f;
+    let mut residual = backend.norm2(&r)? / norm_f;
     history.push(residual);
     if residual < options.tolerance {
+        backend.download(&x, phi)?;
         return Ok(CgReport {
             iterations: 0,
             relative_residual: residual,
@@ -157,10 +173,10 @@ pub fn solve<B: LinearBackend>(
         });
     }
 
-    apply_preconditioner(backend, inv_diag.as_deref(), &r, &mut z);
-    backend.project_mean_zero(&mut z);
-    p.copy_from_slice(&z);
-    let mut rz = backend.dot(&r, &z);
+    apply_preconditioner(backend, inv_diag.as_ref(), &r, &mut z)?;
+    backend.project_mean_zero(&mut z)?;
+    backend.copy_from(&z, &mut p)?;
+    let mut rz = backend.dot(&r, &z)?;
 
     let mut best = residual;
     let mut best_iteration = 0usize;
@@ -172,11 +188,11 @@ pub fn solve<B: LinearBackend>(
     while iteration < options.max_iterations {
         iteration += 1;
 
-        backend.spmv(matrix, &p, &mut ap);
+        backend.spmv(&a, &p, &mut ap)?;
         // K p は零空間に直交するはずだが、丸めで漏れる成分を毎回落とす
-        backend.project_mean_zero(&mut ap);
+        backend.project_mean_zero(&mut ap)?;
 
-        let pap = backend.dot(&p, &ap);
+        let pap = backend.dot(&p, &ap)?;
         if pap <= 0.0 || pap.is_nan() {
             return Err(GfemError::internal(format!(
                 "CG が破綻しました: pᵀKp = {pap} が正ではありません（反復 {iteration}）"
@@ -188,11 +204,11 @@ pub fn solve<B: LinearBackend>(
         }
         let alpha = rz / pap;
 
-        backend.axpy(alpha, &p, phi);
-        backend.axpy(-alpha, &ap, &mut r);
-        backend.project_mean_zero(&mut r);
+        backend.axpy(alpha, &p, &mut x)?;
+        backend.axpy(-alpha, &ap, &mut r)?;
+        backend.project_mean_zero(&mut r)?;
 
-        residual = backend.norm2(&r) / norm_f;
+        residual = backend.norm2(&r)? / norm_f;
         history.push(residual);
 
         if let Some(cb) = progress.as_deref_mut()
@@ -216,17 +232,18 @@ pub fn solve<B: LinearBackend>(
             break;
         }
 
-        apply_preconditioner(backend, inv_diag.as_deref(), &r, &mut z);
-        backend.project_mean_zero(&mut z);
-        let rz_next = backend.dot(&r, &z);
+        apply_preconditioner(backend, inv_diag.as_ref(), &r, &mut z)?;
+        backend.project_mean_zero(&mut z)?;
+        let rz_next = backend.dot(&r, &z)?;
         let beta = rz_next / rz;
         rz = rz_next;
         // p = z + beta p
-        backend.xpby(&z, beta, &mut p);
+        backend.xpby(&z, beta, &mut p)?;
     }
 
     // 代表元を「平均ゼロ」に揃える（丸めで漏れた定数成分を落とす）
-    backend.project_mean_zero(phi);
+    backend.project_mean_zero(&mut x)?;
+    backend.download(&x, phi)?;
 
     Ok(CgReport {
         iterations: iteration,
@@ -241,13 +258,13 @@ pub fn solve<B: LinearBackend>(
 
 fn apply_preconditioner<B: LinearBackend>(
     backend: &B,
-    inv_diag: Option<&[f64]>,
-    r: &[f64],
-    z: &mut [f64],
-) {
+    inv_diag: Option<&B::Vector>,
+    r: &B::Vector,
+    z: &mut B::Vector,
+) -> Result<()> {
     match inv_diag {
         Some(d) => backend.multiply(d, r, z),
-        None => z.copy_from_slice(r),
+        None => backend.copy_from(r, z),
     }
 }
 

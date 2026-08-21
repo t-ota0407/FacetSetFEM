@@ -30,6 +30,9 @@ from ._gfem import (
     Solution,
     SolverCancelled,
     __version__,
+    cuda_available,
+    cuda_check,
+    cuda_devices,
     length_units,
     read_nastran,
 )
@@ -48,7 +51,11 @@ __all__ = [
     "SolverSpec",
     "Study",
     "__version__",
+    "cuda_available",
+    "cuda_check",
+    "cuda_devices",
     "describe_bounding_box",
+    "describe_gpus",
     "length_units",
     "read_nastran",
 ]
@@ -79,3 +86,26 @@ def describe_bounding_box(mesh: Mesh, unit: str | None = None) -> str:
 def _fmt(v: float) -> str:
     """桁数を抑えつつ、末尾の 0 を落とした表示。"""
     return f"{v:.6g}"
+
+
+def describe_gpus() -> str:
+    """使える GPU を人が読める形にまとめる（SPEC §8 M5）。
+
+    GUI の「環境」表示と、バッチ実行のログ冒頭に使う。
+    GPU があってもこの表示だけでは解けるとは限らない（VRAM 次第）ので、
+    規模ごとの判定は :func:`cuda_check` を使う。
+    """
+    if not cuda_available():
+        return "このビルドには CUDA バックエンドが入っていません（CPU のみ）"
+    devices = cuda_devices()
+    if not devices:
+        return "CUDA が使える GPU が見つかりません（CPU で解きます）"
+    lines = []
+    for d in devices:
+        major, minor = d["compute_capability"]
+        state = "" if d["usable"] else "（倍精度に使えません: CC 6.0 未満）"
+        lines.append(
+            f"GPU {d['ordinal']}: {d['name']} / CC {major}.{minor} / "
+            f"VRAM {d['free_memory'] / 1e9:.1f} GB 空き（全 {d['total_memory'] / 1e9:.1f} GB）{state}"
+        )
+    return "\n".join(lines)

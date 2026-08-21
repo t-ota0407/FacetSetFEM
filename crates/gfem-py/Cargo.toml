@@ -13,9 +13,15 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 gfem-core.workspace = true
+# CUDA バックエンド（SPEC §8 M5）。gfem-core は CUDA に依存しないので、
+# GPU を使うかどうかの判断はここで行う（SPEC §7 の設計原則）
+gfem-cuda = { workspace = true, optional = true }
 pyo3 = { workspace = true, features = ["abi3-py312"] }
 numpy.workspace = true
 
 [features]
+default = ["cuda"]
 # maturin が渡す。cargo test などで単体ビルドするときは外れる
 extension-module = ["pyo3/extension-module"]
+# CUDA バックエンドを組み込む。外すと CPU だけのビルドになる
+cuda = ["dep:gfem-cuda"]

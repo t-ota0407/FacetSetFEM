@@ -26,7 +26,8 @@ use crate::post::{
 };
 use crate::provenance::Provenance;
 use crate::solver::backend::{CpuParallel, CpuSerial, LinearBackend};
-use crate::solver::cg::{self, CgReport, ProgressFn};
+use crate::solver::cg::{CgReport, ProgressFn};
+use crate::solver::external::{BackendSolver, LinearSolver};
 use std::path::Path;
 use std::time::Instant;
 
@@ -284,29 +285,70 @@ fn region_stats_json(s: &RegionStats) -> Json {
     j
 }
 
-/// ケースで指定されたバックエンドで解く。
+/// ケースで指定されたバックエンドで解く（CPU のみ）。
 ///
 /// バックエンドを変えても**結果はビット単位で同じ**（CLAUDE.md 設計原則 1）。
 /// `Auto` は規模を見て逐次と並列を切り替えるだけで、答えには影響しない。
+///
+/// CUDA は `gfem-core` からは見えないので、GPU で解くときは
+/// [`solve_with`] に `gfem-cuda` のソルバを渡す。
 pub fn solve(mesh: &Mesh, case: &Case, progress: Option<ProgressFn<'_>>) -> Result<Analysis> {
-    match case.solver.backend.resolve(mesh.nodes.len()) {
-        Backend::CpuParallel => run(&CpuParallel, mesh, case, progress, true),
-        _ => run(&CpuSerial, mesh, case, progress, false),
+    solve_with(mesh, case, progress, None)
+}
+
+/// 外部のソルバ（`gfem-cuda` など）を差し込んで解く。
+///
+/// `solver` が `None` ならケースの設定どおり CPU で解く。`Some` なら
+/// **そのソルバで解く**——バックエンドの選択は呼び出し側の責任になる。
+/// GPU が使えるかどうかの判定とフォールバックは `gfem-cuda` 側で行い、
+/// ここには「使えると決まったソルバ」だけが渡ってくる（SPEC §4.4）。
+///
+/// **アセンブリは常に CPU で行う。** GPU で解く場合でも行列は主記憶で組み立て、
+/// できあがった CSR を VRAM へ送る。アセンブリを並列にするかは節点数だけで決める
+/// （`solver.backend` の指定とは独立。GPU で解くのに組み立てが逐次では意味がない）。
+pub fn solve_with(
+    mesh: &Mesh,
+    case: &Case,
+    progress: Option<ProgressFn<'_>>,
+    solver: Option<&dyn LinearSolver>,
+) -> Result<Analysis> {
+    let n = mesh.nodes.len();
+    let resolved = case.solver.backend.resolve(n);
+    match solver {
+        // 外部ソルバのときは規模だけでアセンブリの並列度を決める
+        Some(s) => {
+            let parallel = Backend::Auto.resolve(n) == Backend::CpuParallel;
+            run_with(s, mesh, case, progress, parallel)
+        }
+        None if resolved == Backend::Cuda => Err(GfemError::new(
+            ErrorKind::Case,
+            "backend: cuda が指定されましたが、CUDA バックエンドが渡されていません",
+        )
+        .with_hint(
+            "gfem-core 単体は CUDA に依存しません（SPEC §7）。Python API から使うか、\
+             gfem_cuda のソルバを solve_with に渡してください",
+        )),
+        None if resolved == Backend::CpuParallel => {
+            run_with(&BackendSolver(CpuParallel), mesh, case, progress, true)
+        }
+        None => run_with(&BackendSolver(CpuSerial), mesh, case, progress, false),
     }
 }
 
 /// バックエンドを明示して解く（アセンブリは逐次）。
+///
+/// テストで「このバックエンドで解いた結果」を直に比べるための入口。
 pub fn solve_with_backend<B: LinearBackend>(
-    backend: &B,
+    backend: B,
     mesh: &Mesh,
     case: &Case,
     progress: Option<ProgressFn<'_>>,
 ) -> Result<Analysis> {
-    run(backend, mesh, case, progress, false)
+    run_with(&BackendSolver(backend), mesh, case, progress, false)
 }
 
-fn run<B: LinearBackend>(
-    backend: &B,
+fn run_with(
+    solver: &dyn LinearSolver,
     mesh: &Mesh,
     case: &Case,
     progress: Option<ProgressFn<'_>>,
@@ -331,14 +373,7 @@ fn run<B: LinearBackend>(
     // --- 求解 ---
     let mark = Instant::now();
     let mut potential = vec![0.0; mesh.nodes.len()];
-    let report = cg::solve(
-        backend,
-        &matrix,
-        &load,
-        &mut potential,
-        &case.solver,
-        progress,
-    )?;
+    let report = solver.solve(&matrix, &load, &mut potential, &case.solver, progress)?;
     let solve_time = mark.elapsed().as_secs_f64();
 
     if !report.converged {
