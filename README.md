@@ -10,7 +10,7 @@
 
 | フェーズ | 状態 |
 |---|---|
-| 仕様策定 | **完了**（SPEC.md v0.9） |
+| 仕様策定 | **完了**（SPEC.md v1.0） |
 | 開発環境構築 | **完了**（2026-08-18） |
 | M0: 骨組み | **完了**（2026-08-19） |
 | M1: 体験一周（GUI で solve まで） | **完了**（2026-08-20） |
@@ -19,7 +19,7 @@
 | M4: 要素拡張と CPU 並列 | **完了**（2026-08-21） |
 | M5: CUDA バックエンド | **完了**（2026-08-21） |
 | M6: AMG 前処理 | **完了**（2026-08-21） |
-| M7: 使い勝手の仕上げ | **未着手 ← 次はここから** |
+| M7: 使い勝手の仕上げ | **完了**（2026-08-21） |
 
 マイルストーンの定義は SPEC.md §8 を参照。
 
@@ -63,6 +63,30 @@ result.write_summary_json("summary.json")  # 入力ハッシュ・Git の状態�
 result = gfem.Study.load("tests/models/slab_3layer.yaml").solve()
 ```
 
+パラメータスタディ（M7）。σ・刺激電流・電極の面・ソルバ設定を振って一括で解く:
+
+```python
+study = gfem.Study.load("tests/models/slab_3layer.yaml")
+table = gfem.sweep(study, {"sigma.2": [0.02, 0.04], "current": [1e-3, 2e-3]})
+table.write_csv("sweep.csv")
+print(table.rows[0]["impedance_ohm"])
+```
+
+**刺激強度は `current`（全電極まとめて）で振ること。** 1 極だけ変えると Σ I_k = 0 が
+崩れて解が存在しなくなる（SPEC §2.2）。GUI からは「実行 → パラメータスタディ...」。
+
+組織物性のプリセット（M7）:
+
+```python
+gfem.tissue("muscle").sigma     # 0.35
+gfem.tissue_names()             # 使える名前の一覧
+library = gfem.load_library("my_tissues.yaml")   # 自前の表に差し替える
+```
+
+**同梱の値は桁と相対関係を掴むための出発点で、文献データベースではない。**
+周波数・温度・測定方向で大きく変わるので、実際の解析では文献値を確認すること
+（SPEC §12 の未決事項 2）。
+
 | 機能 | 状態 |
 |---|---|
 | Nastran 読み込み（小/大/自由形式、継続行、8 種のカード） | ✔ |
@@ -83,7 +107,11 @@ result = gfem.Study.load("tests/models/slab_3layer.yaml").solve()
 | CPU 並列（rayon。逐次とビット単位で一致） | ✔ |
 | CUDA（f64・VRAM 常駐・CPU とビット単位で一致） | ✔ |
 | AMG 前処理（平滑化凝集。CPU / GPU 両対応） | ✔ |
-| 等値面・流線・面隣接・L2 誤差評価の Hex8 / Penta6 対応 | M7 |
+| 等値面・流線・面隣接・L2 誤差評価の Hex8 / Penta6 対応（面共役な四面体分割） | ✔ |
+| 流線の始点探索の空間分割 | ✔ |
+| Undo / Redo | ✔ |
+| パラメータスタディ（Python API と GUI） | ✔ |
+| 組織物性プリセット | ✔ |
 
 ### 規模と速度（M5 実測）
 
@@ -225,6 +253,7 @@ export PATH="$HOME/.cargo/bin:$PATH"
 | Python のテスト | `.venv/Scripts/python.exe -m pytest` |
 | サンプルモデルの再生成 | `.venv/Scripts/python.exe scripts/make_sample_mesh.py` |
 | GUI 起動 | `.venv/Scripts/python.exe -m gfem.gui [model.bdf \| case.yaml]` |
+| 配布用 wheel の作成 | `.venv/Scripts/python.exe scripts/build_release.py` |
 
 `maturin develop` は `VIRTUAL_ENV` を見るので、Git Bash からは環境変数を明示するのが確実:
 
@@ -251,7 +280,8 @@ pyproject.toml        maturin（Rust 拡張）と pytest の設定
 crates/
   gfem-core/          Rust コア。CUDA・Python に一切依存しない
     src/element/      形状関数 trait（shape）、tet4 / hex8 / penta6、面積分
-    src/mesh/         メッシュ表現、ID 索引、外表面抽出、等値面、流線
+    src/mesh/         メッシュ表現、ID 索引、外表面抽出、等値面、流線、
+                      面共役な四面体分割（tetview）、要素探索の一様格子（spatial）
     src/io/nastran/   バルクデータパーサ（field / reader / parse / coord の 4 層）
     src/io/vtu.rs     VTU ライタ
     src/assemble/     CSR、非ゼロ構造、剛性・荷重のアセンブリ、並列アセンブリ
@@ -267,21 +297,19 @@ crates/
   gfem-py/            PyO3 バインディング（cuda フィーチャで GPU 対応）
 python/gfem/          高レベル Python API
   study.py            ケースファイル（YAML）
+  sweep.py            パラメータスタディ
+  tissues.py          組織物性プリセット
   gui/                PySide6 + PyVista の GUI
-scripts/              サンプルモデル生成など開発用スクリプト
+scripts/              サンプルモデル生成、配布用 wheel の作成
 tests/                Python テストとサンプルモデル
 ```
 
 ---
 
-## 次にやること（M7）
+## 次にやること
 
-SPEC.md §8 の M7「使い勝手の仕上げ」。
-
-1. **面共役な四面体分割**（SPEC §5.1）。等値面・流線・面隣接・L2 誤差評価を
-   Hex8 / Penta6 を含むメッシュへ広げる
-2. 流線の要素探索の空間分割（現在は全要素走査）
-3. Undo / Redo、パラメータスタディ、組織物性プリセット、配布形態の整備
+v1.0 のマイルストーンは全て終わった。次に効くのは**速度ではなく前後処理**（下記）と、
+SPEC §9 に穴を空けてある拡張（異方性導電率・2 次要素・完全電極モデル）。
 
 ### M5・M6 で見えた課題（速度）
 
@@ -293,15 +321,40 @@ AMG 自体の残りの伸びしろは階層構築（1000 万節点で 7.1 秒）
 逐次でなければならないが、最細レベル行列の複製と VRAM への 2 回目の転送は
 CG が持っているものを共有すれば省ける（SPEC §4.5 の末尾）。
 
-### M4 から持ち越したもの
+### M7 で見つけた既存の不具合（流線）
 
-等値面・流線・面隣接・L2 誤差評価は Tet4 専用のまま。要素種を混ぜるには
-**面共役な四面体分割**（隣り合う要素が共有する四角形面で同じ対角線を選ぶ分割）が
-必要で、選び方がずれると等値面に隙間ができ流線の追跡も壊れる。M7 で対応する
-（SPEC §5.1 / §8）。**解く・数える・書き出す・GUI で表示する経路は要素種を選ばない。**
+四面体分割を通したことで、M6 までの流線追跡が 2 つの壊れ方をしていたことが分かった。
+
+1. **入ってきた面を出口の候補から無条件に外していた。** そこが本当に最も近い出口の
+   ときに、より遠い面まで突き抜けて**メッシュの外に点が出る**
+2. **稜線にちょうど載った始点で破綻していた。** 場が外向きの四面体を選んでしまい、
+   実測では 10²⁹ m 先へ飛んだ。GUI は始点を格子状に置くので日常的に踏む経路だった
+
+どちらも直し、「メッシュの外に点が出ていないか」を見張る回帰テストを入れた
+（SPEC §6.3）。
+
+---
+
+## 配布
+
+```bash
+.venv/Scripts/python.exe scripts/build_release.py           # テスト → wheel
+.venv/Scripts/python.exe scripts/build_release.py --no-cuda # CPU だけの版
+```
+
+`dist/` に abi3 wheel（Python 3.12 以降で共通）ができる。受け取った側は
+
+```bash
+pip install gfem-0.1.0-cp312-abi3-win_amd64.whl
+python -m gfem.gui
+```
+
+だけでよく、**Rust も CUDA Toolkit も要らない**（GPU で走らせるには NVIDIA ドライバは要る）。
+PyInstaller で 1 つの exe に固めない理由は SPEC §12 の未決事項 3 に書いてある。
 
 ---
 
 ## 未決事項
 
-SPEC.md §12 を参照。
+SPEC.md §12 を参照。残っているのは組織物性の文献ソース（IT'IS の利用条件）と、
+CQUAD4 が大きく非平面のときの警告しきい値の 2 つ。

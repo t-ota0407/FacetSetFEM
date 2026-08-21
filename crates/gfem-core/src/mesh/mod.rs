@@ -10,7 +10,9 @@
 
 pub mod idmap;
 pub mod isosurface;
+pub mod spatial;
 pub mod streamline;
+pub mod tetview;
 pub mod topology;
 
 use crate::element::{ElementKind, max_edge_length, tet4_signed_volume};
@@ -19,7 +21,9 @@ use std::path::PathBuf;
 
 pub use idmap::IdMap;
 pub use isosurface::{TriangleMesh, iso_surface};
-pub use streamline::{Streamline, TraceDirection, TraceOptions, trace_streamlines};
+pub use spatial::CellGrid;
+pub use streamline::{Navigator, Streamline, TraceDirection, TraceOptions};
+pub use tetview::TetView;
 pub use topology::{FaceAdjacency, Surface, SurfaceFace, build_face_adjacency, extract_surface};
 
 /// Nastran の節点 ID。

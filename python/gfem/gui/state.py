@@ -7,6 +7,7 @@ Qt 側はこれを表示・編集するだけにする。こうするとヘッ�
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -16,6 +17,7 @@ import pyvista as pv
 
 from .. import Case, GfemError, Mesh, Solution, Study, read_nastran
 from ..study import ElectrodeSpec, Material
+from ..tissues import TISSUES
 
 __all__ = ["DisplayField", "DISPLAY_FIELDS", "Session"]
 
@@ -92,13 +94,12 @@ NODAL_VALUE_WARNING = (
 )
 
 #: 組織物性の目安 [S/m]。GUI の入力補助に使う（出典を明記できるようになるまでは目安扱い）
-TISSUE_HINTS: dict[str, float] = {
-    "skin": 0.10,
-    "fat": 0.04,
-    "muscle": 0.35,
-    "bone": 0.02,
-    "blood": 0.70,
-}
+TISSUE_HINTS: dict[str, float] = {name: t.sigma for name, t in TISSUES.items()}
+
+
+#: 元に戻せる回数の上限。1 段は Study 1 つぶんの複製で、
+#: 数百 KB 程度（メッシュは含まない）なので余裕を持って取ってある。
+UNDO_DEPTH = 100
 
 
 class Session:
@@ -109,11 +110,72 @@ class Session:
         self.mesh: Mesh | None = None
         self.solution: Solution | None = None
         self._grid: pv.UnstructuredGrid | None = None
+        # Undo / Redo（SPEC §8 M7）。
+        # 解析条件は Study 1 つに閉じていて、メッシュも結果も含まないので、
+        # 操作ごとに丸ごと複製して積むだけで済む。差分を持つ設計は
+        # 「どの編集を記録し忘れたか」を追う手間に見合わない
+        self._undo: list[tuple[str, Study]] = []
+        self._redo: list[tuple[str, Study]] = []
+
+    # --- Undo / Redo --------------------------------------------------------
+
+    def checkpoint(self, label: str) -> None:
+        """これから変える直前の状態を積む。編集を始める**前**に呼ぶこと。
+
+        GUI の入力欄は 1 文字打つたびに値を反映するので、素直に積むと
+        「1 文字ぶん戻る」undo が大量にできてしまう。**同じ操作が続いている間は
+        まとめる**（直前の checkpoint と名前が同じなら積み直さない）。
+        別の操作を挟めば名前が変わるので、そこで区切られる。
+        """
+        if self.study is None:
+            return
+        if self._undo and self._undo[-1][0] == label:
+            return  # 同じ操作の続き。最初の状態だけ残す
+        self._undo.append((label, copy.deepcopy(self.study)))
+        if len(self._undo) > UNDO_DEPTH:
+            self._undo.pop(0)
+        self._redo.clear()
+
+    def can_undo(self) -> bool:
+        return bool(self._undo)
+
+    def can_redo(self) -> bool:
+        return bool(self._redo)
+
+    def undo_label(self) -> str:
+        return self._undo[-1][0] if self._undo else ""
+
+    def redo_label(self) -> str:
+        return self._redo[-1][0] if self._redo else ""
+
+    def undo(self) -> str:
+        """1 つ前の状態に戻す。戻した操作の名前を返す。"""
+        if not self._undo or self.study is None:
+            return ""
+        label, previous = self._undo.pop()
+        self._redo.append((label, copy.deepcopy(self.study)))
+        self.study = previous
+        return label
+
+    def redo(self) -> str:
+        """取り消した操作をやり直す。やり直した操作の名前を返す。"""
+        if not self._redo or self.study is None:
+            return ""
+        label, following = self._redo.pop()
+        self._undo.append((label, copy.deepcopy(self.study)))
+        self.study = following
+        return label
+
+    def clear_history(self) -> None:
+        """履歴を捨てる（モデルやケースを開き直したとき）。"""
+        self._undo.clear()
+        self._redo.clear()
 
     # --- 読み込み -----------------------------------------------------------
 
     def open_mesh(self, path: str | Path, length_unit: str) -> Study:
         """メッシュを読み、既定のケースを組み立てる（SPEC §6.2 の手順 1）。"""
+        self.clear_history()
         path = Path(path)
         self.mesh = read_nastran(path, length_unit=length_unit)
         self.solution = None
@@ -128,6 +190,7 @@ class Session:
 
     def open_case(self, path: str | Path) -> Study:
         """ケースファイル（YAML）を開き、参照しているメッシュも読む。"""
+        self.clear_history()
         study = Study.load(path)
         self.study = study
         self.mesh = study.read_mesh()

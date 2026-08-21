@@ -28,7 +28,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 create_exception!(
     _gfem,
@@ -146,6 +146,33 @@ impl PyReadReport {
 pub struct PyMesh {
     inner: gfem_core::Mesh,
     report: gfem_core::ReadReport,
+    /// 面共役な四面体分割（SPEC §5.1）。等値面と流線が使う。
+    ///
+    /// メッシュだけで決まるので、呼ばれるたびに作り直さず 1 度だけ作って使い回す。
+    /// 使わなければ作られない。
+    tets: OnceLock<gfem_core::mesh::TetView>,
+    /// 流線の下ごしらえ（四面体分割 + 面隣接 + 空間分割）
+    navigator: OnceLock<gfem_core::mesh::Navigator>,
+}
+
+impl PyMesh {
+    /// 面共役な四面体分割（初回だけ作る）。
+    fn tets(&self) -> PyResult<&gfem_core::mesh::TetView> {
+        if let Some(t) = self.tets.get() {
+            return Ok(t);
+        }
+        let built = gfem_core::mesh::TetView::build(&self.inner).map_err(to_py)?;
+        Ok(self.tets.get_or_init(|| built))
+    }
+
+    /// 流線の下ごしらえ（初回だけ作る）。
+    fn navigator(&self) -> PyResult<&gfem_core::mesh::Navigator> {
+        if let Some(n) = self.navigator.get() {
+            return Ok(n);
+        }
+        let built = gfem_core::mesh::Navigator::build(&self.inner).map_err(to_py)?;
+        Ok(self.navigator.get_or_init(|| built))
+    }
 }
 
 #[pymethods]
@@ -963,8 +990,9 @@ impl PySolution {
     ) -> PyResult<IsoSurfaceArrays<'py>> {
         let mesh = &self.mesh.get().inner;
         let values = self.nodal_values(quantity)?;
+        let tets = self.mesh.get().tets()?;
         let surface =
-            gfem_core::mesh::iso_surface(mesh, &values, level, &[&values]).map_err(to_py)?;
+            gfem_core::mesh::iso_surface(mesh, tets, &values, level, &[&values]).map_err(to_py)?;
         let n_points = surface.n_points();
         let n_triangles = surface.n_triangles();
         Ok((
@@ -993,7 +1021,9 @@ impl PySolution {
 
     /// 電流のストリームラインを引く（SPEC §6.3）。
     ///
-    /// Tet4 では J が要素内で一定なので、要素ごとに直線として**厳密に**追跡できる。
+    /// J は要素内で一定（Hex8 / Penta6 では要素中心の代表値）なので、
+    /// 要素ごとに直線として**厳密に**追跡できる。Hex8 / Penta6 を含むメッシュは
+    /// 面共役な四面体分割を通す（SPEC §5.1）。
     /// `seeds` は始点の配列 `(k, 3)`。戻り値は折れ線の頂点配列のリスト。
     #[pyo3(signature = (seeds, direction = "forward", max_steps = 100_000, max_length = f64::INFINITY))]
     fn streamlines(
@@ -1018,15 +1048,12 @@ impl PySolution {
                 }
             },
         };
-        let adjacency = gfem_core::mesh::build_face_adjacency(mesh).map_err(to_py)?;
-        let lines = gfem_core::mesh::trace_streamlines(
-            mesh,
-            &adjacency,
-            &self.inner.fields.current_density,
-            &seeds,
-            &options,
-        )
-        .map_err(to_py)?;
+        let lines = self
+            .mesh
+            .get()
+            .navigator()?
+            .trace_many(mesh, &self.inner.fields.current_density, &seeds, &options)
+            .map_err(to_py)?;
 
         let out = PyList::empty(py);
         for line in lines {
@@ -1101,6 +1128,8 @@ fn read_nastran(py: Python<'_>, path: PathBuf, length_unit: &str) -> PyResult<Py
     Ok(PyMesh {
         inner: mesh,
         report,
+        tets: OnceLock::new(),
+        navigator: OnceLock::new(),
     })
 }
 

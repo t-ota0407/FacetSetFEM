@@ -92,6 +92,7 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._build_menus()
         self.refresh_all()
+        self._refresh_history_actions()
 
     # --- UI の構築 ---------------------------------------------------------
 
@@ -174,13 +175,20 @@ class MainWindow(QMainWindow):
         file_menu.addSeparator()
         self._add_action(file_menu, "終了", self.close)
 
+        edit_menu = self.menuBar().addMenu("編集(&E)")
+        self.action_undo = self._add_action(edit_menu, "元に戻す", self.undo, "Ctrl+Z")
+        self.action_redo = self._add_action(edit_menu, "やり直す", self.redo, "Ctrl+Y")
+        self._refresh_history_actions()
+
         run_menu = self.menuBar().addMenu("実行(&R)")
         self._add_action(run_menu, "整合性チェック", self.check_consistency, "Ctrl+K")
         self._add_action(run_menu, "solve", self.start_solve, "F5")
         self.action_cancel = self._add_action(run_menu, "中断", self.cancel_solve)
         self.action_cancel.setEnabled(False)
+        run_menu.addSeparator()
+        self._add_action(run_menu, "パラメータスタディ...", self.open_sweep_dialog)
 
-        electrode_menu = self.menuBar().addMenu("電極(&E)")
+        electrode_menu = self.menuBar().addMenu("電極(&L)")
         self._add_action(electrode_menu, "電極を追加", self.add_electrode)
         self._add_action(electrode_menu, "選択中の電極を削除", self.remove_selected_electrode)
 
@@ -238,6 +246,7 @@ class MainWindow(QMainWindow):
         self.log(f"読み込み完了: {path}")
         self.log(self.session.mesh_summary())
         self.refresh_all()
+        self._refresh_history_actions()
 
     def open_case_dialog(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -257,6 +266,7 @@ class MainWindow(QMainWindow):
         self.log(f"ケースを読み込みました: {path}")
         self.log(self.session.mesh_summary())
         self.refresh_all()
+        self._refresh_history_actions()
 
     def save_case_dialog(self) -> None:
         path, _ = QFileDialog.getSaveFileName(
@@ -336,6 +346,52 @@ class MainWindow(QMainWindow):
         self.plotter.screenshot(str(path))
         self.log(f"スクリーンショットを保存しました: {path}")
 
+    # --- パラメータスタディ（SPEC §8 M7）-------------------------------------
+
+    def open_sweep_dialog(self) -> None:
+        """パラメータを振って一括で解くダイアログを開く。"""
+        if self.session.study is None:
+            self.log("先にモデルかケースを開いてください")
+            return
+        from .sweep_dialog import SweepDialog
+
+        SweepDialog(self).exec()
+
+    # --- 元に戻す / やり直す（SPEC §8 M7）-----------------------------------
+
+    def undo(self) -> None:
+        label = self.session.undo()
+        if not label:
+            return
+        self.refresh_all()
+        self._refresh_history_actions()
+        self.log(f"元に戻しました: {label}")
+
+    def redo(self) -> None:
+        label = self.session.redo()
+        if not label:
+            return
+        self.refresh_all()
+        self._refresh_history_actions()
+        self.log(f"やり直しました: {label}")
+
+    def checkpoint(self, label: str) -> None:
+        """編集を始める前に呼ぶ。同じ名前の編集が続いている間はまとめられる。"""
+        self.session.checkpoint(label)
+        self._refresh_history_actions()
+
+    def _refresh_history_actions(self) -> None:
+        """メニューに「何を戻すのか」を出す。押せるかどうかもここで決める。"""
+        undo, redo = self.session.can_undo(), self.session.can_redo()
+        self.action_undo.setEnabled(undo)
+        self.action_redo.setEnabled(redo)
+        self.action_undo.setText(
+            f"元に戻す: {self.session.undo_label()}" if undo else "元に戻す"
+        )
+        self.action_redo.setText(
+            f"やり直す: {self.session.redo_label()}" if redo else "やり直す"
+        )
+
     # --- 電極 ---------------------------------------------------------------
 
     def add_electrode(self) -> None:
@@ -346,6 +402,7 @@ class MainWindow(QMainWindow):
         while f"E{index}" in existing:
             index += 1
         role = "anode" if not existing else "cathode"
+        self.checkpoint(f"電極 E{index} を追加")
         self.session.add_electrode(f"E{index}", role=role)
         self.refresh_tree()
         self.log(f"電極 E{index} を追加しました（{role}）")
@@ -355,6 +412,7 @@ class MainWindow(QMainWindow):
         if item is None or item.data(0, ROLE_KIND) != "electrode":
             return
         name = item.data(0, ROLE_KEY)
+        self.checkpoint(f"電極 {name} を削除")
         self.session.remove_electrode(name)
         self.refresh_tree()
         self.log(f"電極 {name} を削除しました")
@@ -689,6 +747,7 @@ class RegionPage(QWidget):
     def _commit(self) -> None:
         if self.pid is None:
             return
+        self.window.checkpoint(f"領域 {self.pid} の設定を変更")
         self.window.session.set_conductivity(
             self.pid, self.sigma_spin.value(), self.name_edit.text()
         )
@@ -763,6 +822,7 @@ class ElectrodePage(QWidget):
         spec = session.electrode(self.name)
         if spec is None:
             return
+        self.window.checkpoint(f"電極 {self.name} の設定を変更")
         spec.name = self.name_edit.text() or spec.name
         spec.role = self.role_combo.currentText()
         spec.current = self.current_spin.value() * 1e-3
@@ -867,6 +927,7 @@ class SolverPage(QWidget):
         study = self.window.session.study
         if study is None or self._loading:
             return
+        self.window.checkpoint("ソルバ設定を変更")
         try:
             study.solver.tolerance = float(self.tolerance.text())
         except ValueError:

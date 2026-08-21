@@ -3,6 +3,10 @@
 //! 「解析解と照合できること」「メッシュ収束性が理論通りであること」は
 //! この道具立てが無いと確かめられない（SPEC §1.2）。
 //!
+//! Hex8 / Penta6 を含むメッシュは[面共役な四面体分割](crate::mesh::TetView)を
+//! 通してから積分する（SPEC §5.1 / §8 M7）。求積は四面体の 4 点ガウスなので、
+//! 分割してもそのまま使える。
+//!
 //! 1 次四面体では理論上
 //!
 //! ```text
@@ -20,9 +24,10 @@
 //! `∫(φ_h − φ − c)² dΩ` を最小にする c であり、ゲージの選び方に依らない
 //! 「形の誤差」だけを測ることになる。
 
-use crate::element::{ElementKind, tet4};
+use crate::element::tet4;
 use crate::error::{GfemError, Result};
 use crate::mesh::Mesh;
+use crate::mesh::tetview::TetView;
 use crate::solver::reduce;
 
 /// 四面体の 4 点ガウス求積（代数的精度 2 次）の体積座標。
@@ -77,16 +82,16 @@ pub fn l2_error_potential<F>(mesh: &Mesh, phi: &[f64], exact: F) -> Result<Error
 where
     F: Fn([f64; 3]) -> f64,
 {
-    let block = require_tet4(mesh)?;
-    let n = block.len();
+    let tets = TetView::build(mesh)?;
+    let n = tets.len();
 
     // 1 巡目: 差の体積重み平均（＝最適な定数シフト）を求める
     let mut diff_integral = Vec::with_capacity(n * 4);
     let mut volumes = Vec::with_capacity(n * 4);
     let mut samples = Vec::with_capacity(n * 4);
-    for e in 0..n {
-        let conn = block.conn_of(e);
-        let p = mesh.tet4_coords(conn);
+    for t in 0..n {
+        let conn = tets.conn_of(t);
+        let p = tets.coords(mesh, t);
         let volume = tet4::tet4_shape(&p).volume;
         let nodal = [
             phi[conn[0] as usize],
@@ -134,19 +139,21 @@ pub fn l2_error_field<F>(mesh: &Mesh, field: &[f64], exact: F) -> Result<ErrorNo
 where
     F: Fn([f64; 3]) -> [f64; 3],
 {
-    let block = require_tet4(mesh)?;
-    let n = block.len();
-    if field.len() != 3 * n {
+    let n_elements = mesh.n_solid_elements();
+    if field.len() != 3 * n_elements {
         return Err(GfemError::internal(format!(
-            "要素値の長さが合いません: {} 個ですが 3 × {n} であるべきです",
+            "要素値の長さが合いません: {} 個ですが 3 × {n_elements} であるべきです",
             field.len()
         )));
     }
+    let tets = TetView::build(mesh)?;
+    let n = tets.len();
 
     let mut squared_error = Vec::with_capacity(n * 4);
     let mut squared_reference = Vec::with_capacity(n * 4);
-    for e in 0..n {
-        let p = mesh.tet4_coords(block.conn_of(e));
+    for t in 0..n {
+        let e = tets.parent(t) as usize;
+        let p = tets.coords(mesh, t);
         let volume = tet4::tet4_shape(&p).volume;
         let approx = [field[3 * e], field[3 * e + 1], field[3 * e + 2]];
         for point in &TET4_GAUSS {
@@ -174,14 +181,17 @@ where
 ///
 /// 収束次数を測るときの横軸に使う。要素形状が揃っていれば実際の辺長に比例する。
 pub fn mean_element_size(mesh: &Mesh) -> Result<f64> {
-    let block = require_tet4(mesh)?;
-    if block.is_empty() {
+    let n_elements = mesh.n_solid_elements();
+    if n_elements == 0 {
         return Ok(0.0);
     }
-    let volumes: Vec<f64> = (0..block.len())
-        .map(|e| tet4::tet4_shape(&mesh.tet4_coords(block.conn_of(e))).volume)
+    // 分割後の四面体で体積を測り、**分割前の要素数**で割る。
+    // h はメッシュの解像度を表す量なので、分母は利用者が並べた要素の数であるべき
+    let tets = TetView::build(mesh)?;
+    let volumes: Vec<f64> = (0..tets.len())
+        .map(|t| tet4::tet4_shape(&tets.coords(mesh, t)).volume)
         .collect();
-    Ok((reduce::sum(&volumes) / block.len() as f64).cbrt())
+    Ok((reduce::sum(&volumes) / n_elements as f64).cbrt())
 }
 
 /// 誤差の収束次数を最小二乗で推定する。
@@ -232,15 +242,6 @@ fn finish(squared_error: f64, squared_reference: f64, gauge_shift: f64) -> Error
         },
         gauge_shift,
     }
-}
-
-fn require_tet4(mesh: &Mesh) -> Result<&crate::mesh::ElementBlock> {
-    mesh.block(ElementKind::Tet4).ok_or_else(|| {
-        GfemError::unsupported("誤差評価は 1 次四面体（CTETRA）のみに対応しています").with_hint(
-            "要素種が混ざったメッシュでは、隣り合う要素が共有する四角形面で\
-                 同じ対角線を選ぶ四面体分割が要ります。M7 で対応します（SPEC §5.1 / §8）",
-        )
-    })
 }
 
 /// 体積座標から実座標を求める。

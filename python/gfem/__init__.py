@@ -37,6 +37,8 @@ from ._gfem import (
     read_nastran,
 )
 from .study import ElectrodeSpec, Material, OutputSpec, SolverSpec, Study
+from .sweep import SweepTable, sweep
+from .tissues import TISSUES, Tissue, load_library, tissue, tissue_names
 
 __all__ = [
     "Case",
@@ -50,6 +52,9 @@ __all__ = [
     "SolverCancelled",
     "SolverSpec",
     "Study",
+    "SweepTable",
+    "TISSUES",
+    "Tissue",
     "__version__",
     "cuda_available",
     "cuda_check",
@@ -57,7 +62,11 @@ __all__ = [
     "describe_bounding_box",
     "describe_gpus",
     "length_units",
+    "load_library",
     "read_nastran",
+    "sweep",
+    "tissue",
+    "tissue_names",
 ]
 
 #: 1 単位が何メートルか。Rust 側（`gfem_core::units`）と同じ値を持つ

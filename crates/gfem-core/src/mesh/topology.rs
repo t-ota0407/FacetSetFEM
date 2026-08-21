@@ -14,6 +14,7 @@
 
 use crate::element::ElementKind;
 use crate::error::{GfemError, Result, format_sample_list};
+use crate::mesh::tetview::TetView;
 use crate::mesh::{Mesh, NodeIndex};
 
 /// 面キーの空き枠を表す番兵。
@@ -216,30 +217,31 @@ pub fn extract_surface(mesh: &Mesh) -> Result<Surface> {
 /// 隣接要素が無いことを表す番兵。
 pub const NO_NEIGHBOUR: u32 = u32::MAX;
 
-/// 要素の面ごとの隣接関係。
+/// 四面体の面ごとの隣接関係。
 ///
-/// ストリームラインの追跡（SPEC §6.3）で「面を越えて隣の要素へ移る」ために使う。
+/// ストリームラインの追跡（SPEC §6.3）で「面を越えて隣の四面体へ移る」ために使う。
+/// 番号は[面共役な四面体分割](crate::mesh::TetView)の通し番号。
 #[derive(Debug, Clone, Default)]
 pub struct FaceAdjacency {
-    /// `element * 4 + local_face` の位置に隣接要素の通し番号
+    /// `tet * 4 + local_face` の位置に隣接四面体の通し番号
     neighbours: Vec<u32>,
     /// 同じ位置に、隣接要素側から見たときの局所面番号
     neighbour_faces: Vec<u8>,
 }
 
 impl FaceAdjacency {
-    /// 面 `local_face` の向こう側の要素と、その要素から見た局所面番号。
+    /// 面 `local_face` の向こう側の四面体と、そちらから見た局所面番号。
     ///
     /// 外表面なら `None`。
-    pub fn neighbour(&self, element: usize, local_face: usize) -> Option<(u32, u8)> {
-        let k = element * 4 + local_face;
+    pub fn neighbour(&self, tet: usize, local_face: usize) -> Option<(u32, u8)> {
+        let k = tet * 4 + local_face;
         match self.neighbours.get(k) {
             Some(&n) if n != NO_NEIGHBOUR => Some((n, self.neighbour_faces[k])),
             _ => None,
         }
     }
 
-    /// 要素数。
+    /// 四面体の個数。
     pub fn len(&self) -> usize {
         self.neighbours.len() / 4
     }
@@ -250,33 +252,26 @@ impl FaceAdjacency {
     }
 }
 
-/// 面の隣接関係を作る（Tet4 のみ）。
-pub fn build_face_adjacency(mesh: &Mesh) -> Result<FaceAdjacency> {
-    let block = mesh.block(ElementKind::Tet4).ok_or_else(|| {
-        GfemError::unsupported("面の隣接関係は 1 次四面体（CTETRA）のみに対応しています").with_hint(
-            "要素種が混ざったメッシュでは、隣り合う要素が共有する四角形面で\
-                 同じ対角線を選ぶ四面体分割が要ります。M7 で対応します（SPEC §5.1 / §8）",
-        )
-    })?;
-    if mesh.solids.len() > 1 {
-        return Err(GfemError::unsupported(
-            "複数の要素種が混ざったメッシュの面隣接は未対応です",
-        ));
-    }
-
-    let mut entries: Vec<(FaceKey, u32, u8)> = Vec::with_capacity(block.len() * 4);
-    for e in 0..block.len() {
-        let conn = block.conn_of(e);
+/// 四面体の面の隣接関係を作る（SPEC §5.1 / §8 M7）。
+///
+/// 入力は[面共役な四面体分割](crate::mesh::TetView)。Hex8 / Penta6 を含むメッシュでも、
+/// 四角形面が両側から同じ対角線で割られているので、面はちょうど 2 つの四面体に
+/// 共有されるか外表面かのどちらかになる。
+pub fn build_face_adjacency(tets: &TetView) -> Result<FaceAdjacency> {
+    let n = tets.len();
+    let mut entries: Vec<(FaceKey, u32, u8)> = Vec::with_capacity(n * 4);
+    for t in 0..n {
+        let conn = tets.conn_of(t);
         for (lf, face) in ElementKind::Tet4.faces().iter().enumerate() {
-            let nodes: Vec<NodeIndex> = face.iter().map(|&l| conn[l]).collect();
-            entries.push((face_key(&nodes), e as u32, lf as u8));
+            let nodes: [NodeIndex; 3] = [conn[face[0]], conn[face[1]], conn[face[2]]];
+            entries.push((face_key(&nodes), t as u32, lf as u8));
         }
     }
     entries.sort_unstable();
 
     let mut adjacency = FaceAdjacency {
-        neighbours: vec![NO_NEIGHBOUR; block.len() * 4],
-        neighbour_faces: vec![0u8; block.len() * 4],
+        neighbours: vec![NO_NEIGHBOUR; n * 4],
+        neighbour_faces: vec![0u8; n * 4],
     };
     let mut i = 0;
     while i < entries.len() {
@@ -303,6 +298,7 @@ pub fn build_face_adjacency(mesh: &Mesh) -> Result<FaceAdjacency> {
 mod tests {
     use super::*;
     use crate::io::nastran::read_nastran_from;
+    use crate::mesh::tetview::TetView;
     use crate::units::LengthUnit;
     use std::path::Path;
 
@@ -405,7 +401,7 @@ CTETRA,10,1,1,2,3,4
 CTETRA,11,1,5,4,3,2
 ",
         );
-        let adjacency = build_face_adjacency(&mesh).unwrap();
+        let adjacency = build_face_adjacency(&TetView::build(&mesh).unwrap()).unwrap();
         assert_eq!(adjacency.len(), 2);
 
         // 共有面はちょうど 1 組

@@ -124,31 +124,6 @@ def test_opening_a_case_fills_in_regions_missing_from_the_yaml(session, tmp_path
 # --- Qt を使う部分 ----------------------------------------------------------
 
 
-@pytest.fixture(scope="session")
-def qt_app():
-    QtWidgets = pytest.importorskip("PySide6.QtWidgets")
-    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
-    return app
-
-
-@pytest.fixture(scope="module")
-def main_window(qt_app):
-    """MainWindow はプロセス内で 1 つだけ作る。
-
-    VTK の OpenGL コンテキストを何度も作り直すと不安定になるため、
-    テストごとに作らず、`window` フィクスチャで状態だけ初期化する。
-    """
-    pytest.importorskip("pyvistaqt")
-    from gfem.gui.main_window import MainWindow
-
-    try:
-        w = MainWindow()
-    except Exception as exc:  # noqa: BLE001
-        pytest.skip(f"3D ビューを作成できません: {exc}")
-    yield w
-    w.close()
-
-
 @pytest.fixture
 def window(main_window, sample_bdf):
     """SPEC §6.2 の手順 1〜3 まで進めた状態のウィンドウ。"""

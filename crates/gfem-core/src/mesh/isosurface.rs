@@ -7,14 +7,18 @@
 //! 大規模モデルでも GUI に渡すのは切り口の三角形だけで済むよう、
 //! 抽出は Rust 側で行う（SPEC §6.3）。
 //!
+//! Hex8 / Penta6 を含むメッシュは[面共役な四面体分割](crate::mesh::TetView)を
+//! 通してから切る。四角形面が両側から同じ対角線で割られるので、
+//! 等値面に隙間や重なりができない（SPEC §5.1 / §8 M7）。
+//!
 //! # 決定性
 //!
-//! 頂点は「辺」を鍵にして共有し、要素の通し番号順に生成する。
+//! 頂点は「辺」を鍵にして共有し、四面体の通し番号順に生成する。
 //! 探索にハッシュ表を使っているが、**出力の並びは生成順で決まる**ので、
 //! 同じ入力からは常に同じ三角形列になる（CLAUDE.md 設計原則 1）。
 
-use crate::element::ElementKind;
 use crate::error::{GfemError, Result};
+use crate::mesh::tetview::TetView;
 use crate::mesh::{Mesh, NodeIndex};
 use std::collections::HashMap;
 
@@ -27,7 +31,7 @@ pub struct TriangleMesh {
     pub triangles: Vec<u32>,
     /// 頂点に補間された付随スカラー（`extra` に渡した順）
     pub scalars: Vec<Vec<f64>>,
-    /// 各三角形の元ソリッド要素の通し番号
+    /// 各三角形の元ソリッド要素の通し番号（分割前の要素。SPEC §5.1）
     pub source_elements: Vec<u32>,
 }
 
@@ -75,16 +79,11 @@ impl TriangleMesh {
 /// （等値面の上に別の量を色として塗るために使う）。
 pub fn iso_surface(
     mesh: &Mesh,
+    tets: &TetView,
     values: &[f64],
     level: f64,
     extra: &[&[f64]],
 ) -> Result<TriangleMesh> {
-    let block = mesh.block(ElementKind::Tet4).ok_or_else(|| {
-        GfemError::unsupported("等値面の抽出は 1 次四面体（CTETRA）のみに対応しています").with_hint(
-            "要素種が混ざったメッシュでは、隣り合う要素が共有する四角形面で\
-                 同じ対角線を選ぶ四面体分割が要ります。M7 で対応します（SPEC §5.1 / §8）",
-        )
-    })?;
     if values.len() != mesh.nodes.len() {
         return Err(GfemError::internal(format!(
             "節点値の個数が合いません: {} 個ですが節点は {} 個です",
@@ -107,8 +106,8 @@ pub fn iso_surface(
     // 辺 (小さい節点番号, 大きい節点番号) → 生成済み頂点番号
     let mut edge_vertices: HashMap<(NodeIndex, NodeIndex), u32> = HashMap::new();
 
-    for e in 0..block.len() {
-        let conn = block.conn_of(e);
+    for t in 0..tets.len() {
+        let conn = tets.conn_of(t);
         let value = [
             values[conn[0] as usize],
             values[conn[1] as usize],
@@ -177,7 +176,7 @@ pub fn iso_surface(
                     vertex(&mut out, &mut edge_vertices, single, others[2]),
                 ];
                 out.triangles.extend_from_slice(&tri);
-                out.source_elements.push(e as u32);
+                out.source_elements.push(tets.parent(t));
             }
             // 2 対 2 → 四辺形（三角形 2 枚）
             (2, 2) => {
@@ -192,8 +191,8 @@ pub fn iso_surface(
                     .extend_from_slice(&[quad[0], quad[1], quad[2]]);
                 out.triangles
                     .extend_from_slice(&[quad[0], quad[2], quad[3]]);
-                out.source_elements.push(e as u32);
-                out.source_elements.push(e as u32);
+                out.source_elements.push(tets.parent(t));
+                out.source_elements.push(tets.parent(t));
             }
             _ => unreachable!("above + below は必ず 4"),
         }
@@ -205,6 +204,7 @@ pub fn iso_surface(
 mod tests {
     use super::*;
     use crate::io::nastran::read_nastran_from;
+    use crate::mesh::tetview::TetView;
     use crate::units::LengthUnit;
     use std::path::Path;
 
@@ -258,7 +258,8 @@ mod tests {
         let values: Vec<f64> = (0..mesh.nodes.len())
             .map(|i| mesh.nodes.coord(i as u32)[2])
             .collect();
-        let surface = iso_surface(&mesh, &values, 0.5, &[]).unwrap();
+        let surface =
+            iso_surface(&mesh, &TetView::build(&mesh).unwrap(), &values, 0.5, &[]).unwrap();
         assert!(!surface.is_empty());
         assert!(
             (surface.area() - 1.0).abs() < 1e-12,
@@ -277,8 +278,16 @@ mod tests {
         let values: Vec<f64> = (0..mesh.nodes.len())
             .map(|i| mesh.nodes.coord(i as u32)[2])
             .collect();
-        assert!(iso_surface(&mesh, &values, 2.0, &[]).unwrap().is_empty());
-        assert!(iso_surface(&mesh, &values, -1.0, &[]).unwrap().is_empty());
+        assert!(
+            iso_surface(&mesh, &TetView::build(&mesh).unwrap(), &values, 2.0, &[])
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            iso_surface(&mesh, &TetView::build(&mesh).unwrap(), &values, -1.0, &[])
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -287,7 +296,8 @@ mod tests {
         let values: Vec<f64> = (0..mesh.nodes.len())
             .map(|i| mesh.nodes.coord(i as u32)[2])
             .collect();
-        let surface = iso_surface(&mesh, &values, 0.5, &[]).unwrap();
+        let surface =
+            iso_surface(&mesh, &TetView::build(&mesh).unwrap(), &values, 0.5, &[]).unwrap();
         // 辺ごとに 1 頂点なので、三角形の枚数より頂点数は少ない
         assert!(surface.n_points() < 3 * surface.n_triangles());
         // 同じ座標の頂点が重複していない
@@ -309,7 +319,8 @@ mod tests {
             .collect();
         // 付随量として 10z を渡すと、等値面上では 10 × 0.5 = 5 になるはず
         let scaled: Vec<f64> = z.iter().map(|v| 10.0 * v).collect();
-        let surface = iso_surface(&mesh, &z, 0.5, &[&scaled]).unwrap();
+        let surface =
+            iso_surface(&mesh, &TetView::build(&mesh).unwrap(), &z, 0.5, &[&scaled]).unwrap();
         assert_eq!(surface.scalars.len(), 1);
         assert_eq!(surface.scalars[0].len(), surface.n_points());
         for v in &surface.scalars[0] {
@@ -323,8 +334,8 @@ mod tests {
         let values: Vec<f64> = (0..mesh.nodes.len())
             .map(|i| mesh.nodes.coord(i as u32)[0] + mesh.nodes.coord(i as u32)[1])
             .collect();
-        let a = iso_surface(&mesh, &values, 0.7, &[]).unwrap();
-        let b = iso_surface(&mesh, &values, 0.7, &[]).unwrap();
+        let a = iso_surface(&mesh, &TetView::build(&mesh).unwrap(), &values, 0.7, &[]).unwrap();
+        let b = iso_surface(&mesh, &TetView::build(&mesh).unwrap(), &values, 0.7, &[]).unwrap();
         assert_eq!(a.points, b.points);
         assert_eq!(a.triangles, b.triangles);
         assert_eq!(a.source_elements, b.source_elements);
@@ -333,7 +344,14 @@ mod tests {
     #[test]
     fn rejects_mismatched_arrays() {
         let mesh = unit_cube();
-        let e = iso_surface(&mesh, &[1.0, 2.0], 0.5, &[]).unwrap_err();
+        let e = iso_surface(
+            &mesh,
+            &TetView::build(&mesh).unwrap(),
+            &[1.0, 2.0],
+            0.5,
+            &[],
+        )
+        .unwrap_err();
         assert!(e.to_string().contains("節点値の個数"), "{e}");
     }
 
@@ -347,7 +365,8 @@ mod tests {
                 p[0] + p[1]
             })
             .collect();
-        let surface = iso_surface(&mesh, &values, 1.0, &[]).unwrap();
+        let surface =
+            iso_surface(&mesh, &TetView::build(&mesh).unwrap(), &values, 1.0, &[]).unwrap();
         assert!(
             (surface.area() - 2.0f64.sqrt()).abs() < 1e-12,
             "面積 {}",
