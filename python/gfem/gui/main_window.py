@@ -50,6 +50,7 @@ from PySide6.QtWidgets import (
 )
 
 from .. import GfemError, describe_gpus
+from .busy import BusyOverlay, busy_scope, run_in_thread
 from .solver_thread import SolverThread
 from .state import (
     DISPLAY_FIELDS,
@@ -68,6 +69,12 @@ ROLE_KIND = Qt.ItemDataRole.UserRole
 ROLE_KEY = Qt.ItemDataRole.UserRole + 1
 
 COLORMAPS = ["viridis", "plasma", "coolwarm", "turbo", "gray"]
+
+#: これを超えたら「大きなモデル」とみなし、ローディングを待たずに出す。
+#:
+#: 実測（RTX A6000 / 20 コア）で、35.9 万節点だと領域を選び直すだけで 0.98 秒、
+#: 1.5 万節点なら 0.05 秒。10 万節点あたりが「待たされたと感じる」境目にあたる。
+BIG_MODEL_NODES = 100_000
 
 #: 3D ビューの表示モード（表示名, 内部名）
 VIEW_MODES = [
@@ -91,8 +98,54 @@ class MainWindow(QMainWindow):
         self.resize(1400, 900)
         self._build_ui()
         self._build_menus()
+        # 重い処理の間に出すローディング（SPEC §6.4）。3D ビューの上に重ねるため、
+        # 子ウィジェットではなくウィンドウに貼りつく別ウィンドウとして作る
+        self.overlay = BusyOverlay(self)
         self.refresh_all()
         self._refresh_history_actions()
+
+    # --- 処理中の表示（SPEC §6.4）-------------------------------------------
+
+    def busy(self, message: str, detail: str | None = None):
+        """メインスレッドを塞ぐ処理を囲む。区切りで `scope.step()` を呼ぶ。
+
+        VTK と Qt は他スレッドから触れないので、描画まわりはここを使う。
+        小さなモデルでは、200 ms 以内に終わる処理に対して何も表示されない。
+        """
+        return busy_scope(
+            self.overlay, message, self._detail(detail), self._reveal_delay()
+        )
+
+    def run_busy(self, message: str, work, detail: str | None = None):
+        """GIL を手放す処理（読み込み・書き出し）をワーカースレッドで走らせて待つ。
+
+        呼び出し側から見ると同期関数のままなので、例外はそのまま飛んでくる。
+        """
+        return run_in_thread(
+            self.overlay, message, work, self._detail(detail), self._reveal_delay()
+        )
+
+    def _reveal_delay(self) -> int | None:
+        """ローディングを出すまでの待ち。大きなモデルでは待たない。
+
+        ちらつきを避けるための 200 ms の猶予は、**速いと分かっているときだけ**
+        意味がある。大きなモデルでは領域を選び直すだけでも 1 秒近くかかり、
+        しかもその間は画面を更新する隙が無いので、猶予を置くと処理の最後に
+        一瞬だけ光って終わる（いちばん見せたい間に出ない）。
+        """
+        mesh = self.session.mesh
+        if mesh is not None and mesh.n_nodes >= BIG_MODEL_NODES:
+            return 0
+        return None
+
+    def _detail(self, detail: str | None) -> str:
+        """補足行。指定が無ければモデルの規模を出す（待ち時間の目安になる）。"""
+        if detail is not None:
+            return detail
+        mesh = self.session.mesh
+        if mesh is None:
+            return ""
+        return f"{mesh.n_nodes:,} 節点 / {mesh.n_elements:,} 要素"
 
     # --- UI の構築 ---------------------------------------------------------
 
@@ -222,7 +275,9 @@ class MainWindow(QMainWindow):
         try:
             # SPEC §3.2: 単位の選択前に寸法を見せたいので、一度そのままの値で読む
             probe = self.session.__class__()
-            probe.open_mesh(path, "m")
+            self.run_busy(
+                "寸法を確認しています", lambda: probe.open_mesh(path, "m"), Path(path).name
+            )
             box = probe.mesh.bounding_box()
             extent = tuple(hi - lo for lo, hi in zip(*box))
         except Exception as exc:  # noqa: BLE001
@@ -237,7 +292,11 @@ class MainWindow(QMainWindow):
     def open_mesh(self, path: str | Path, length_unit: str) -> None:
         """メッシュを読み込む（テストからも呼べるようダイアログを挟まない）。"""
         try:
-            self.session.open_mesh(path, length_unit)
+            self.run_busy(
+                "メッシュを読み込んでいます",
+                lambda: self.session.open_mesh(path, length_unit),
+                Path(path).name,
+            )
         except Exception as exc:  # noqa: BLE001
             self.show_error(exc)
             return
@@ -257,7 +316,11 @@ class MainWindow(QMainWindow):
 
     def open_case(self, path: str | Path) -> None:
         try:
-            self.session.open_case(path)
+            self.run_busy(
+                "ケースを読み込んでいます",
+                lambda: self.session.open_case(path),
+                Path(path).name,
+            )
         except Exception as exc:  # noqa: BLE001
             self.show_error(exc)
             return
@@ -293,7 +356,11 @@ class MainWindow(QMainWindow):
 
     def export_vtu(self, path: str | Path) -> None:
         try:
-            self.session.solution.write_vtu(path)
+            self.run_busy(
+                "VTU を書き出しています",
+                lambda: self.session.solution.write_vtu(path),
+                Path(path).name,
+            )
         except Exception as exc:  # noqa: BLE001
             self.show_error(exc)
             return
@@ -331,7 +398,7 @@ class MainWindow(QMainWindow):
         if not path:
             return
         try:
-            writer(path)
+            self.run_busy("書き出しています", lambda: writer(path), Path(path).name)
         except Exception as exc:  # noqa: BLE001
             self.show_error(exc)
             return
@@ -343,7 +410,9 @@ class MainWindow(QMainWindow):
             self.screenshot(path)
 
     def screenshot(self, path: str | Path) -> None:
-        self.plotter.screenshot(str(path))
+        # 画面の取り込みは OpenGL コンテキストを持つメインスレッドでしかできない
+        with self.busy("スクリーンショットを保存しています", Path(path).name):
+            self.plotter.screenshot(str(path))
         self.log(f"スクリーンショットを保存しました: {path}")
 
     # --- パラメータスタディ（SPEC §8 M7）-------------------------------------
@@ -422,7 +491,7 @@ class MainWindow(QMainWindow):
     def check_consistency(self) -> list[str] | None:
         """整合性チェック（SPEC §6.2 の手順 4）。"""
         try:
-            warnings = self.session.validate()
+            warnings = self.run_busy("整合性をチェックしています", self.session.validate)
         except Exception as exc:  # noqa: BLE001
             self.show_error(exc)
             return None
@@ -444,7 +513,7 @@ class MainWindow(QMainWindow):
         if self.solver is not None and self.solver.isRunning():
             return
         try:
-            case = self.session.build_case()
+            case = self.run_busy("解析条件を組み立てています", self.session.build_case)
             case.validate()
         except Exception as exc:  # noqa: BLE001
             self.show_error(exc)
@@ -473,9 +542,16 @@ class MainWindow(QMainWindow):
         self.convergence.append(residual)
 
     def _on_solved(self, solution) -> None:
+        # solve 自体はワーカースレッドだが、結果の取り込み（領域統計・表示用データの
+        # 作り直し）はメインスレッドで、規模によっては数秒かかる
+        with self.busy("結果を取り込んでいます") as scope:
+            self._take_solution(scope, solution)
+
+    def _take_solution(self, scope, solution) -> None:
         self.session.set_solution(solution)
         self.convergence.set_history(solution.history)
         self.checks_view.setPlainText(self.session.result_summary())
+        scope.step("領域統計を集計しています")
         self.refresh_stats_table()
         self.bottom.setCurrentWidget(self.checks_view)
         self.log(
@@ -495,10 +571,13 @@ class MainWindow(QMainWindow):
     # --- 表示 ---------------------------------------------------------------
 
     def refresh_all(self) -> None:
-        self.refresh_tree()
-        self.page_result.reload()
-        self.refresh_stats_table()
-        self.refresh_view()
+        # 全体をひとまとめに囲む。中の refresh_view も同じローディングを使うので、
+        # 途中で消えて出直すような瞬きが起きない
+        with self.busy("表示を作成しています"):
+            self.refresh_tree()
+            self.page_result.reload()
+            self.refresh_stats_table()
+            self.refresh_view()
 
     def refresh_stats_table(self) -> None:
         """領域統計の表を作り直す（SPEC §5.2）。"""
@@ -584,9 +663,17 @@ class MainWindow(QMainWindow):
     def refresh_view(
         self, highlight_pid: int | None = None, highlight_electrode: str | None = None
     ) -> None:
-        """3D ビューを描き直す。"""
+        """3D ビューを描き直す。
+
+        VTK は他スレッドから触れないのでメインスレッドで行う。代わりに段階ごとに
+        `scope.step()` で表示を進める（SPEC §6.4）。
+        """
         if self.session.mesh is None:
             return
+        with self.busy("メッシュを展開しています") as scope:
+            self._draw_view(scope, highlight_pid, highlight_electrode)
+
+    def _draw_view(self, scope, highlight_pid, highlight_electrode) -> None:
         self.plotter.clear()
         options = self.page_result.options()
         grid = self.session.grid()
@@ -594,6 +681,8 @@ class MainWindow(QMainWindow):
         target = grid
         scalars = options["field"]
         mode = options["mode"]
+        if mode != "volume":
+            scope.step("断面・等値面を切り出しています")
         if mode == "slice":
             target = grid.slice(
                 normal=options["slice_normal"], origin=self._slice_origin(grid, options)
@@ -622,6 +711,7 @@ class MainWindow(QMainWindow):
         if scalars not in target.array_names:
             scalars = "PID" if "PID" in target.array_names else None
 
+        scope.step("表示を作成しています")
         self.plotter.add_mesh(
             target,
             scalars=scalars,
@@ -632,6 +722,7 @@ class MainWindow(QMainWindow):
         )
 
         if options["streamlines"] and self.session.solution is not None:
+            scope.step("流線を追跡しています")
             try:
                 seeds = self.session.default_seed_points(options["n_seeds"])
                 lines = self.session.streamlines(seeds)
@@ -641,16 +732,19 @@ class MainWindow(QMainWindow):
                 self.log(f"ストリームラインを引けませんでした: {exc}")
 
         if highlight_pid is not None:
+            scope.step("選んだ領域を取り出しています")
             region = self.session.region_grid(highlight_pid)
             if region.n_cells:
                 self.plotter.add_mesh(
                     region.extract_surface(), color="orange", opacity=0.85, show_edges=False
                 )
         if highlight_electrode is not None:
+            scope.step("電極の面を取り出しています")
             faces = self.session.electrode_polydata(highlight_electrode)
             if faces.n_cells:
                 self.plotter.add_mesh(faces, color="red", opacity=1.0)
 
+        scope.step("描画しています")
         self.plotter.add_axes()
         self.plotter.reset_camera()
         self.plotter.render()

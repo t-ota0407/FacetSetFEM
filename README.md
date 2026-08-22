@@ -31,6 +31,12 @@ GUI:
 .venv/Scripts/python.exe -m gfem.gui tests/models/slab_3layer.yaml
 ```
 
+大きなモデルを開いたとき、ツリーで領域や電極を選び直したとき、表示を作り直すときは
+**処理中のローディング**が出る。読み込みと書き出しはワーカースレッドで走るので、
+その間もスピナーは滑らかに回り、何をしているか（読み込み中か、領域を取り出しているか、
+描画中か）が文言で分かる。**200 ms 以内に終わる操作では出ない**ので、小さなモデルを
+触っている間は一度も現れない（10 万節点を超えたら猶予なしで即座に出す。SPEC §6.4）。
+
 Python API（GUI と同じコアを叩く）:
 
 ```python
@@ -110,6 +116,7 @@ library = gfem.load_library("my_tissues.yaml")   # 自前の表に差し替え�
 | 等値面・流線・面隣接・L2 誤差評価の Hex8 / Penta6 対応（面共役な四面体分割） | ✔ |
 | 流線の始点探索の空間分割 | ✔ |
 | Undo / Redo | ✔ |
+| 処理中のローディング表示（読み込み・書き出しはワーカースレッド） | ✔ |
 | パラメータスタディ（Python API と GUI） | ✔ |
 | 組織物性プリセット | ✔ |
 
@@ -300,6 +307,7 @@ python/gfem/          高レベル Python API
   sweep.py            パラメータスタディ
   tissues.py          組織物性プリセット
   gui/                PySide6 + PyVista の GUI
+    busy.py           処理中のローディング表示とワーカースレッド（SPEC §6.4）
 scripts/              サンプルモデル生成、配布用 wheel の作成
 tests/                Python テストとサンプルモデル
 ```
