@@ -111,6 +111,22 @@ def test_when_to_wait_before_showing(main_window, sample_bdf):
         window.session.mesh = small
 
 
+def test_a_scope_can_ask_for_the_normal_delay(main_window, sample_bdf):
+    """段階の区切りが細かく、ふつうは一瞬で終わる処理は待ちを効かせられること。
+
+    大きなモデルでは既定で「待たずに出す」が、電極をクリックで置く経路は
+    1 回 0.1 秒程度なので、そのまま出すと**クリックのたびに一瞬光る**。
+    """
+    from gfem.gui.busy import REVEAL_DELAY_MS
+
+    window = main_window
+    window.open_mesh(sample_bdf, "mm")
+    with window.busy("すぐ終わる処理", wait_ms=REVEAL_DELAY_MS):
+        assert window.overlay.active
+        assert not window.overlay.isVisible()
+    assert not window.overlay.active
+
+
 def test_the_overlay_appears_for_long_work(qt_app, overlay):
     """親が画面に出ている状態で長い処理を回すと、実際に現れて回る。"""
     parent = overlay.parent()

@@ -36,13 +36,14 @@ from ._gfem import (
     length_units,
     read_nastran,
 )
-from .study import ElectrodeSpec, Material, OutputSpec, SolverSpec, Study
+from .study import ElectrodeSpec, Material, OutputSpec, SolverSpec, Study, SurfacePatch
 from .sweep import SweepTable, sweep
 from .tissues import TISSUES, Tissue, load_library, tissue, tissue_names
 
 __all__ = [
     "Case",
     "ElectrodeSpec",
+    "SurfacePatch",
     "GfemError",
     "Material",
     "Mesh",

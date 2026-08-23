@@ -73,7 +73,9 @@ fn case_with(preconditioner: Preconditioner, backend: Backend) -> Case {
 
 /// 剛性行列だけが欲しいときの近道。
 fn stiffness(mesh: &Mesh, case: &Case) -> CsrMatrix {
-    gfem_core::assemble::assemble(mesh, case, false)
+    let surface = gfem_core::mesh::extract_surface(mesh).unwrap();
+    let lookup = gfem_core::case::FaceLookup::new(mesh, &surface);
+    gfem_core::assemble::assemble(mesh, case, &lookup, false)
         .unwrap()
         .matrix
 }

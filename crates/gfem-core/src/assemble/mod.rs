@@ -12,7 +12,7 @@ pub mod load;
 pub mod sparsity;
 pub mod stiffness;
 
-use crate::case::Case;
+use crate::case::{Case, FaceLookup};
 use crate::error::Result;
 use crate::mesh::Mesh;
 
@@ -40,7 +40,12 @@ pub struct LinearSystem {
 ///
 /// `parallel` が true なら行ごとの並列アセンブリを使う。
 /// **どちらでも同じ行列**になる（[`adjacency`] の説明を参照）。
-pub fn assemble(mesh: &Mesh, case: &Case, parallel: bool) -> Result<LinearSystem> {
+pub fn assemble(
+    mesh: &Mesh,
+    case: &Case,
+    lookup: &FaceLookup,
+    parallel: bool,
+) -> Result<LinearSystem> {
     let mut matrix = build_sparsity(mesh)?;
     require_connected(&matrix)?;
     if parallel {
@@ -49,7 +54,7 @@ pub fn assemble(mesh: &Mesh, case: &Case, parallel: bool) -> Result<LinearSystem
     } else {
         assemble_stiffness(mesh, &case.conductivity, &mut matrix)?;
     }
-    let (load, electrodes) = assemble_load(mesh, case)?;
+    let (load, electrodes) = assemble_load(mesh, case, lookup)?;
     Ok(LinearSystem {
         matrix,
         load,

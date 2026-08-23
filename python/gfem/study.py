@@ -32,6 +32,7 @@ __all__ = [
     "OutputSpec",
     "SolverSpec",
     "Study",
+    "SurfacePatch",
 ]
 
 #: 現在のケースファイル形式のバージョン
@@ -69,6 +70,35 @@ class Material:
 
 
 @dataclass
+class SurfacePatch:
+    """体表面に置く電極パッチ 1 枚（SPEC §11.1）。
+
+    **シェル要素を持たないモデルのための指定方法。** 人体モデルはソリッド要素だけで
+    配られるのが普通で、その場合シェル PID では電極を 1 つも置けない。
+    GUI では 3D ビューのクリックが `center` を、スピンボックスが `radius` を決める。
+
+    保存するのは選ばれた面の一覧ではなく**中心と半径**。同じメッシュなら同じ面が
+    選ばれるうえ、ケースファイルを読んだ人が意味を追える（面番号の羅列は追えない）。
+    """
+
+    #: 中心 [m]（クリックした点）
+    center: tuple[float, float, float]
+    #: 半径 [m]
+    radius: float
+    #: この PID のソリッドが持つ面だけに限る（None なら制限しない）
+    pid: int | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        d: dict[str, Any] = {
+            "center": [float(v) for v in self.center],
+            "radius": float(self.radius),
+        }
+        if self.pid is not None:
+            d["pid"] = int(self.pid)
+        return d
+
+
+@dataclass
 class ElectrodeSpec:
     """電極 1 個の設定。"""
 
@@ -77,18 +107,30 @@ class ElectrodeSpec:
     current: float
     shell_pids: list[int] = field(default_factory=list)
     element_ids: list[int] = field(default_factory=list)
+    patches: list[SurfacePatch] = field(default_factory=list)
+    #: 手で足した体表面の面 `(EID, 面番号)`。面番号は **1 始まり**
+    added_faces: list[tuple[int, int]] = field(default_factory=list)
+    #: 手で外した体表面の面。パッチや added_faces より優先される
+    removed_faces: list[tuple[int, int]] = field(default_factory=list)
     distribution: str = "uniform_current_density"
 
     def to_dict(self) -> dict[str, Any]:
+        faces: dict[str, Any] = {
+            "shell_pids": list(self.shell_pids),
+            "element_ids": list(self.element_ids),
+        }
+        if self.patches:
+            faces["patches"] = [p.to_dict() for p in self.patches]
+        if self.added_faces:
+            faces["added"] = [[int(e), int(f)] for e, f in self.added_faces]
+        if self.removed_faces:
+            faces["removed"] = [[int(e), int(f)] for e, f in self.removed_faces]
         return {
             "name": self.name,
             "role": self.role,
             "current": self.current,
             "distribution": self.distribution,
-            "faces": {
-                "shell_pids": list(self.shell_pids),
-                "element_ids": list(self.element_ids),
-            },
+            "faces": faces,
         }
 
 
@@ -294,6 +336,9 @@ class Study:
                 current=e.current,
                 shell_pids=e.shell_pids,
                 element_ids=e.element_ids,
+                patches=[p.to_dict() for p in e.patches],
+                added=[tuple(f) for f in e.added_faces],
+                removed=[tuple(f) for f in e.removed_faces],
             )
         case.set_solver(
             tolerance=self.solver.tolerance,
@@ -384,11 +429,18 @@ def _electrode_from(data: Any, where_: str) -> ElectrodeSpec:
         )
     shell_pids = [int(p) for p in (faces.get("shell_pids") or [])]
     element_ids = [int(i) for i in (faces.get("element_ids") or [])]
-    if not shell_pids and not element_ids:
+    patches = [
+        _patch_from(p, f"{where_} の faces.patches[{i}]")
+        for i, p in enumerate(faces.get("patches") or [])
+    ]
+    added = _face_refs_from(faces.get("added"), f"{where_} の faces.added")
+    removed = _face_refs_from(faces.get("removed"), f"{where_} の faces.removed")
+    if not shell_pids and not element_ids and not patches and not added:
         raise _error(
             f"電極 {name} に面が指定されていません",
             f"{where_} の faces",
-            "shell_pids か element_ids のどちらかは必要です",
+            "shell_pids / element_ids / patches のいずれかは必要です"
+            "（シェル要素の無いモデルは patches を使ってください。SPEC §11.1）",
         )
     try:
         current = float(current)
@@ -404,8 +456,71 @@ def _electrode_from(data: Any, where_: str) -> ElectrodeSpec:
         current=current,
         shell_pids=shell_pids,
         element_ids=element_ids,
+        patches=patches,
+        added_faces=added,
+        removed_faces=removed,
         distribution=distribution,
     )
+
+
+def _face_refs_from(data: Any, where_: str) -> list[tuple[int, int]]:
+    """`[[EID, 面番号], ...]` を読む。面番号は 1 始まり。"""
+    if data is None:
+        return []
+    out: list[tuple[int, int]] = []
+    for i, item in enumerate(data):
+        try:
+            eid, face = item
+            eid, face = int(eid), int(face)
+        except (TypeError, ValueError) as exc:
+            raise _error(
+                f"面の指定を読めません: {item!r}",
+                f"{where_}[{i}]",
+                "[要素 EID, 面番号] の 2 個組で書いてください（面番号は 1 始まり）",
+            ) from exc
+        if face < 1:
+            raise _error(
+                f"面番号が {face} です",
+                f"{where_}[{i}]",
+                "面番号は 1 始まりで書いてください（EID={} の第 1 面なら 1）".format(eid),
+            )
+        out.append((eid, face))
+    return out
+
+
+def _patch_from(data: Any, where_: str) -> SurfacePatch:
+    """体表面パッチ 1 枚を読む。"""
+    if not isinstance(data, dict):
+        raise _error(
+            "パッチがマッピングではありません",
+            where_,
+            "center: [x, y, z] と radius: r（m）を書いてください",
+        )
+    center = _require(data, "center", where_, "中心を [x, y, z]（m）で書いてください")
+    radius = _require(data, "radius", where_, "半径を m で書いてください（例: 0.025）")
+    try:
+        center = tuple(float(v) for v in center)
+        radius = float(radius)
+    except (TypeError, ValueError) as exc:
+        raise _error(
+            f"center / radius を数値として読めません: {exc}",
+            where_,
+            "center は 3 個の実数、radius は実数（どちらも m）で書いてください",
+        ) from exc
+    if len(center) != 3:
+        raise _error(
+            f"center の要素数が {len(center)} 個です",
+            where_,
+            "center は [x, y, z] の 3 個で書いてください（単位は m）",
+        )
+    if not radius >= 0.0:
+        raise _error(
+            f"半径が負です: {radius}",
+            where_,
+            "半径は 0 以上で書いてください（単位は m）",
+        )
+    pid = data.get("pid")
+    return SurfacePatch(center=center, radius=radius, pid=None if pid is None else int(pid))
 
 
 def _solver_from(data: Any, where_: str) -> SolverSpec:

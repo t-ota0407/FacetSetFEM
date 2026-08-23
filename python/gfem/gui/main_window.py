@@ -50,10 +50,12 @@ from PySide6.QtWidgets import (
 )
 
 from .. import GfemError, describe_gpus
-from .busy import BusyOverlay, busy_scope, run_in_thread
+from .busy import REVEAL_DELAY_MS, BusyOverlay, busy_scope, run_in_thread
 from .solver_thread import SolverThread
 from .state import (
+    DEFAULT_RESULT_FIELD,
     DISPLAY_FIELDS,
+    SHAPE_FIELD,
     NODAL_VALUE_WARNING,
     REGION_STATS_COLUMNS,
     TISSUE_HINTS,
@@ -69,6 +71,42 @@ ROLE_KIND = Qt.ItemDataRole.UserRole
 ROLE_KEY = Qt.ItemDataRole.UserRole + 1
 
 COLORMAPS = ["viridis", "plasma", "coolwarm", "turbo", "gray"]
+
+#: 色分けしないときの配色。**色は物理量のためにとっておく**ので、形は無彩色で見せる
+SURFACE_COLOR = "#d7d9dc"
+EDGE_COLOR = "#3a3f45"
+NODE_COLOR = "#1b1e21"
+NODE_SIZE = 4
+
+#: 選択中の領域の色（無彩色の中で目を引くように）
+REGION_COLOR = "#f08a24"
+
+#: 体表面に出ていない領域を選んだとき、外側をどれだけ透かすか
+BURIED_OPACITY = 0.25
+
+#: カラーバーの体裁。横置きだと窓が狭いときに数字が重なって読めなくなる
+SCALAR_BAR = {
+    "vertical": True,
+    "position_x": 0.82,
+    "position_y": 0.12,
+    "width": 0.05,
+    "height": 0.72,
+    "n_labels": 5,
+    "fmt": "%.3g",
+    "title_font_size": 14,
+    "label_font_size": 12,
+    "color": "#1b1e21",
+}
+
+#: 背景。うっすら階調をつけると、白いモデルの輪郭が背景に溶けない
+BACKGROUND_BOTTOM = "#e9edf2"
+BACKGROUND_TOP = "#fdfdfe"
+
+#: 稜線・節点を既定で出す上限（表示する三角形の枚数）。
+#:
+#: これを超えると線が潰れて灰色の塊になり、形が**かえって見えなくなる**。
+#: 実測で頭部モデルの外表面は 87,812 面。手動で入れることは妨げない
+EDGE_LIMIT = 30_000
 
 #: これを超えたら「大きなモデル」とみなし、ローディングを待たずに出す。
 #:
@@ -93,6 +131,16 @@ class MainWindow(QMainWindow):
         self.session = session or Session()
         self.solver: SolverThread | None = None
         self._actor = None
+        # 体表面のクリック選択（SPEC §11.1）
+        self._pick_callback = None      # (point, erase|None) -> None
+        self._preview_callback = None   # (point|None) -> None
+        self._stroke_end_callback = None  # 1 ストロークが終わったとき
+        self._pick_observers: list[int] = []
+        self._world_picker = None
+        self._painting: str | bool = False
+        self._press_position = (0, 0)
+        self._left_down = False
+        self._rotating = False
 
         self.setWindowTitle("GenericFEM")
         self.resize(1400, 900)
@@ -106,15 +154,18 @@ class MainWindow(QMainWindow):
 
     # --- 処理中の表示（SPEC §6.4）-------------------------------------------
 
-    def busy(self, message: str, detail: str | None = None):
+    def busy(self, message: str, detail: str | None = None, wait_ms: int | None = None):
         """メインスレッドを塞ぐ処理を囲む。区切りで `scope.step()` を呼ぶ。
 
         VTK と Qt は他スレッドから触れないので、描画まわりはここを使う。
         小さなモデルでは、200 ms 以内に終わる処理に対して何も表示されない。
+
+        `wait_ms` を渡すと、出すまでの待ちをその値にする。**段階の区切りが
+        こまやかで、ふつうは一瞬で終わる処理**（電極のクリックなど）に使う。
+        大きなモデルでも毎回光らせずに済み、本当に待たされるときだけ出る。
         """
-        return busy_scope(
-            self.overlay, message, self._detail(detail), self._reveal_delay()
-        )
+        delay = self._reveal_delay() if wait_ms is None else wait_ms
+        return busy_scope(self.overlay, message, self._detail(detail), delay)
 
     def run_busy(self, message: str, work, detail: str | None = None):
         """GIL を手放す処理（読み込み・書き出し）をワーカースレッドで走らせて待つ。
@@ -158,7 +209,12 @@ class MainWindow(QMainWindow):
         self.tree.currentItemChanged.connect(self._on_tree_selection)
 
         self.plotter = QtInteractor(self)
-        self.plotter.set_background("white")
+        # **ライトを明示的に置く。** pyvistaqt の描画器は光源を 1 つも持たず
+        # （自動生成も切れている）、そのままだと陰影が付かないので、
+        # どんな形も**のっぺりした影絵**になる。単体の Plotter と同じ
+        # 三点照明キットを入れると、白一色でも形が読める
+        self.plotter.enable_lightkit()
+        self.plotter.set_background(BACKGROUND_BOTTOM, top=BACKGROUND_TOP)
 
         self.pages = QStackedWidget()
         self.page_mesh = MeshPage(self)
@@ -426,6 +482,230 @@ class MainWindow(QMainWindow):
 
         SweepDialog(self).exec()
 
+    # --- 体表面のクリック選択（SPEC §11.1）----------------------------------
+
+    #: 電極の強調表示に付ける名前。同じ名前で足し直すと差し替えになる
+    ELECTRODE_ACTOR = "electrode-highlight"
+    #: 塗る前の予告表示に付ける名前
+    PREVIEW_ACTOR = "paint-preview"
+
+    def refresh_electrode_highlight(self, name: str | None) -> None:
+        """電極の強調表示だけを描き直す。
+
+        3D ビュー全体の作り直しは 35 万節点で 1 秒、4 百万四面体では 3 秒以上かかる。
+        電極面を選んでいる間はそこだけが変わるので、名前付きアクタを差し替える。
+        """
+        if self.session.mesh is None:
+            return
+        if self.is_painting:
+            # 筆でなぞっている最中はローディングを挟まない。
+            # 1 なぞりごとに `processEvents` を回すと、そのぶん筆が遅れる
+            self._draw_electrode_highlight(name)
+            return
+        with self.busy("電極面を描いています"):
+            self._draw_electrode_highlight(name)
+            self._arm_picking()
+
+    def _draw_electrode_highlight(self, name: str | None) -> None:
+        self.plotter.remove_actor(self.ELECTRODE_ACTOR, render=False)
+        faces = self.session.electrode_polydata(name) if name else None
+        if faces is not None and faces.n_cells:
+            self.plotter.add_mesh(
+                faces,
+                color="red",
+                opacity=1.0,
+                name=self.ELECTRODE_ACTOR,
+                reset_camera=False,
+                pickable=False,
+            )
+        self.plotter.render()
+
+    def begin_patch_picking(self, callback, preview=None, stroke_end=None) -> None:
+        """3D ビューのクリックで体表面の点を拾うモードに入る。
+
+        描き直すたびに掛け直す必要があるので、コールバックを覚えておく
+        （`refresh_view` が `plotter.clear()` を呼ぶため）。
+        """
+        self._pick_callback = callback
+        self._preview_callback = preview
+        self._stroke_end_callback = stroke_end
+        self._arm_picking()
+        self.log(
+            "体表面をクリックすると電極面になります"
+            "（Shift + ドラッグで塗る / Alt + ドラッグで消す / ドラッグは回転）"
+        )
+
+    def end_patch_picking(self) -> None:
+        """クリック選択を終え、通常の操作に戻す。"""
+        self._pick_callback = None
+        self._preview_callback = None
+        self._stroke_end_callback = None
+        self._disarm_picking()
+
+    def _arm_picking(self) -> None:
+        """クリック選択の下ごしらえ。掛かっていても掛かっていなくても呼べる。
+
+        **VTK のイベントを自前で拾う。** PyVista の `enable_point_picking` は
+        クリック 1 回しか扱えず、ドラッグで塗る・ホバーで予告するができない。
+        ピック自体は世界座標ピッカー（深度バッファ）で行う——既定のセルピッカーは
+        表示中のメッシュに光線を飛ばすので、411 万セルの頭部モデルでは
+        1 クリック 2.6 秒かかる。深度バッファからの逆変換なら 0.01 秒で、
+        ずれは実測 0.4〜1.8 mm。**選んだ点は最寄りの面を決めるためだけに使い、
+        電極の広がりは半径（cm 級）が決める**ので、この差は効かない（SPEC §11.1）。
+        """
+        if self._pick_callback is None or self._pick_observers:
+            return
+        from vtkmodules.vtkRenderingCore import vtkWorldPointPicker
+
+        self._world_picker = vtkWorldPointPicker()
+        iren = self.plotter.iren.interactor
+        # 優先度を上げて、回転などの既定の操作より先に受け取る
+        self._pick_observers = [
+            iren.AddObserver("LeftButtonPressEvent", self._on_mouse_press, 10.0),
+            iren.AddObserver("MouseMoveEvent", self._on_mouse_move, 10.0),
+            iren.AddObserver("LeftButtonReleaseEvent", self._on_mouse_release, 10.0),
+        ]
+
+    def _disarm_picking(self) -> None:
+        iren = self.plotter.iren.interactor
+        for tag in self._pick_observers:
+            iren.RemoveObserver(tag)
+        self._pick_observers = []
+        self._painting = False
+        self._left_down = False
+        self._rotating = False
+        self.clear_paint_preview()
+
+    # --- マウスの扱い -------------------------------------------------------
+    #
+    # 左クリック（動かさない）  = いまのモードで 1 回塗る / 消す
+    # 左ドラッグ                = これまで通り回転する
+    # Shift + 左ドラッグ        = 塗る
+    # Alt + 左ドラッグ          = 消す
+    #
+    # **ドラッグをそのまま塗りに使ってはいけない。** 回転を奪うと、頭の反対側に
+    # 電極を置くために毎回モードを切り替えることになる。修飾キーを押している間
+    # だけ塗るなら、道具を持ち替えずに回しながら塗れる。
+
+    def _mouse_position(self):
+        iren = self.plotter.iren.interactor
+        return iren.GetEventPosition()
+
+    def _pick_world_point(self):
+        """カーソルの下の点（世界座標）。モデルの上でなければ None。"""
+        if self._world_picker is None:
+            return None
+        x, y = self._mouse_position()
+        self._world_picker.Pick(x, y, 0, self.plotter.renderer)
+        point = self._world_picker.GetPickPosition()
+        return point if self.session.is_on_the_model(point) else None
+
+    @staticmethod
+    def _paint_mode(iren) -> str | None:
+        """修飾キーから塗り方を決める。押していなければ None。"""
+        if iren.GetShiftKey():
+            return "add"
+        if iren.GetAltKey():
+            return "erase"
+        return None
+
+    #: これ以上動いたらクリックではなくドラッグとみなす [px]
+    DRAG_THRESHOLD = 3
+
+    @property
+    def is_painting(self) -> bool:
+        """いま筆でなぞっている最中か。"""
+        return bool(self._painting)
+
+    def _on_mouse_press(self, iren, _event) -> None:
+        """左ボタンを押した。**ここではまだ回転を始めさせない。**
+
+        VTK の既定のスタイルは押した瞬間に回転を開始し、そのときイベントの
+        フォーカスを掴んでしまう。すると「離した」がこちらに届かず、
+        **動かさずに離す＝クリック**を見分けられない。いったん押下を受け止め、
+        実際に動いたと分かった時点で回転を始めさせる。
+        """
+        self._press_position = self._mouse_position()
+        self._left_down = True
+        self._rotating = False
+        mode = self._paint_mode(iren)
+        self._painting = mode or False
+        if mode is not None:
+            point = self._pick_world_point()
+            if point is not None:
+                self._pick_callback(point, mode == "erase")
+        self._abort(iren, 0)
+
+    def _on_mouse_move(self, iren, _event) -> None:
+        if self._painting:
+            point = self._pick_world_point()
+            if point is not None:
+                self._pick_callback(point, self._painting == "erase")
+            self._abort(iren, 1)
+            return
+        if self._left_down:
+            if not self._rotating and self._moved_enough():
+                # ドラッグと分かった。ここから既定の回転を始めてもらう
+                self._rotating = True
+                self.clear_paint_preview()
+                iren.GetInteractorStyle().OnLeftButtonDown()
+            if not self._rotating:
+                self._abort(iren, 1)
+            return
+        if self._preview_callback is not None:
+            self._preview_callback(self._pick_world_point())
+
+    def _on_mouse_release(self, iren, _event) -> None:
+        was_painting, rotating = self._painting, self._rotating
+        self._left_down = False
+        self._painting = False
+        self._rotating = False
+        if rotating:
+            return  # 回転はスタイルに任せる
+        self._abort(iren, 2)
+        if was_painting:
+            # ストロークの間は強調表示だけを更新している。
+            # 離した時点で面積・電流密度・一覧をまとめて作り直す
+            if self._stroke_end_callback is not None:
+                self._stroke_end_callback()
+            return
+        # 動かさずに離したならクリック。いまのモードで 1 回置く
+        if not self._moved_enough():
+            point = self._pick_world_point()
+            if point is not None:
+                self._pick_callback(point, None)
+
+    def _abort(self, iren, index: int) -> None:
+        """このイベントを既定の処理（回転など）に渡さない。"""
+        iren.GetCommand(self._pick_observers[index]).SetAbortFlag(1)
+
+    def _moved_enough(self) -> bool:
+        x0, y0 = self._press_position
+        x1, y1 = self._mouse_position()
+        return max(abs(x1 - x0), abs(y1 - y0)) > self.DRAG_THRESHOLD
+
+    # --- 塗る前の予告表示 ---------------------------------------------------
+
+    def show_paint_preview(self, polydata, erase: bool) -> None:
+        """これから塗られる（消される）範囲を薄く出す。"""
+        if polydata is None or not polydata.n_cells:
+            self.clear_paint_preview()
+            return
+        self.plotter.add_mesh(
+            polydata,
+            color="#2a5adb" if erase else "#ff8c1a",
+            opacity=0.55,
+            name=self.PREVIEW_ACTOR,
+            reset_camera=False,
+            pickable=False,
+        )
+        self.plotter.render()
+
+    def clear_paint_preview(self) -> None:
+        if self.plotter.actors.get(self.PREVIEW_ACTOR) is not None:
+            self.plotter.remove_actor(self.PREVIEW_ACTOR, render=False)
+            self.plotter.render()
+
     # --- 元に戻す / やり直す（SPEC §8 M7）-----------------------------------
 
     def undo(self) -> None:
@@ -562,6 +842,7 @@ class MainWindow(QMainWindow):
             self.log(f"  [警告] {w}")
         self.refresh_tree()
         self.page_result.reload()
+        self.page_result.show_result_field()
         self.refresh_view()
 
     def _on_solve_failed(self, message: str) -> None:
@@ -675,14 +956,22 @@ class MainWindow(QMainWindow):
 
     def _draw_view(self, scope, highlight_pid, highlight_electrode) -> None:
         self.plotter.clear()
+        # **clear() は光源も消す。** 置き直さないと以降ずっと陰影が付かず、
+        # どんな形も影絵になる（気づきにくいので、描き直しのたびに入れ直す）
+        self.plotter.enable_lightkit()
         options = self.page_result.options()
-        grid = self.session.grid()
-
-        target = grid
         scalars = options["field"]
         mode = options["mode"]
-        if mode != "volume":
+
+        if mode == "volume":
+            # **体積メッシュではなく外表面を描く**（SPEC §6.3）。
+            # 頭部モデルで 2.7 秒 → 0.09 秒。しかも法線が付くので形が読める
+            target = self.session.display_surface(scalars)
+            grid = target
+        else:
             scope.step("断面・等値面を切り出しています")
+            grid = self.session.grid()
+            target = grid
         if mode == "slice":
             target = grid.slice(
                 normal=options["slice_normal"], origin=self._slice_origin(grid, options)
@@ -708,18 +997,60 @@ class MainWindow(QMainWindow):
             target = grid
             scalars = options["field"]
 
-        if scalars not in target.array_names:
-            scalars = "PID" if "PID" in target.array_names else None
+        if scalars == SHAPE_FIELD or scalars not in target.array_names:
+            scalars = None  # 色分けなし（PID には大小の意味が無い）
+
+        # 選んだ領域を先に用意する。**体表面に出ていない領域**（頭部モデルの
+        # 大半がそう）は、外側を半透明にしないと見えないため
+        region = None
+        if highlight_pid is not None:
+            scope.step("選んだ領域を取り出しています")
+            region = self.session.region_polydata(highlight_pid)
+            if region.n_cells == 0:
+                # 体表面に出ていない領域。体積メッシュから切り出す（0.5 秒）
+                region = self.session.region_grid(highlight_pid).extract_surface(
+                    algorithm="dataset_surface"
+                )
+        buried = region is not None and region.n_cells > 0 and mode == "volume" and (
+            self.session.region_polydata(highlight_pid).n_cells == 0
+        )
 
         scope.step("表示を作成しています")
-        self.plotter.add_mesh(
-            target,
-            scalars=scalars,
-            cmap=options["cmap"],
-            show_edges=options["edges"],
-            scalar_bar_args={"title": scalars or ""} if scalars else None,
-            categories=scalars == "PID",
-        )
+        edges = options["edges"]
+        if scalars is None:
+            # 色分けなし。形は**陰影と稜線**で見せる（SPEC §6.3）
+            self.plotter.add_mesh(
+                target,
+                color=SURFACE_COLOR,
+                show_edges=edges,
+                edge_color=EDGE_COLOR,
+                line_width=1,
+                specular=0.25,
+                specular_power=18,
+                smooth_shading=False,
+                opacity=BURIED_OPACITY if buried else 1.0,
+            )
+        else:
+            self.plotter.add_mesh(
+                target,
+                scalars=scalars,
+                cmap=options["cmap"],
+                show_edges=edges,
+                edge_color=EDGE_COLOR,
+                clim=self.session.field_range(scalars),
+                scalar_bar_args=SCALAR_BAR,
+                categories=scalars == "PID",
+                opacity=BURIED_OPACITY if buried else 1.0,
+            )
+        if options["nodes"]:
+            self.plotter.add_mesh(
+                target,
+                style="points",
+                color=NODE_COLOR,
+                point_size=NODE_SIZE,
+                render_points_as_spheres=True,
+                lighting=False,
+            )
 
         if options["streamlines"] and self.session.solution is not None:
             scope.step("流線を追跡しています")
@@ -731,13 +1062,10 @@ class MainWindow(QMainWindow):
             except Exception as exc:  # noqa: BLE001
                 self.log(f"ストリームラインを引けませんでした: {exc}")
 
-        if highlight_pid is not None:
-            scope.step("選んだ領域を取り出しています")
-            region = self.session.region_grid(highlight_pid)
-            if region.n_cells:
-                self.plotter.add_mesh(
-                    region.extract_surface(), color="orange", opacity=0.85, show_edges=False
-                )
+        if region is not None and region.n_cells:
+            self.plotter.add_mesh(
+                region, color=REGION_COLOR, show_edges=False, pickable=False
+            )
         if highlight_electrode is not None:
             scope.step("電極の面を取り出しています")
             faces = self.session.electrode_polydata(highlight_electrode)
@@ -748,6 +1076,8 @@ class MainWindow(QMainWindow):
         self.plotter.add_axes()
         self.plotter.reset_camera()
         self.plotter.render()
+        # clear() でピッキングも外れるので、選択中なら掛け直す
+        self._arm_picking()
 
     @staticmethod
     def _slice_origin(grid, options):
@@ -858,6 +1188,8 @@ class ElectrodePage(QWidget):
         super().__init__()
         self.window = window
         self.name: str | None = None
+        #: ホバー予告をいま出している面（同じ面の上では作り直さない）
+        self._hover_at = None
 
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel("<b>電極</b>"))
@@ -878,6 +1210,74 @@ class ElectrodePage(QWidget):
         self.pid_list = QListWidget()
         layout.addWidget(self.pid_list)
 
+        # --- 体表面から選ぶ（SPEC §11.1）---
+        # 人体モデルはソリッド要素だけで配られるのが普通で、その場合シェル PID の
+        # 一覧は空になる。3D ビューを直接クリックして面を選べるようにする
+        patch_box = QGroupBox("体表面から選ぶ（クリック）")
+        patch_layout = QVBoxLayout(patch_box)
+        self.pick_button = QPushButton("クリックで選ぶ")
+        self.pick_button.setCheckable(True)
+        self.pick_button.setToolTip(
+            "3D ビューで体表面をクリックすると、その周りの面が電極になります。\n"
+            "もう一度押すと通常の回転操作に戻ります。"
+        )
+        patch_layout.addWidget(self.pick_button)
+
+        patch_form = QFormLayout()
+        self.radius_spin = QDoubleSpinBox()
+        self.radius_spin.setDecimals(1)
+        self.radius_spin.setRange(0.1, 500.0)
+        self.radius_spin.setValue(25.0)
+        self.radius_spin.setSingleStep(5.0)
+        self.radius_spin.setSuffix(" mm")
+        self.patch_pid = QComboBox()
+        self.patch_pid.setToolTip(
+            "外表面に出ている領域の一覧（面積の大きい順）。\n"
+            "首の切断面など「外表面だが体表面ではない」面を避けるために、\n"
+            "ふつうは皮膚の PID に絞り込みます。"
+        )
+        patch_form.addRow("ブラシの半径", self.radius_spin)
+        patch_form.addRow("領域を限る", self.patch_pid)
+        patch_layout.addLayout(patch_form)
+
+        self.patch_list = QListWidget()
+        self.patch_list.setMaximumHeight(90)
+        mode_row = QHBoxLayout()
+        self.add_mode = QPushButton("追加")
+        self.erase_mode = QPushButton("削除")
+        for button in (self.add_mode, self.erase_mode):
+            button.setCheckable(True)
+            mode_row.addWidget(button)
+        self.add_mode.setChecked(True)
+        self.add_mode.toggled.connect(lambda on: on and self.erase_mode.setChecked(False))
+        self.erase_mode.toggled.connect(lambda on: on and self.add_mode.setChecked(False))
+        patch_layout.addLayout(mode_row)
+        hint = QLabel(
+            "クリック＝いまのモードで 1 回。Shift＋ドラッグで塗る、"
+            "Alt＋ドラッグで消す。ふつうのドラッグは回転。"
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #666;")
+        patch_layout.addWidget(hint)
+
+        patch_layout.addWidget(self.patch_list)
+        self.hand_edits = QLabel("")
+        self.hand_edits.setWordWrap(True)
+        patch_layout.addWidget(self.hand_edits)
+
+        button_row = QHBoxLayout()
+        self.remove_patch_button = QPushButton("選んだパッチを外す")
+        self.remove_patch_button.clicked.connect(self._remove_patch)
+        button_row.addWidget(self.remove_patch_button)
+        self.clear_edits_button = QPushButton("手直しを消す")
+        self.clear_edits_button.setToolTip(
+            "1 枚ずつ足した面・外した面を捨てて、パッチだけの状態に戻します。"
+        )
+        self.clear_edits_button.clicked.connect(self._clear_hand_edits)
+        button_row.addWidget(self.clear_edits_button)
+        patch_layout.addLayout(button_row)
+        layout.addWidget(patch_box)
+
         self.summary = QLabel("-")
         self.summary.setWordWrap(True)
         self.summary.setStyleSheet("font-weight: bold;")
@@ -887,8 +1287,15 @@ class ElectrodePage(QWidget):
         self.role_combo.currentTextChanged.connect(self._commit)
         self.current_spin.valueChanged.connect(self._commit)
         self.pid_list.itemChanged.connect(self._commit)
+        self.pick_button.toggled.connect(self._toggle_picking)
 
     def bind(self, name: str) -> None:
+        # 体表面の索引づくり（外表面 87,812 面で 1.9 秒）が初回だけここで走る。
+        # 電極をツリーで選んだ瞬間なので、待たされていることを見せる（SPEC §6.4）
+        with self.window.busy("電極の設定を開いています") as scope:
+            self._bind(name, scope)
+
+    def _bind(self, name: str, scope) -> None:
         session = self.window.session
         spec = session.electrode(name)
         if spec is None:
@@ -906,8 +1313,209 @@ class ElectrodePage(QWidget):
                 Qt.CheckState.Checked if pid in spec.shell_pids else Qt.CheckState.Unchecked
             )
             self.pid_list.addItem(item)
+        scope.step("体表面の領域を調べています")
+        self._reload_patch_pids()
         self.name = name
+        self._reload_patches()
+        self._reload_hand_edits()
+        scope.step("面積と電流密度を集計しています")
         self._update_summary()
+
+    # --- 体表面から選ぶ（SPEC §11.1）----------------------------------------
+
+    def _reload_patch_pids(self) -> None:
+        """外表面に出ている領域を、面積の大きい順に並べる。"""
+        current = self.patch_pid.currentData()
+        self.patch_pid.blockSignals(True)
+        self.patch_pid.clear()
+        self.patch_pid.addItem("制限しない", None)
+        for row in self.window.session.surface_pid_choices():
+            self.patch_pid.addItem(
+                f"PID {row['pid']}（{row['area'] * 1e4:.0f} cm²）", row["pid"]
+            )
+        # 既定はいちばん広い領域＝ふつう皮膚。切断面を拾わないための初期値
+        index = self.patch_pid.findData(current if current is not None else self._default_pid())
+        self.patch_pid.setCurrentIndex(max(index, 0))
+        self.patch_pid.blockSignals(False)
+
+    def _default_pid(self):
+        return self.window.session.default_surface_pid()
+
+    def _reload_patches(self) -> None:
+        """パッチ一覧を作り直す。面数と面積も出す。"""
+        self.patch_list.clear()
+        spec = self.window.session.electrode(self.name) if self.name else None
+        if spec is None:
+            return
+        for i, patch in enumerate(spec.patches):
+            try:
+                info = self.window.session.pick_patch(patch.center, patch.radius, patch.pid)
+                detail = f"{info['n_faces']} 面 {info['area'] * 1e4:.1f} cm²"
+            except Exception as exc:  # noqa: BLE001 - 表示だけなので握って理由を出す
+                detail = str(exc).splitlines()[0]
+            centre = "(" + ", ".join(f"{v * 1e3:.0f}" for v in patch.center) + ") mm"
+            limit = f" PID {patch.pid}" if patch.pid is not None else ""
+            self.patch_list.addItem(
+                f"{i + 1}. {centre} 半径 {patch.radius * 1e3:.0f} mm{limit}　{detail}"
+            )
+
+    def _reload_hand_edits(self) -> None:
+        """手で足した面・外した面の枚数を出す。"""
+        spec = self.window.session.electrode(self.name) if self.name else None
+        if spec is None or not (spec.added_faces or spec.removed_faces):
+            self.hand_edits.setText("")
+            self.clear_edits_button.setEnabled(False)
+            return
+        parts = []
+        if spec.added_faces:
+            parts.append(f"手で足した面 {len(spec.added_faces)} 枚")
+        if spec.removed_faces:
+            parts.append(f"外した面 {len(spec.removed_faces)} 枚")
+        self.hand_edits.setText("　".join(parts))
+        self.clear_edits_button.setEnabled(True)
+
+    def _toggle_picking(self, on: bool) -> None:
+        if self.name is None:
+            self.pick_button.setChecked(False)
+            return
+        if on:
+            # 断面や等値面を出しているとカーソルの下は体内の面になる。
+            # 電極はいちばん近い体表面に置かれるので、意図とずれやすい
+            if self.window.page_result.options()["mode"] not in ("volume", "clip"):
+                self.window.log(
+                    "断面や等値面を表示中です。電極は体表面に置かれるので、"
+                    "「全体」表示に戻してから選ぶことをお勧めします"
+                )
+            self.window.begin_patch_picking(
+                self._on_picked, self._on_hover, self._on_stroke_end
+            )
+            self.pick_button.setText("クリックで選ぶ（実行中。押すと終了）")
+        else:
+            self.window.end_patch_picking()
+            self.pick_button.setText("クリックで選ぶ")
+
+    def _brush(self) -> tuple[float, int | None]:
+        return self.radius_spin.value() * 1e-3, self.patch_pid.currentData()
+
+    def _on_picked(self, point, erase: bool | None = None) -> None:
+        """3D ビューが操作された。電極の面を書き換える。
+
+        - `erase` が `None`（ふつうのクリック）: 追加モードなら**パッチを 1 枚置く**、
+          削除モードならその範囲の面を外す
+        - `erase` が真偽値（修飾キー＋ドラッグ）: 面を 1 枚ずつ塗る / 消す
+
+        **クリックでパッチを置く道を残すのが要点。** 中心と半径という読める指定が
+        ケースファイルに残り、後から半径だけ変えられる。手で塗ったぶんは差分として
+        別に持つ（SPEC §11.1）。
+        """
+        if self.name is None:
+            return
+        session = self.window.session
+        if not session.is_on_the_model(point):
+            # 背景をクリックした（ピッカーは遠くの点を返す）。
+            # そのまま置くと見当違いの場所に電極ができるので何もしない
+            self.window.log("モデルの外をクリックしました。体表面の上をクリックしてください")
+            return
+
+        radius, pid = self._brush()
+        if erase is None and not self.erase_mode.isChecked():
+            self._place_patch(point, radius, pid)
+            return
+
+        erase = True if erase is None else erase
+        label = "消す" if erase else "塗る"
+        # ドラッグ中は同じ名前で checkpoint を積むので、**1 ストロークが 1 手**になる
+        self.window.checkpoint(f"電極 {self.name} の面を{label}")
+        try:
+            changed = session.paint_faces(self.name, point, radius, pid, erase)
+        except Exception as exc:  # noqa: BLE001
+            self.window.show_error(exc)
+            return
+        if changed == 0:
+            return  # 何も変わっていない。描き直す必要もない
+        self._after_patch_change()
+
+    def _place_patch(self, point, radius: float, pid: int | None) -> None:
+        """クリックした場所にパッチを 1 枚置く。"""
+        session = self.window.session
+        with self.window.busy("電極面を選んでいます", wait_ms=REVEAL_DELAY_MS) as scope:
+            try:
+                preview = session.pick_patch(point, radius, pid)
+            except Exception as exc:  # noqa: BLE001
+                self.window.show_error(exc)
+                return
+            self.window.checkpoint(f"電極 {self.name} にパッチを追加")
+            session.add_patch(self.name, point, radius, pid)
+            self.window.log(
+                f"電極 {self.name} にパッチを追加: "
+                f"{preview['n_faces']} 面, 面積 {preview['area'] * 1e4:.2f} cm²"
+            )
+            self._after_patch_change(scope)
+
+    def _on_hover(self, point) -> None:
+        """カーソルの下に、これから塗られる範囲を薄く出す（SPEC §6.2 の手順 3）。"""
+        if self.name is None or point is None:
+            self.window.clear_paint_preview()
+            self._hover_at = None
+            return
+        # 動くたびに作り直すと重いので、同じ面の上にいる間は作り直さない
+        radius, pid = self._brush()
+        try:
+            info = self.window.session.pick_patch(point, 0.0, pid)
+            seed = tuple(info["face_refs"][0]) if info["n_faces"] else None
+        except Exception:  # noqa: BLE001 - 予告表示なので黙って諦める
+            return
+        if seed is not None and seed == self._hover_at:
+            return
+        self._hover_at = seed
+        try:
+            preview = self.window.session.pick_patch(point, radius, pid)
+        except Exception:  # noqa: BLE001
+            return
+        self.window.show_paint_preview(
+            self.window.session.triangles_to_polydata(preview["triangles"]),
+            erase=self.erase_mode.isChecked(),
+        )
+
+    def _clear_hand_edits(self) -> None:
+        if self.name is None:
+            return
+        with self.window.busy("手直しを消しています", wait_ms=REVEAL_DELAY_MS) as scope:
+            self.window.checkpoint(f"電極 {self.name} の手直しを消す")
+            self.window.session.clear_hand_edits(self.name)
+            self._after_patch_change(scope)
+
+    def _remove_patch(self) -> None:
+        row = self.patch_list.currentRow()
+        if self.name is None or row < 0:
+            return
+        with self.window.busy("電極面を外しています", wait_ms=REVEAL_DELAY_MS) as scope:
+            self.window.checkpoint(f"電極 {self.name} のパッチを削除")
+            self.window.session.remove_patch(self.name, row)
+            self._after_patch_change(scope)
+
+    def _on_stroke_end(self) -> None:
+        """塗り終わった。面積・電流密度・一覧をまとめて作り直す。"""
+        self._after_patch_change()
+
+    def _after_patch_change(self, scope=None) -> None:
+        if self.window.is_painting:
+            # **ストロークの最中は強調表示だけ。** 面積の集計は 1 回 0.07 秒あり、
+            # マウスが動くたびに回すと筆が付いてこない（実測 4.5 コマ/秒）。
+            # 離した時点でまとめて作り直す
+            self.window.refresh_electrode_highlight(self.name)
+            return
+        self._reload_patches()
+        self._reload_hand_edits()
+        if scope is not None:
+            scope.step("面積と電流密度を集計しています")
+        self._update_summary()
+        self.window.refresh_tree()
+        if scope is not None:
+            scope.step("電極面を描いています")
+        # クリックのたびに全体を描き直すと大きなモデルで数秒かかる。
+        # 変わるのは電極の強調表示だけなので、そこだけ差し替える
+        self.window.refresh_electrode_highlight(self.name)
 
     def _commit(self) -> None:
         if self.name is None:
@@ -933,16 +1541,19 @@ class ElectrodePage(QWidget):
     def _update_summary(self) -> None:
         session = self.window.session
         spec = session.electrode(self.name) if self.name else None
-        if spec is None or not (spec.shell_pids or spec.element_ids):
+        if spec is None or not (spec.shell_pids or spec.element_ids or spec.patches):
             self.summary.setText("面が選択されていません")
             return
         try:
-            info = {e["name"]: e for e in session.electrode_info()}[spec.name]
-        except (GfemError, KeyError) as exc:
+            # この電極だけを見る。まだ面を割り当てていない別の電極があっても、
+            # いま編集している電極の面積は出せる
+            info = session.electrode_info(spec.name)[0]
+        except (GfemError, IndexError) as exc:
             self.summary.setText(str(exc).splitlines()[0])
             return
         self.summary.setText(
-            f"{info['n_faces']} 面　合計面積 {info['area'] * 1e6:.1f} mm²\n"
+            f"{info['n_faces']} 面　合計面積 {info['area'] * 1e6:.1f} mm²"
+            f"（{info['area'] * 1e4:.2f} cm²）\n"
             f"平均電流密度 {info['current_density']:.4g} A/m²"
         )
 
@@ -1039,6 +1650,8 @@ class ResultPage(QWidget):
         super().__init__()
         self.window = window
         self._loading = False
+        #: 稜線の既定を決めたときのモデル（開き直したときだけ入れ直す）
+        self._mesh_key = None
 
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel("<b>表示</b>"))
@@ -1055,7 +1668,12 @@ class ResultPage(QWidget):
         layout.addLayout(form)
 
         self.edges = QCheckBox("要素の稜線を表示")
+        self.nodes = QCheckBox("節点を表示")
+        self.nodes.setToolTip(
+            "節点を点で描きます。細かいメッシュでは潰れるので、拡大して使ってください。"
+        )
         layout.addWidget(self.edges)
+        layout.addWidget(self.nodes)
 
         slice_box = QGroupBox("断面 / クリップ")
         slice_layout = QVBoxLayout(slice_box)
@@ -1106,6 +1724,7 @@ class ResultPage(QWidget):
         for widget in (self.field, self.mode, self.cmap, self.slice_normal):
             widget.currentTextChanged.connect(self._refresh)
         self.edges.toggled.connect(self._refresh)
+        self.nodes.toggled.connect(self._refresh)
         self.streamlines.toggled.connect(self._refresh)
         self.slice_position.valueChanged.connect(self._refresh)
         self.iso_level.valueChanged.connect(self._refresh)
@@ -1114,6 +1733,7 @@ class ResultPage(QWidget):
     def reload(self) -> None:
         session = self.window.session
         self._loading = True
+        self._apply_size_defaults()
         previous = self.field.currentData()
         self.field.clear()
         for f in session.available_fields():
@@ -1127,12 +1747,46 @@ class ResultPage(QWidget):
         )
         self._loading = False
 
+    def _apply_size_defaults(self) -> None:
+        """モデルを開き直したとき、規模に合わせて稜線の既定を決める。
+
+        細かいメッシュで稜線を全部描くと**線が潰れて灰色の塊になり、
+        形がかえって見えなくなる**。小さいモデルでは出したほうが分かりやすい。
+        ユーザが切り替えたあとは触らない（開き直すまで保つ）。
+        """
+        mesh = self.window.session.mesh
+        source = None if mesh is None else (mesh.source, mesh.n_nodes)
+        if source == self._mesh_key:
+            return
+        self._mesh_key = source
+        if mesh is None:
+            return
+        try:
+            n_triangles = len(mesh.surface_triangles())
+        except Exception:  # noqa: BLE001 - 抽出できないメッシュは既定のまま
+            return
+        self.edges.setChecked(n_triangles <= EDGE_LIMIT)
+        self.nodes.setChecked(False)
+
+    def show_result_field(self) -> None:
+        """解いた直後に、色分けを電流密度へ切り替える。
+
+        形だけ見ていた状態から結果の表示へ自然に移る。すでに別の量を選んで
+        いるときは、その選択を尊重して何もしない。
+        """
+        if self.field.currentData() != SHAPE_FIELD:
+            return
+        index = self.field.findData(DEFAULT_RESULT_FIELD)
+        if index >= 0:
+            self.field.setCurrentIndex(index)
+
     def options(self) -> dict:
         return {
-            "field": self.field.currentData() or "PID",
+            "field": self.field.currentData() or SHAPE_FIELD,
             "mode": self.mode.currentData() or "volume",
             "cmap": self.cmap.currentText(),
             "edges": self.edges.isChecked(),
+            "nodes": self.nodes.isChecked(),
             "slice_normal": self.slice_normal.currentText(),
             "slice_position": self.slice_position.value() / 100.0,
             "iso_level": self.iso_level.value() / 100.0,

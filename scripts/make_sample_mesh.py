@@ -155,7 +155,11 @@ def build_mesh(
         tris.extend(faces)
         tri_pids.extend([pid] * len(faces))
 
-    if electrodes == "full":
+    if electrodes == "none":
+        # シェル要素を作らない。人体モデルはこの形で配られるのが普通で、
+        # 電極は体表面から直接選ぶ（SPEC §11.1）
+        pass
+    elif electrodes == "full":
         for _name, pid, side in FULL_FACE_ELECTRODES:
             k, up = (nz, True) if side == "top" else (0, False)
             for j in range(ny):
@@ -338,9 +342,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     p.add_argument(
         "--electrodes",
-        choices=["patches", "full"],
+        choices=["patches", "full", "none"],
         default="patches",
-        help="patches: 上面に 2 枚のパッチ / full: 上面全体と下面全体（解析解と照合できる）",
+        help=(
+            "patches: 上面に 2 枚のパッチ / full: 上面全体と下面全体（解析解と照合できる）"
+            " / none: シェル要素を作らない（体表面から電極を選ぶ経路の確認用。SPEC §11.1）"
+        ),
     )
     args = p.parse_args(argv)
 

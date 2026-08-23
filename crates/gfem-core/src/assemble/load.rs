@@ -14,7 +14,7 @@
 //! 電流は電極エッジに集中する（理論上は発散する）ため、エッジ近傍の電流密度は
 //! 過小評価になる。将来の完全電極モデル（CEM）は SPEC §9 の予定項目。
 
-use crate::case::{Case, ElectrodeRole, shell_at};
+use crate::case::{Case, ElectrodeRole, FaceLookup};
 use crate::element::shell::face_integral;
 use crate::error::{ErrorKind, GfemError, Result};
 use crate::mesh::{Mesh, NodeIndex};
@@ -63,33 +63,37 @@ impl ElectrodeGeometry {
 ///
 /// 電極面は [`Case::resolve_faces`] が返す通し番号の昇順にたどるので、
 /// 同じ入力からは常に同じ加算順序になる（CLAUDE.md 設計原則 1）。
-pub fn assemble_load(mesh: &Mesh, case: &Case) -> Result<(Vec<f64>, Vec<ElectrodeGeometry>)> {
+pub fn assemble_load(
+    mesh: &Mesh,
+    case: &Case,
+    lookup: &FaceLookup,
+) -> Result<(Vec<f64>, Vec<ElectrodeGeometry>)> {
     let mut f = vec![0.0; mesh.nodes.len()];
     let mut geometries = Vec::with_capacity(case.electrodes.len());
 
     for electrode in &case.electrodes {
-        let faces = case.resolve_faces(mesh, electrode)?;
+        let faces = case.resolve_faces(lookup, electrode)?;
 
         // 1. 面積と ∫N_i dS を集める
         let mut weights: BTreeMap<NodeIndex, f64> = BTreeMap::new();
         let mut area = 0.0;
         let mut points = [[0.0f64; 3]; 4];
         for &face in &faces {
-            let s = shell_at(mesh, face as usize);
-            let n = s.conn.len();
-            mesh.gather_coords(s.conn, &mut points[..n]);
-            let integral = face_integral(s.kind, &points[..n]);
+            let (kind, conn) = lookup.face_nodes(face);
+            let n = conn.len();
+            mesh.gather_coords(conn, &mut points[..n]);
+            let integral = face_integral(kind, &points[..n]);
             if integral.area <= 0.0 {
                 return Err(GfemError::model(format!(
                     "電極 {} の面の面積がゼロです",
                     electrode.name
                 ))
-                .with_card(s.kind.card_name())
-                .with_entity(format!("要素 EID={}", s.id))
-                .with_hint("退化したシェル要素です。メッシュ生成側で修正してください"));
+                .with_card(kind.card_name())
+                .with_entity(lookup.label(face))
+                .with_hint("退化した面です。メッシュ生成側で修正してください"));
             }
             area += integral.area;
-            for (k, &node) in s.conn.iter().enumerate() {
+            for (k, &node) in conn.iter().enumerate() {
                 *weights.entry(node).or_insert(0.0) += integral.shape_integral[k];
             }
         }
@@ -129,6 +133,7 @@ mod tests {
     use super::*;
     use crate::case::Electrode;
     use crate::io::nastran::read_nastran_from;
+    use crate::mesh::topology::{Surface, extract_surface};
     use crate::units::LengthUnit;
     use std::path::Path;
 
@@ -145,6 +150,11 @@ CTRIA3,100,101,1,3,2
 CTRIA3,200,201,1,2,4
 ";
 
+    /// 面を引く下ごしらえ。外表面を持ち回るのが煩わしいので、テストではまとめて作る。
+    fn lookup_of<'a>(mesh: &'a Mesh, surface: &'a Surface) -> FaceLookup<'a> {
+        FaceLookup::new(mesh, surface)
+    }
+
     fn setup() -> (Mesh, Case) {
         let (mesh, _) =
             read_nastran_from(DECK.as_bytes(), Path::new("<test>"), LengthUnit::Meter).unwrap();
@@ -158,7 +168,8 @@ CTRIA3,200,201,1,2,4
     #[test]
     fn load_satisfies_the_solvability_condition() {
         let (mesh, case) = setup();
-        let (f, geo) = assemble_load(&mesh, &case).unwrap();
+        let surface = extract_surface(&mesh).unwrap();
+        let (f, geo) = assemble_load(&mesh, &case, &lookup_of(&mesh, &surface)).unwrap();
         // SPEC §2.2 (a): 1ᵀf = 0
         let sum: f64 = f.iter().sum();
         let scale = f.iter().fold(0.0f64, |a, b| a.max(b.abs()));
@@ -170,7 +181,8 @@ CTRIA3,200,201,1,2,4
     #[test]
     fn total_injected_current_matches_the_setting() {
         let (mesh, case) = setup();
-        let (_, geo) = assemble_load(&mesh, &case).unwrap();
+        let surface = extract_surface(&mesh).unwrap();
+        let (_, geo) = assemble_load(&mesh, &case, &lookup_of(&mesh, &surface)).unwrap();
         // この電極が配った電流の合計が I。
         // f の節点値を足すのでは駄目で、2 つの電極が節点を共有していると相殺されてしまう
         let injected: f64 = geo[0]
@@ -190,7 +202,8 @@ CTRIA3,200,201,1,2,4
     #[test]
     fn triangle_load_is_split_evenly_between_its_nodes() {
         let (mesh, case) = setup();
-        let (f, _) = assemble_load(&mesh, &case).unwrap();
+        let surface = extract_surface(&mesh).unwrap();
+        let (f, _) = assemble_load(&mesh, &case, &lookup_of(&mesh, &surface)).unwrap();
         // 陽極面 (節点 0,2,1) の 3 節点に I/3 ずつ入るはずだが、
         // 節点 0 と 1 は陰極面にも属するので、単独で確認できるのは節点 2
         assert!((f[2] - 2.0e-3 / 3.0).abs() < 1e-18, "{}", f[2]);
@@ -199,7 +212,8 @@ CTRIA3,200,201,1,2,4
     #[test]
     fn mean_potential_is_area_weighted() {
         let (mesh, case) = setup();
-        let (_, geo) = assemble_load(&mesh, &case).unwrap();
+        let surface = extract_surface(&mesh).unwrap();
+        let (_, geo) = assemble_load(&mesh, &case, &lookup_of(&mesh, &surface)).unwrap();
         // 一定電位ならその値がそのまま平均になる
         let phi = vec![2.5; mesh.nodes.len()];
         assert!((geo[0].mean_potential(&phi) - 2.5).abs() < 1e-15);

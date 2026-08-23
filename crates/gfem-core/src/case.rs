@@ -9,8 +9,9 @@
 
 use crate::error::{ErrorKind, GfemError, Result, format_sample_list};
 use crate::material::Conductivity;
-use crate::mesh::topology::Surface;
-use crate::mesh::{ElemId, Mesh, NodeId, PropId};
+use crate::mesh::pick::SurfacePicker;
+use crate::mesh::topology::{FaceKey, Surface, face_key};
+use crate::mesh::{ElemId, Mesh, NodeId, NodeIndex, PropId};
 use crate::solver::amg::AmgOptions;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -47,10 +48,61 @@ impl ElectrodeRole {
     }
 }
 
+/// 体表面に置く電極パッチ 1 枚（SPEC §3.3 / §11.1）。
+///
+/// **シェル要素を持たないモデルのための指定方法。** 人体モデルはソリッド要素だけで
+/// 配られるのが普通で、その場合シェル PID では電極を 1 つも置けない。外表面は
+/// ソリッドの面から抽出できているので、そこから直接選ぶ。
+///
+/// GUI では 3D ビュー上のクリックが `center` を、スピンボックスが `radius` を決める。
+/// **保存するのは面の一覧ではなく、この中心と半径**。同じメッシュなら同じ面が選ばれ、
+/// ケースファイルを読んでも人が意味を追えるため（面番号の羅列は追えない）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct SurfacePatch {
+    /// 中心 [m]。3D ビューでクリックした点
+    pub center: [f64; 3],
+    /// 半径 [m]。中心からこの距離までの面を、体表面伝いに広げて選ぶ
+    pub radius: f64,
+    /// この PID のソリッドが持つ面だけに限る（`None` なら制限しない）
+    ///
+    /// 首の切断面のように「外表面だが体表面ではない」面を避けるために使う。
+    pub pid: Option<PropId>,
+}
+
+/// 体表面の面 1 枚の指し方（SPEC §11.1）。
+///
+/// **内部の通し番号ではなく Nastran の識別子で持つ。** ソリッド要素の EID と、
+/// その要素内での面番号（0 始まり）なら、読み込み順や内部の索引づけが変わっても
+/// 壊れず、ケースファイルを人が読んでも意味を追える。
+///
+/// ケースファイル（YAML）とエラーメッセージでは**面番号を 1 始まり**で表す
+/// （「CTETRA EID=123 の第 2 面」）。0 始まりなのはこの構造体の中だけ。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct FaceRef {
+    /// ソリッド要素の EID
+    pub element_id: ElemId,
+    /// 要素内での面番号（0 始まり）
+    pub local_face: u8,
+}
+
+impl FaceRef {
+    /// 0 始まりの面番号から作る。
+    pub fn new(element_id: ElemId, local_face: u8) -> Self {
+        Self {
+            element_id,
+            local_face,
+        }
+    }
+}
+
 /// 電極 1 個。
 ///
-/// 面は「シェル PID の集合」と「個別のシェル要素 ID」の**組み合わせ**で指定する
-/// （SPEC §3.3）。複数パッチを 1 つの電極として束ねられる。
+/// 面は「シェル PID の集合」「個別のシェル要素 ID」「体表面のパッチ」の**組み合わせ**で
+/// 指定し、さらに**手で足した面・外した面**で調整する（SPEC §3.3 / §11.1）。
+///
+/// 手編集を面の一覧そのものではなく**差分**で持つのは、パッチの「中心と半径」という
+/// 読める指定を残したまま縁だけ直せるようにするため。実測で、半径 25 mm の電極は
+/// 923 面あり、解決後の一覧を書き出すと 1 電極で 6〜12 KB になる。
 #[derive(Debug, Clone)]
 pub struct Electrode {
     /// 表示名
@@ -63,6 +115,12 @@ pub struct Electrode {
     pub shell_pids: Vec<PropId>,
     /// 個別に追加するシェル要素 ID
     pub element_ids: Vec<ElemId>,
+    /// 体表面から直接選んだパッチ
+    pub patches: Vec<SurfacePatch>,
+    /// 手で足した体表面の面
+    pub added_faces: Vec<FaceRef>,
+    /// 手で外した体表面の面。パッチや `added_faces` より優先する
+    pub removed_faces: Vec<FaceRef>,
 }
 
 impl Electrode {
@@ -83,6 +141,9 @@ impl Electrode {
             current,
             shell_pids: Vec::new(),
             element_ids: Vec::new(),
+            patches: Vec::new(),
+            added_faces: Vec::new(),
+            removed_faces: Vec::new(),
         }
     }
 
@@ -95,6 +156,24 @@ impl Electrode {
     /// シェル要素 ID を面として追加する。
     pub fn with_element_ids(mut self, ids: impl IntoIterator<Item = ElemId>) -> Self {
         self.element_ids.extend(ids);
+        self
+    }
+
+    /// 体表面のパッチを面として追加する（SPEC §11.1）。
+    pub fn with_patches(mut self, patches: impl IntoIterator<Item = SurfacePatch>) -> Self {
+        self.patches.extend(patches);
+        self
+    }
+
+    /// 手で足した面。
+    pub fn with_added_faces(mut self, faces: impl IntoIterator<Item = FaceRef>) -> Self {
+        self.added_faces.extend(faces);
+        self
+    }
+
+    /// 手で外した面。
+    pub fn with_removed_faces(mut self, faces: impl IntoIterator<Item = FaceRef>) -> Self {
+        self.removed_faces.extend(faces);
         self
     }
 
@@ -415,23 +494,28 @@ impl Case {
         }
 
         // --- 電極面 ---
-        let mut used_faces: BTreeMap<u32, String> = BTreeMap::new();
+        let lookup = FaceLookup::new(mesh, surface);
+        // 面の重なりは「体表面のどの面か」で見る。シェル要素とパッチが同じ面を
+        // 指していても重複として捕まえられるようにするため
+        let mut used_faces: BTreeMap<FaceKey, String> = BTreeMap::new();
         for e in &self.electrodes {
-            let faces = self.resolve_faces(mesh, e)?;
+            let faces = self.resolve_faces(&lookup, e)?;
             let mut off_surface: Vec<String> = Vec::new();
-            for &shell in &faces {
-                let s = shell_at(mesh, shell as usize);
-                if !surface.contains(s.conn) {
-                    off_surface.push(s.id.to_string());
+            for &face in &faces {
+                let (_, nodes) = lookup.face_nodes(face);
+                if !surface.contains(nodes) {
+                    // パッチは外表面から選ぶので、ここに来るのはシェル要素だけ
+                    off_surface.push(lookup.label(face));
                 }
-                if let Some(other) = used_faces.insert(shell, e.name.clone())
+                if let Some(other) = used_faces.insert(face_key(nodes), e.name.clone())
                     && other != e.name
                 {
                     return Err(GfemError::new(
                         ErrorKind::Case,
                         format!(
-                            "シェル要素 EID={} が電極 {other} と {} の両方に含まれています",
-                            s.id, e.name
+                            "{} が電極 {other} と {} の両方に含まれています",
+                            lookup.label(face),
+                            e.name
                         ),
                     )
                     .with_hint("1 つの面を 2 つの電極に割り当てることはできません"));
@@ -442,7 +526,7 @@ impl Case {
                 return Err(GfemError::new(
                     ErrorKind::Case,
                     format!(
-                        "電極 {} の面のうち {} 枚が体表面（外表面）に載っていません: EID={}",
+                        "電極 {} の面のうち {} 枚が体表面（外表面）に載っていません: {}",
                         e.name,
                         off_surface.len(),
                         format_sample_list(&off_surface, SAMPLE_LIMIT)
@@ -471,15 +555,38 @@ impl Case {
         Ok(warnings)
     }
 
-    /// 電極に属するシェル要素の通し番号（昇順・重複なし）を求める。
+    /// 電極に属する面（昇順・重複なし）を求める。
     ///
-    /// 通し番号順に並べることで、荷重ベクトルへの加算順序が入力の書き順に依存しなくなる
-    /// （CLAUDE.md 設計原則 1）。
-    pub fn resolve_faces(&self, mesh: &Mesh, electrode: &Electrode) -> Result<Vec<u32>> {
+    /// 中身は [`resolve_faces`]。ケースの設定には依存しないので、
+    /// 表示のためだけに面を引きたいとき（導電率をまだ入れていない GUI など）は
+    /// そちらを直接呼べる。
+    pub fn resolve_faces(
+        &self,
+        lookup: &FaceLookup,
+        electrode: &Electrode,
+    ) -> Result<Vec<ElectrodeFace>> {
+        resolve_faces(lookup, electrode)
+    }
+}
+
+/// 電極に属する面（昇順・重複なし）を求める。
+///
+/// 通し番号順に並べることで、荷重ベクトルへの加算順序が入力の書き順に依存しなくなる
+/// （CLAUDE.md 設計原則 1）。
+///
+/// 面の出どころは 4 つあり、この順で効く:
+///
+/// 1. シェル PID / シェル要素 ID
+/// 2. 体表面のパッチ（中心・半径・PID）
+/// 3. 手で足した面
+/// 4. 手で外した面（**上の 3 つより優先する**）
+pub fn resolve_faces(lookup: &FaceLookup, electrode: &Electrode) -> Result<Vec<ElectrodeFace>> {
+    {
+        let mesh = lookup.mesh;
         let wanted_pids: BTreeSet<PropId> = electrode.shell_pids.iter().copied().collect();
         let wanted_ids: BTreeSet<ElemId> = electrode.element_ids.iter().copied().collect();
 
-        let mut faces: Vec<u32> = Vec::new();
+        let mut faces: Vec<ElectrodeFace> = Vec::new();
         let mut seen_pids: BTreeSet<PropId> = BTreeSet::new();
         let mut seen_ids: BTreeSet<ElemId> = BTreeSet::new();
         for s in mesh.iter_shells() {
@@ -492,8 +599,90 @@ impl Case {
                 seen_ids.insert(s.id);
             }
             if by_pid || by_id {
-                faces.push(s.index as u32);
+                faces.push(ElectrodeFace::Shell(s.index as u32));
             }
+        }
+
+        // --- 体表面のパッチ（SPEC §11.1）---
+        for (k, patch) in electrode.patches.iter().enumerate() {
+            if !patch.radius.is_finite() || patch.radius < 0.0 {
+                return Err(GfemError::new(
+                    ErrorKind::Case,
+                    format!(
+                        "電極 {} のパッチ {} の半径が不正です: {} m",
+                        electrode.name,
+                        k + 1,
+                        patch.radius
+                    ),
+                )
+                .with_hint("半径は 0 以上の有限値で指定してください（単位は m）"));
+            }
+            if patch.center.iter().any(|v| !v.is_finite()) {
+                return Err(GfemError::new(
+                    ErrorKind::Case,
+                    format!(
+                        "電極 {} のパッチ {} の中心が不正です: {:?}",
+                        electrode.name,
+                        k + 1,
+                        patch.center
+                    ),
+                )
+                .with_hint("中心は体表面上の点を m で指定してください"));
+            }
+            let selected = lookup
+                .picker()
+                .select(patch.center, patch.radius, patch.pid);
+            if selected.is_empty() {
+                return Err(GfemError::new(
+                    ErrorKind::Case,
+                    format!(
+                        "電極 {} のパッチ {} が体表面の面を 1 枚も選べませんでした（中心 {:?} m, 半径 {} m{}）",
+                        electrode.name,
+                        k + 1,
+                        patch.center,
+                        patch.radius,
+                        match patch.pid {
+                            Some(p) => format!(", PID={p}"),
+                            None => String::new(),
+                        }
+                    ),
+                )
+                .with_hint(
+                    "PID で絞り込んでいる場合は、その領域が体表面に露出しているか確認してください\
+                     （読み込みレポートの領域一覧と、3D ビューの外表面表示で分かります）",
+                ));
+            }
+            faces.extend(selected.into_iter().map(ElectrodeFace::Surface));
+        }
+
+        // --- 手で足した面・外した面（SPEC §11.1）---
+        for face in &electrode.added_faces {
+            faces.push(ElectrodeFace::Surface(lookup.face_of(*face, electrode)?));
+        }
+        faces.sort_unstable();
+        faces.dedup();
+        if !electrode.removed_faces.is_empty() {
+            let mut dropped: BTreeSet<u32> = BTreeSet::new();
+            for face in &electrode.removed_faces {
+                // 選ばれていない面を外そうとしても黙って通す。半径を変えれば
+                // もともと選ばれなくなるので、そこで文句を言う筋合いはない
+                dropped.insert(lookup.face_of(*face, electrode)?);
+            }
+            faces.retain(|f| !matches!(f, ElectrodeFace::Surface(i) if dropped.contains(i)));
+        }
+
+        // シェル要素と体表面の面が同じ 1 枚を指していたら、体表面側を落とす。
+        // 残すと**同じ面を 2 回積分して面積が二重に数えられる**
+        if faces.iter().any(|f| matches!(f, ElectrodeFace::Shell(_))) {
+            let shells: BTreeSet<FaceKey> = faces
+                .iter()
+                .filter(|f| matches!(f, ElectrodeFace::Shell(_)))
+                .map(|f| face_key(lookup.face_nodes(*f).1))
+                .collect();
+            faces.retain(|f| match f {
+                ElectrodeFace::Shell(_) => true,
+                ElectrodeFace::Surface(_) => !shells.contains(&face_key(lookup.face_nodes(*f).1)),
+            });
         }
 
         let unknown_pids: Vec<String> = wanted_pids
@@ -534,9 +723,136 @@ impl Case {
                     electrode.name
                 ),
             )
-            .with_hint("シェル PID か要素 ID で電極面を指定してください"));
+            .with_hint(
+                "シェル PID・シェル要素 ID・体表面のパッチ（3D ビューでクリック）の\
+                 いずれかで電極面を指定してください",
+            ));
         }
         Ok(faces)
+    }
+}
+
+/// 電極を構成する面 1 枚。
+///
+/// シェル要素（CTRIA3 / CQUAD4）と、ソリッドの外表面から選んだ面の両方がありうる。
+/// **後者はシェル要素を持たないモデルのための経路**で、荷重の作り方（面積按分。
+/// SPEC §2.4）はどちらも同じ。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ElectrodeFace {
+    /// シェル要素の通し番号（`Mesh::iter_shells` の `index`）
+    Shell(u32),
+    /// 外表面の面の通し番号（[`Surface::faces`] の索引）
+    Surface(u32),
+}
+
+/// 電極面を引くための下ごしらえ。
+///
+/// 外表面は解析の準備段階で 1 度だけ作る。パッチ選択に使う索引
+/// （[`SurfacePicker`]）は**パッチを使う電極があるときだけ**作るので、
+/// シェルだけのモデルでは何も余計に計算しない。
+pub struct FaceLookup<'a> {
+    mesh: &'a Mesh,
+    surface: &'a Surface,
+    picker: std::sync::OnceLock<SurfacePicker>,
+    /// (ソリッドの EID, 局所面番号) → 外表面の面の通し番号。
+    /// 手で足した / 外した面を引くときだけ作る
+    by_element: std::sync::OnceLock<BTreeMap<(ElemId, u8), u32>>,
+}
+
+impl<'a> FaceLookup<'a> {
+    /// メッシュと、そこから抽出済みの外表面から作る。
+    pub fn new(mesh: &'a Mesh, surface: &'a Surface) -> Self {
+        Self {
+            mesh,
+            surface,
+            picker: std::sync::OnceLock::new(),
+            by_element: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// 手で指した面（EID と面番号）を外表面の通し番号に直す。
+    ///
+    /// 見つからなければ**どの電極のどの面か**が分かるエラーにする（設計原則 6）。
+    /// 外表面に無い面を指しているということは、内部の面を指しているか、
+    /// メッシュを差し替えて番号が変わったかのどちらか（SPEC §11.1）。
+    pub fn face_of(&self, face: FaceRef, electrode: &Electrode) -> Result<u32> {
+        let index = self.by_element.get_or_init(|| {
+            let mut map = BTreeMap::new();
+            for (i, f) in self.surface.faces().iter().enumerate() {
+                let id = self.mesh.solid(f.element as usize).id;
+                map.insert((id, f.local_face), i as u32);
+            }
+            map
+        });
+        index
+            .get(&(face.element_id, face.local_face))
+            .copied()
+            .ok_or_else(|| {
+                GfemError::new(
+                    ErrorKind::Case,
+                    format!(
+                        "電極 {} が指している面が体表面にありません: EID={} の第 {} 面",
+                        electrode.name,
+                        face.element_id,
+                        face.local_face + 1
+                    ),
+                )
+                .with_hint(
+                    "3D ビューで選び直してください。メッシュを差し替えた場合は、\
+                     手で足した面・外した面の指定が古くなっている可能性があります",
+                )
+            })
+    }
+
+    /// 外表面。
+    pub fn surface(&self) -> &'a Surface {
+        self.surface
+    }
+
+    /// パッチ選択の索引（初回だけ作る）。
+    pub fn picker(&self) -> &SurfacePicker {
+        if let Some(p) = self.picker.get() {
+            return p;
+        }
+        let built = SurfacePicker::build(self.mesh, self.surface);
+        self.picker.get_or_init(|| built)
+    }
+
+    /// 面の種類と節点（面積分に渡す形）。
+    pub fn face_nodes(
+        &self,
+        face: ElectrodeFace,
+    ) -> (crate::element::ElementKind, &'a [NodeIndex]) {
+        match face {
+            ElectrodeFace::Shell(i) => {
+                let s = shell_at(self.mesh, i as usize);
+                (s.kind, s.conn)
+            }
+            ElectrodeFace::Surface(i) => {
+                let f = &self.surface.faces()[i as usize];
+                (f.kind(), f.nodes())
+            }
+        }
+    }
+
+    /// エラー表示に使う面の呼び名（CLAUDE.md 設計原則 6）。
+    pub fn label(&self, face: ElectrodeFace) -> String {
+        match face {
+            ElectrodeFace::Shell(i) => {
+                let s = shell_at(self.mesh, i as usize);
+                format!("{} EID={}", s.kind.card_name(), s.id)
+            }
+            ElectrodeFace::Surface(i) => {
+                let f = &self.surface.faces()[i as usize];
+                let solid = self.mesh.solid(f.element as usize);
+                format!(
+                    "体表面の面（{} EID={} の第 {} 面）",
+                    solid.kind.card_name(),
+                    solid.id,
+                    f.local_face + 1
+                )
+            }
+        }
     }
 }
 
@@ -666,12 +982,13 @@ CTRIA3,200,201,1,2,4
 
     #[test]
     fn resolves_faces_in_index_order() {
-        let (mesh, _) = setup();
+        let (mesh, surface) = setup();
+        let lookup = FaceLookup::new(&mesh, &surface);
         let case = valid_case();
-        let faces = case.resolve_faces(&mesh, &case.electrodes[0]).unwrap();
-        assert_eq!(faces, vec![0]);
-        let faces = case.resolve_faces(&mesh, &case.electrodes[1]).unwrap();
-        assert_eq!(faces, vec![1]);
+        let faces = case.resolve_faces(&lookup, &case.electrodes[0]).unwrap();
+        assert_eq!(faces, vec![ElectrodeFace::Shell(0)]);
+        let faces = case.resolve_faces(&lookup, &case.electrodes[1]).unwrap();
+        assert_eq!(faces, vec![ElectrodeFace::Shell(1)]);
     }
 
     #[test]

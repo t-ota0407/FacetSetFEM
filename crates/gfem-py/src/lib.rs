@@ -17,7 +17,9 @@
 
 mod cuda;
 
-use gfem_core::case::{Backend, Electrode, ElectrodeRole, Preconditioner, ReferencePotential};
+use gfem_core::case::{
+    Backend, Electrode, ElectrodeRole, FaceRef, Preconditioner, ReferencePotential, SurfacePatch,
+};
 use gfem_core::mesh::streamline::{TraceDirection, TraceOptions};
 use gfem_core::post::RegionStats;
 use gfem_core::provenance::Provenance;
@@ -153,6 +155,13 @@ pub struct PyMesh {
     tets: OnceLock<gfem_core::mesh::TetView>,
     /// 流線の下ごしらえ（四面体分割 + 面隣接 + 空間分割）
     navigator: OnceLock<gfem_core::mesh::Navigator>,
+    /// 外表面（SPEC §4.1）。
+    ///
+    /// 抽出は 4 百万四面体で 3.8 秒かかる。表示にも電極のパッチ選択にも使うので、
+    /// 1 度だけ作って使い回す
+    surface: OnceLock<gfem_core::mesh::Surface>,
+    /// 体表面から電極面を選ぶための索引（SPEC §11.1）
+    picker: OnceLock<gfem_core::mesh::SurfacePicker>,
 }
 
 impl PyMesh {
@@ -172,6 +181,55 @@ impl PyMesh {
         }
         let built = gfem_core::mesh::Navigator::build(&self.inner).map_err(to_py)?;
         Ok(self.navigator.get_or_init(|| built))
+    }
+
+    /// 外表面（初回だけ抽出する）。
+    pub(crate) fn surface(&self) -> PyResult<&gfem_core::mesh::Surface> {
+        if let Some(s) = self.surface.get() {
+            return Ok(s);
+        }
+        let built = gfem_core::mesh::extract_surface(&self.inner).map_err(to_py)?;
+        Ok(self.surface.get_or_init(|| built))
+    }
+
+    /// 体表面から面を選ぶ索引（初回だけ作る）。
+    fn picker(&self) -> PyResult<&gfem_core::mesh::SurfacePicker> {
+        if let Some(p) = self.picker.get() {
+            return Ok(p);
+        }
+        let built = gfem_core::mesh::SurfacePicker::build(&self.inner, self.surface()?);
+        Ok(self.picker.get_or_init(|| built))
+    }
+
+    /// 外表面の面の集合を Python に返す形にまとめる。
+    ///
+    /// `faces` は [`Surface::faces`] の通し番号。三角形は強調表示に、
+    /// `face_refs` は「手で足した面・外した面」を覚えておくために使う
+    /// （**面番号は 1 始まり**。エラーメッセージやケースファイルと揃える）。
+    fn describe_faces<'py>(&self, py: Python<'py>, faces: &[u32]) -> PyResult<Bound<'py, PyDict>> {
+        let surface = self.surface()?;
+        let picker = self.picker()?;
+        let mut flat: Vec<u32> = Vec::new();
+        let mut refs: Vec<i64> = Vec::with_capacity(faces.len() * 2);
+        for &f in faces {
+            let face = &surface.faces()[f as usize];
+            let n = face.nodes();
+            flat.extend_from_slice(&[n[0], n[1], n[2]]);
+            if n.len() == 4 {
+                flat.extend_from_slice(&[n[0], n[2], n[3]]);
+            }
+            refs.push(self.inner.solid(face.element as usize).id as i64);
+            refs.push(face.local_face as i64 + 1);
+        }
+        let rows = flat.len() / 3;
+        let n_refs = refs.len() / 2;
+
+        let d = PyDict::new(py);
+        d.set_item("n_faces", faces.len())?;
+        d.set_item("area", picker.total_area(faces))?;
+        d.set_item("triangles", flat.into_pyarray(py).reshape([rows, 3])?)?;
+        d.set_item("face_refs", refs.into_pyarray(py).reshape([n_refs, 2])?)?;
+        Ok(d)
     }
 }
 
@@ -266,8 +324,7 @@ impl PyMesh {
     ///
     /// 1000 万節点でも表面節点は数十万なので、GUI にはこれだけを渡す（SPEC §6.3）。
     fn surface_triangles<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<u32>>> {
-        let surface = gfem_core::mesh::extract_surface(&self.inner).map_err(to_py)?;
-        let (tris, _) = surface.triangulate();
+        let (tris, _) = self.surface()?.triangulate();
         let flat: Vec<u32> = tris.into_iter().flatten().collect();
         let rows = flat.len() / 3;
         flat.into_pyarray(py).reshape([rows, 3])
@@ -280,9 +337,143 @@ impl PyMesh {
         &self,
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyArray1<u32>>> {
-        let surface = gfem_core::mesh::extract_surface(&self.inner).map_err(to_py)?;
-        let (_, owners) = surface.triangulate();
+        let (_, owners) = self.surface()?.triangulate();
         Ok(owners.into_pyarray(py))
+    }
+
+    /// 外表面に顔を出している PID と、その面積・面数（面積の大きい順）。
+    ///
+    /// 電極パッチを PID で絞り込むときの手がかり。人体モデルでは首の切断面などで
+    /// 内部組織も外表面に現れるので、**皮膚がどの PID かを面積で見当づける**ために使う
+    /// （SPEC §11.1）。
+    fn surface_pids(&self, py: Python<'_>) -> PyResult<Py<PyList>> {
+        let picker = self.picker()?;
+        let mut by_pid: BTreeMap<u32, (usize, f64)> = BTreeMap::new();
+        for face in 0..picker.len() as u32 {
+            let e = by_pid.entry(picker.pid(face)).or_insert((0, 0.0));
+            e.0 += 1;
+            e.1 += picker.area(face);
+        }
+        let mut rows: Vec<(u32, usize, f64)> =
+            by_pid.into_iter().map(|(p, (n, a))| (p, n, a)).collect();
+        // 面積の大きい順。同じ面積なら PID 順（決定性のため）
+        rows.sort_by(|a, b| b.2.total_cmp(&a.2).then(a.0.cmp(&b.0)));
+
+        let list = PyList::empty(py);
+        for (pid, n_faces, area) in rows {
+            let d = PyDict::new(py);
+            d.set_item("pid", pid)?;
+            d.set_item("n_faces", n_faces)?;
+            d.set_item("area", area)?;
+            list.append(d)?;
+        }
+        Ok(list.unbind())
+    }
+
+    /// 体表面の 1 点を中心に、半径の中でつながっている面を選ぶ（SPEC §11.1）。
+    ///
+    /// GUI の 3D ビューでクリックした点をそのまま渡す。戻り値は
+    /// `{"n_faces", "area", "triangles", "center", "radius", "pid"}` で、
+    /// `triangles` は選ばれた面を三角形に割った `(n, 3)` の節点索引（強調表示用）。
+    ///
+    /// **球に入っているかだけでは選ばない。** クリックした面から稜線でつながって
+    /// いる面だけを辿るので、首の切断面や耳の裏へ飛び移らない。
+    #[pyo3(signature = (center, radius, pid = None))]
+    fn pick_patch(
+        &self,
+        py: Python<'_>,
+        center: [f64; 3],
+        radius: f64,
+        pid: Option<u32>,
+    ) -> PyResult<Py<PyDict>> {
+        if !radius.is_finite() || radius < 0.0 {
+            return Err(to_py(
+                gfem_core::GfemError::new(
+                    gfem_core::ErrorKind::Case,
+                    format!("パッチの半径が不正です: {radius} m"),
+                )
+                .with_hint("半径は 0 以上の有限値で指定してください（単位は m）"),
+            ));
+        }
+        // ピックに失敗すると NaN が返ることがある（実測: vtkHardwarePicker）。
+        // 黙って通すと距離の比較が全て false になり、**先頭の面が選ばれて
+        // 見当違いの場所に電極ができる**ので、ここで止める
+        if center.iter().any(|v| !v.is_finite()) {
+            return Err(to_py(
+                gfem_core::GfemError::new(
+                    gfem_core::ErrorKind::Case,
+                    format!("パッチの中心が数値になっていません: {center:?}"),
+                )
+                .with_hint(
+                    "3D ビューのピックに失敗した可能性があります。\
+                     体表面の上をもう一度クリックしてください",
+                ),
+            ));
+        }
+        let faces = self.picker()?.select(center, radius, pid);
+        let d = self.describe_faces(py, &faces)?;
+        d.set_item("center", center.to_vec())?;
+        d.set_item("radius", radius)?;
+        d.set_item("pid", pid)?;
+        Ok(d.unbind())
+    }
+
+    /// 電極の面指定を解決して、面数・面積・三角形・面の識別子を返す。
+    ///
+    /// **ソルバが荷重を作るときと同じ関数**（`gfem_core::case::resolve_faces`）を通す。
+    /// GUI の表示だけ別に計算すると、「25 cm² のつもりで置いた電極が実は違う面積
+    /// だった」が静かに起きるため（SPEC §6.2 の手順 3）。導電率が未設定でも呼べる。
+    ///
+    /// `added` / `removed` は `(EID, 面番号)` の並び。**面番号は 1 始まり**。
+    #[pyo3(signature = (
+        shell_pids = None, element_ids = None, patches = None, added = None, removed = None,
+        name = "（名前なし）"
+    ))]
+    #[allow(clippy::too_many_arguments)] // Python 側の名前つき引数に合わせる
+    fn resolve_electrode_faces(
+        &self,
+        py: Python<'_>,
+        shell_pids: Option<Vec<u32>>,
+        element_ids: Option<Vec<u32>>,
+        patches: Option<Vec<Bound<'_, PyAny>>>,
+        added: Option<Vec<(u32, u8)>>,
+        removed: Option<Vec<(u32, u8)>>,
+        name: &str,
+    ) -> PyResult<Py<PyDict>> {
+        let electrode = build_electrode(
+            name,
+            ElectrodeRole::Anode,
+            1.0,
+            shell_pids,
+            element_ids,
+            patches,
+            added,
+            removed,
+        )?;
+        let surface = self.surface()?;
+        let lookup = gfem_core::case::FaceLookup::new(&self.inner, surface);
+        let faces = gfem_core::case::resolve_faces(&lookup, &electrode).map_err(to_py)?;
+
+        // 体表面の面だけ強調表示できる。シェル要素は従来どおり別経路で描く
+        let surface_faces: Vec<u32> = faces
+            .iter()
+            .filter_map(|f| match f {
+                gfem_core::case::ElectrodeFace::Surface(i) => Some(*i),
+                gfem_core::case::ElectrodeFace::Shell(_) => None,
+            })
+            .collect();
+        let d = self.describe_faces(py, &surface_faces)?;
+        // 面数と面積はシェルを含めた全体で出す（ソルバが使う値と一致させる）
+        let mut area = 0.0;
+        let mut points = [[0.0f64; 3]; 4];
+        for &face in &faces {
+            let (kind, conn) = lookup.face_nodes(face);
+            self.inner.gather_coords(conn, &mut points[..conn.len()]);
+            area += gfem_core::element::shell::face_integral(kind, &points[..conn.len()]).area;
+        }
+        d.set_item("n_faces", faces.len())?;
+        d.set_item("area", area)?;
+        Ok(d.unbind())
     }
 
     /// シェル要素（電極候補面）を三角形に分割したもの。
@@ -488,8 +679,22 @@ impl PyCase {
     /// 電極を追加する。
     ///
     /// `role` は `"anode"`（流入）か `"cathode"`（流出）。`current` は総電流 [A]（正の値）。
-    /// 面はシェル PID の集合と個別の要素 ID の組み合わせで指定する（SPEC §3.3）。
-    #[pyo3(signature = (name, role, current, shell_pids = None, element_ids = None))]
+    /// 面はシェル PID の集合・個別の要素 ID・体表面のパッチの組み合わせで指定する
+    /// （SPEC §3.3）。
+    ///
+    /// `patches` は `{"center": [x, y, z], "radius": r, "pid": 51}` の一覧。
+    /// **シェル要素を持たないモデル（人体モデルはこれが普通）はこちらを使う**
+    /// （SPEC §11.1）:
+    ///
+    /// ```python
+    /// case.add_electrode("E1", role="anode", current=2e-3,
+    ///                    patches=[{"center": [0.0, 1.76, 0.02], "radius": 0.025, "pid": 51}])
+    /// ```
+    #[pyo3(signature = (
+        name, role, current,
+        shell_pids = None, element_ids = None, patches = None, added = None, removed = None
+    ))]
+    #[allow(clippy::too_many_arguments)] // Python 側の名前つき引数に合わせる
     fn add_electrode(
         &mut self,
         name: &str,
@@ -497,14 +702,20 @@ impl PyCase {
         current: f64,
         shell_pids: Option<Vec<u32>>,
         element_ids: Option<Vec<u32>>,
+        patches: Option<Vec<Bound<'_, PyAny>>>,
+        added: Option<Vec<(u32, u8)>>,
+        removed: Option<Vec<(u32, u8)>>,
     ) -> PyResult<()> {
-        let electrode = Electrode {
-            name: name.to_string(),
-            role: parse_role(role)?,
+        let electrode = build_electrode(
+            name,
+            parse_role(role)?,
             current,
-            shell_pids: shell_pids.unwrap_or_default(),
-            element_ids: element_ids.unwrap_or_default(),
-        };
+            shell_pids,
+            element_ids,
+            patches,
+            added,
+            removed,
+        )?;
         self.inner.add_electrode(electrode);
         Ok(())
     }
@@ -575,15 +786,16 @@ impl PyCase {
     /// 不備があれば例外、問題なければ警告の一覧を返す。
     fn validate(&self) -> PyResult<Vec<String>> {
         let mesh = &self.mesh.get().inner;
-        let surface = gfem_core::mesh::extract_surface(mesh).map_err(to_py)?;
-        self.inner.validate(mesh, &surface).map_err(to_py)
+        let surface = self.mesh.get().surface()?;
+        self.inner.validate(mesh, surface).map_err(to_py)
     }
 
     /// 電極ごとの面積と電流密度。面を選びながら確認するために使う（SPEC §6.2 の手順 3）。
     fn electrode_info(&self, py: Python<'_>) -> PyResult<Py<PyList>> {
         let mesh = &self.mesh.get().inner;
+        let lookup = gfem_core::case::FaceLookup::new(mesh, self.mesh.get().surface()?);
         let (_, geometries) =
-            gfem_core::assemble::assemble_load(mesh, &self.inner).map_err(to_py)?;
+            gfem_core::assemble::assemble_load(mesh, &self.inner, &lookup).map_err(to_py)?;
         let list = PyList::empty(py);
         for g in geometries {
             let d = PyDict::new(py);
@@ -1095,6 +1307,98 @@ fn parse_role(role: &str) -> PyResult<ElectrodeRole> {
     }
 }
 
+/// 電極 1 個を組み立てる。`Case.add_electrode` と `Mesh.resolve_electrode_faces` で
+/// **同じ解釈**を通すために 1 か所にまとめてある。
+///
+/// `added` / `removed` の面番号は **1 始まり**（ケースファイルとエラーメッセージに
+/// 合わせる）。コアの [`FaceRef`] は 0 始まりなので、ここで直す。
+#[allow(clippy::too_many_arguments)]
+fn build_electrode(
+    name: &str,
+    role: ElectrodeRole,
+    current: f64,
+    shell_pids: Option<Vec<u32>>,
+    element_ids: Option<Vec<u32>>,
+    patches: Option<Vec<Bound<'_, PyAny>>>,
+    added: Option<Vec<(u32, u8)>>,
+    removed: Option<Vec<(u32, u8)>>,
+) -> PyResult<Electrode> {
+    let mut parsed = Vec::new();
+    for (i, patch) in patches.unwrap_or_default().iter().enumerate() {
+        parsed.push(parse_patch(patch, name, i + 1)?);
+    }
+    let to_refs = |v: Option<Vec<(u32, u8)>>, what: &str| -> PyResult<Vec<FaceRef>> {
+        v.unwrap_or_default()
+            .into_iter()
+            .map(|(eid, local)| {
+                if local == 0 {
+                    return Err(GfemError::new_err(format!(
+                        "電極 {name} の{what}の面番号が 0 です（EID={eid}）。                         面番号は 1 始まりで指定してください"
+                    )));
+                }
+                Ok(FaceRef::new(eid, local - 1))
+            })
+            .collect()
+    };
+    Ok(Electrode {
+        name: name.to_string(),
+        role,
+        current,
+        shell_pids: shell_pids.unwrap_or_default(),
+        element_ids: element_ids.unwrap_or_default(),
+        patches: parsed,
+        added_faces: to_refs(added, "手で足した面")?,
+        removed_faces: to_refs(removed, "手で外した面")?,
+    })
+}
+
+/// 体表面パッチの指定（辞書）を解釈する。
+///
+/// エラーは「どの電極の何番目のパッチが」「何が足りないか」まで出す
+/// （CLAUDE.md 設計原則 6）。
+fn parse_patch(obj: &Bound<'_, PyAny>, electrode: &str, index: usize) -> PyResult<SurfacePatch> {
+    let where_ = format!("電極 {electrode} のパッチ {index}");
+    let get = |key: &str| -> PyResult<Option<Bound<'_, PyAny>>> {
+        match obj.get_item(key) {
+            Ok(v) => Ok(if v.is_none() { None } else { Some(v) }),
+            Err(_) => Ok(None),
+        }
+    };
+    let center = get("center")?.ok_or_else(|| {
+        GfemError::new_err(format!(
+            "{where_}に center がありません。\
+             {{\"center\": [x, y, z], \"radius\": r, \"pid\": 51}} の形で指定してください（単位は m）"
+        ))
+    })?;
+    let center: Vec<f64> = center.extract().map_err(|_| {
+        GfemError::new_err(format!(
+            "{where_}の center は 3 個の実数 [x, y, z] で指定してください"
+        ))
+    })?;
+    if center.len() != 3 {
+        return Err(GfemError::new_err(format!(
+            "{where_}の center の要素数が {} 個です（3 個で指定してください）",
+            center.len()
+        )));
+    }
+    let radius: f64 = get("radius")?
+        .ok_or_else(|| GfemError::new_err(format!("{where_}に radius がありません（単位は m）")))?
+        .extract()
+        .map_err(|_| GfemError::new_err(format!("{where_}の radius は実数で指定してください")))?;
+    let pid: Option<u32> =
+        match get("pid")? {
+            Some(v) => Some(v.extract().map_err(|_| {
+                GfemError::new_err(format!("{where_}の pid は整数で指定してください"))
+            })?),
+            None => None,
+        };
+    Ok(SurfacePatch {
+        center: [center[0], center[1], center[2]],
+        radius,
+        pid,
+    })
+}
+
 fn parse_reference(reference: &str) -> PyResult<ReferencePotential> {
     let r = reference.trim();
     if let Some(rest) = r.strip_prefix("node:") {
@@ -1130,6 +1434,8 @@ fn read_nastran(py: Python<'_>, path: PathBuf, length_unit: &str) -> PyResult<Py
         report,
         tets: OnceLock::new(),
         navigator: OnceLock::new(),
+        surface: OnceLock::new(),
+        picker: OnceLock::new(),
     })
 }
 

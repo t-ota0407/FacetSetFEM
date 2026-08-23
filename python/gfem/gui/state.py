@@ -16,10 +16,14 @@ import numpy as np
 import pyvista as pv
 
 from .. import Case, GfemError, Mesh, Solution, Study, read_nastran
-from ..study import ElectrodeSpec, Material
+from ..study import ElectrodeSpec, Material, SurfacePatch
 from ..tissues import TISSUES
 
-__all__ = ["DisplayField", "DISPLAY_FIELDS", "Session"]
+__all__ = ["DisplayField", "DISPLAY_FIELDS", "SHAPE_FIELD", "Session"]
+
+
+#: 色分けせず形だけを見せる表示（既定）
+SHAPE_FIELD = "shape"
 
 
 @dataclass(frozen=True)
@@ -41,8 +45,14 @@ class DisplayField:
 
 
 #: 表示量の一覧。要素値と節点値の両方を出す（SPEC §5.1）
+#:
+#: 先頭が既定。**PID で色分けしない**——PID は領域を識別する番号で、
+#: 大小に意味が無い。連続的なカラーマップに載せると「51 は 62 より小さい」
+#: という無い情報を描いてしまう（頭部モデルは 62 領域ある）。
+#: 形は陰影と稜線で見せ、色は物理量のためにとっておく。
 DISPLAY_FIELDS: list[DisplayField] = [
-    DisplayField("PID", "領域 (PID)", "cell", needs_solution=False),
+    DisplayField(SHAPE_FIELD, "形状（色分けなし）", "none", needs_solution=False),
+    DisplayField("PID", "領域 (PID) で塗り分け", "cell", needs_solution=False),
     DisplayField("phi [V]", "電位 φ [V]", "point", iso_quantity="phi"),
     DisplayField("|E| [V/m]", "電界 |E| [V/m]（要素値）", "cell", iso_quantity="e_magnitude"),
     DisplayField("|J| [A/m2]", "電流密度 |J| [A/m²]（要素値）", "cell", iso_quantity="j_magnitude"),
@@ -62,6 +72,21 @@ DISPLAY_FIELDS: list[DisplayField] = [
         iso_quantity="j_magnitude",
     ),
 ]
+
+
+#: 既定で解いたあとに切り替える表示量（電流密度）
+DEFAULT_RESULT_FIELD = "|J| [A/m2]"
+
+
+#: 表示量ごとの配列の取り出し方（`Session.grid` が貼るものと同じ）
+FIELD_ARRAYS = {
+    "phi [V]": lambda r: r.potential,
+    "|E| [V/m]": lambda r: r.e_magnitude,
+    "|J| [A/m2]": lambda r: r.j_magnitude,
+    "power density [W/m3]": lambda r: r.power_density,
+    "|E| (nodal) [V/m]": lambda r: r.nodal_average("e_magnitude"),
+    "|J| (nodal) [A/m2]": lambda r: r.nodal_average("j_magnitude"),
+}
 
 
 def field_by_key(key: str) -> DisplayField | None:
@@ -110,6 +135,8 @@ class Session:
         self.mesh: Mesh | None = None
         self.solution: Solution | None = None
         self._grid: pv.UnstructuredGrid | None = None
+        #: 表示用の外表面（SPEC §6.3）。メッシュを開き直すまで使い回す
+        self._surface: pv.PolyData | None = None
         # Undo / Redo（SPEC §8 M7）。
         # 解析条件は Study 1 つに閉じていて、メッシュも結果も含まないので、
         # 操作ごとに丸ごと複製して積むだけで済む。差分を持つ設計は
@@ -180,6 +207,7 @@ class Session:
         self.mesh = read_nastran(path, length_unit=length_unit)
         self.solution = None
         self._grid = None
+        self._surface = None
         self.study = Study(
             mesh_file=path,
             length_unit=length_unit,
@@ -196,6 +224,7 @@ class Session:
         self.mesh = study.read_mesh()
         self.solution = None
         self._grid = None
+        self._surface = None
         # メッシュにあるのに YAML に無い PID を補う
         known = {m.pid for m in study.materials}
         for pid in self.mesh.solid_pids():
@@ -273,9 +302,22 @@ class Session:
         """実行前の整合性チェック（SPEC §6.2 の手順 4）。警告の一覧を返す。"""
         return self.build_case().validate()
 
-    def electrode_info(self) -> list[dict]:
-        """電極の合計面積と平均電流密度（SPEC §6.2 の手順 3）。"""
-        return self.build_case().electrode_info()
+    def electrode_info(self, name: str | None = None) -> list[dict]:
+        """電極の合計面積と平均電流密度（SPEC §6.2 の手順 3）。
+
+        `name` を指定すると**その電極だけ**を見る。GUI は電極を 1 つずつ設定して
+        いくので、まだ面を割り当てていない別の電極のせいで、いま編集している
+        電極の面積が出せなくなるのを避けるため。
+        """
+        study = self._require_study()
+        if name is None:
+            return self.build_case().electrode_info()
+        kept = study.electrodes
+        try:
+            study.electrodes = [e for e in kept if e.name == name]
+            return self.build_case().electrode_info()
+        finally:
+            study.electrodes = kept
 
     def solve(self, progress: Callable[[int, float], bool] | None = None) -> Solution:
         self.set_solution(self.build_case().solve(progress=progress))
@@ -285,6 +327,7 @@ class Session:
         """外（ワーカースレッド）で解いた結果を取り込む。"""
         self.solution = solution
         self._grid = None  # 表示用データに結果を貼り直す
+        self._surface = None
 
     # --- 表示用データ -------------------------------------------------------
 
@@ -331,22 +374,218 @@ class Session:
         return self._polydata(mesh.points(), tris, {"PID": shell_pids})
 
     def electrode_polydata(self, name: str) -> pv.PolyData:
-        """指定した電極の面（3D ビューでの色分け用。SPEC §6.2 の手順 3）。"""
+        """指定した電極の面（3D ビューでの色分け用。SPEC §6.2 の手順 3）。
+
+        シェル要素で指定した面と、体表面から選んだパッチの両方を合わせて返す。
+        """
         mesh = self._require_mesh()
         spec = self.electrode(name)
         if spec is None:
             return pv.PolyData()
         tris, shell_pids, ids = mesh.shell_triangles()
         keep = np.isin(shell_pids, spec.shell_pids) | np.isin(ids, spec.element_ids)
-        return self._polydata(mesh.points(), tris[keep], {})
+        pieces = [tris[keep]] if len(tris) else []
+        # 体表面の面は、パッチ・手で足した面・手で外した面をまとめて
+        # ソルバと同じ関数に解決させる（表示と計算がずれないように）
+        try:
+            pieces.append(self.electrode_faces(name)["triangles"])
+        except GfemError:
+            pass  # まだ面が 1 枚も無いなど。表示は空でよい
+        pieces = [p for p in pieces if len(p)]
+        if not pieces:
+            return pv.PolyData()
+        return self._polydata(mesh.points(), np.vstack(pieces), {})
+
+    # --- 体表面から選ぶ電極（SPEC §11.1）------------------------------------
+
+    def surface_pid_choices(self) -> list[dict]:
+        """外表面に顔を出している PID とその面積（面積の大きい順）。
+
+        人体モデルでは首の切断面などで内部組織も外表面に現れるので、
+        **どの PID が皮膚かを面積で見当づける**ために出す。
+        """
+        return self._require_mesh().surface_pids()
+
+    def default_surface_pid(self) -> int | None:
+        """パッチの PID 絞り込みの既定値。いちばん広い面（ふつう皮膚）。"""
+        choices = self.surface_pid_choices()
+        return choices[0]["pid"] if choices else None
+
+    def is_on_the_model(self, point, margin_ratio: float = 0.05) -> bool:
+        """クリックされた点がモデルの上とみなせるか。
+
+        3D ビューの背景をクリックすると、ピッカーは遠くの点を返す。それを
+        そのまま電極の中心にすると、いちばん近い面が選ばれて**まるで見当違いの
+        場所に電極が置かれる**ので、ここで弾く。
+        """
+        mesh = self._require_mesh()
+        box = mesh.bounding_box()
+        if box is None:
+            return False
+        lo, hi = box
+        point = [float(v) for v in point]
+        if not all(np.isfinite(point)):
+            return False  # ピックに失敗すると NaN が返ることがある
+        diagonal = float(np.linalg.norm(np.array(hi) - np.array(lo)))
+        margin = diagonal * margin_ratio
+        return all(lo[k] - margin <= point[k] <= hi[k] + margin for k in range(3))
+
+    def triangles_to_polydata(self, triangles) -> pv.PolyData:
+        """`pick_patch` などが返した三角形を、そのまま描ける形にする。"""
+        return self._polydata(self._require_mesh().points(), np.asarray(triangles), {})
+
+    def pick_patch(self, center, radius: float, pid: int | None = None) -> dict:
+        """体表面の 1 点を中心に、半径の中でつながっている面を選ぶ。"""
+        return self._require_mesh().pick_patch(
+            [float(v) for v in center], float(radius), None if pid is None else int(pid)
+        )
+
+    def add_patch(self, name: str, center, radius: float, pid: int | None = None) -> SurfacePatch:
+        """電極にパッチを 1 枚足す。"""
+        spec = self.electrode(name)
+        if spec is None:
+            raise GfemError(f"[設定エラー] 電極 {name} がありません")
+        patch = SurfacePatch(
+            center=tuple(float(v) for v in center),
+            radius=float(radius),
+            pid=None if pid is None else int(pid),
+        )
+        spec.patches.append(patch)
+        return patch
+
+    def remove_patch(self, name: str, index: int) -> None:
+        """電極のパッチを 1 枚外す。"""
+        spec = self.electrode(name)
+        if spec is not None and 0 <= index < len(spec.patches):
+            del spec.patches[index]
+
+    # --- 面を 1 枚ずつ塗る / 消す（SPEC §11.1）------------------------------
+
+    def paint_faces(self, name: str, center, radius: float, pid: int | None, erase: bool) -> int:
+        """クリック（またはドラッグ）した範囲の面を、電極に足す／から外す。
+
+        **面の一覧そのものではなく差分で持つ。** パッチの「中心と半径」という
+        読める指定を残したまま縁だけ直せるようにするため。同じ面が
+        `added_faces` と `removed_faces` の両方に入らないよう、必ず打ち消す。
+
+        戻り値は実際に変わった面の枚数（0 なら何も起きていない）。
+        """
+        spec = self.electrode(name)
+        if spec is None:
+            raise GfemError(f"[設定エラー] 電極 {name} がありません")
+        refs = {
+            (int(e), int(f))
+            for e, f in self.pick_patch(center, radius, pid)["face_refs"]
+        }
+        if not refs:
+            return 0
+
+        added = dict.fromkeys(tuple(f) for f in spec.added_faces)
+        removed = dict.fromkeys(tuple(f) for f in spec.removed_faces)
+        before = (set(added), set(removed))
+        if erase:
+            removed.update(dict.fromkeys(refs))
+            for ref in refs:
+                added.pop(ref, None)
+        else:
+            added.update(dict.fromkeys(refs))
+            for ref in refs:
+                removed.pop(ref, None)
+
+        spec.added_faces = list(added)
+        spec.removed_faces = list(removed)
+        return len(set(added) ^ before[0]) + len(set(removed) ^ before[1])
+
+    def clear_hand_edits(self, name: str) -> None:
+        """手で足した面・外した面を捨てて、パッチだけの状態に戻す。"""
+        spec = self.electrode(name)
+        if spec is not None:
+            spec.added_faces = []
+            spec.removed_faces = []
+
+    def electrode_faces(self, name: str) -> dict:
+        """電極の面を**ソルバと同じ経路で**解決する（面数・面積・三角形）。
+
+        表示だけ別に数えると、「25 cm² のつもりの電極が実は違う面積だった」が
+        静かに起きる。導電率が未設定でも呼べる（SPEC §6.2 の手順 3）。
+        """
+        spec = self.electrode(name)
+        if spec is None:
+            return {"n_faces": 0, "area": 0.0, "triangles": np.zeros((0, 3), dtype=np.uint32)}
+        return self._require_mesh().resolve_electrode_faces(
+            shell_pids=list(spec.shell_pids),
+            element_ids=list(spec.element_ids),
+            patches=[p.to_dict() for p in spec.patches],
+            added=[tuple(f) for f in spec.added_faces],
+            removed=[tuple(f) for f in spec.removed_faces],
+            name=spec.name,
+        )
 
     def surface_polydata(self) -> pv.PolyData:
-        """外表面の三角形（表示用の軽量データ。SPEC §6.3）。"""
+        """外表面の三角形（表示用の軽量データ。SPEC §6.3）。
+
+        **3D ビューの「全体」表示はこれを使う。** 体積メッシュをそのまま渡すと、
+        頭部モデル（411 万セル）で 1 回の描画に 2.7 秒かかるうえ、法線が無いので
+        **のっぺりした影絵にしかならない**。外表面（87,812 面）なら 0.09 秒で、
+        陰影が出て形が読める。
+        """
+        if self._surface is not None:
+            return self._surface
         mesh = self._require_mesh()
         tris = mesh.surface_triangles()
         owners = mesh.surface_triangle_elements()
-        pid = mesh.solid_pid_array()[owners]
-        return self._polydata(mesh.points(), tris, {"PID": pid})
+        poly = self._polydata(mesh.points(), tris, {"PID": mesh.solid_pid_array()[owners]})
+        poly.cell_data["__owner"] = owners
+        # **法線を自分で計算する。** 無いままだと（環境によっては）陰影が付かず、
+        # 頭部モデルが**のっぺりした影絵**にしかならない。外表面の三角形は
+        # すでに外向きの順序で並んでいるので、向きを推定し直す必要はない。
+        # 点を分裂させると節点番号との対応が崩れるので split_vertices は使わない
+        self._surface = poly.compute_normals(
+            cell_normals=True,
+            point_normals=True,
+            split_vertices=False,
+            consistent_normals=False,
+            auto_orient_normals=False,
+        )
+        self._surface.cell_data["__owner"] = owners
+        return self._surface
+
+    def display_surface(self, field: str | None) -> pv.PolyData:
+        """外表面に、指定した表示量を貼りつけたもの。
+
+        要素値（|J| など）は**その面を持つソリッド要素の値**を貼る。節点値は
+        節点番号がそのまま使えるので、配列をそのまま持たせる。
+        """
+        poly = self.surface_polydata()
+        spec = field_by_key(field) if field else None
+        if spec is None or self.solution is None or field in poly.array_names:
+            return poly
+        grid = self.grid()
+        if spec.is_element_value and field in grid.cell_data:
+            poly.cell_data[field] = grid.cell_data[field][poly.cell_data["__owner"]]
+        elif field in grid.point_data:
+            poly.point_data[field] = grid.point_data[field]
+        return poly
+
+    def field_range(self, field: str | None) -> tuple[float, float] | None:
+        """表示量の値域（**モデル全体**）。
+
+        外表面だけ、あるいは断面だけで色を決めると、**同じ色が場所によって
+        違う値を指す**ことになる。全体の値域に固定すれば、全体表示と断面と
+        等値面で色の意味が揃う。
+        """
+        if self.solution is None or field not in FIELD_ARRAYS:
+            return None
+        values = FIELD_ARRAYS[field](self.solution)
+        return (float(np.min(values)), float(np.max(values)))
+
+    def region_polydata(self, pid: int) -> pv.PolyData:
+        """指定した領域が体表面に出している面（ハイライト表示用）。
+
+        体積メッシュから切り出すより速く、見た目も「全体」表示と揃う。
+        """
+        poly = self.surface_polydata()
+        return poly.extract_cells(np.flatnonzero(poly.cell_data["PID"] == pid))
 
     @staticmethod
     def _polydata(points, triangles, cell_arrays: dict) -> pv.PolyData:

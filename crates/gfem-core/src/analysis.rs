@@ -14,7 +14,7 @@
 //! 読み込みは [`crate::io::nastran`]、出力は [`write_analysis_vtu`]。
 
 use crate::assemble::{LinearSystem, assemble, load::ElectrodeGeometry};
-use crate::case::{Backend, Case, ElectrodeRole, ReferencePotential};
+use crate::case::{Backend, Case, ElectrodeRole, FaceLookup, ReferencePotential};
 use crate::error::{ErrorKind, GfemError, Result};
 use crate::io::json::Json;
 use crate::io::vtu::{DataArray, VtuData, VtuOptions, write_vtu};
@@ -372,6 +372,9 @@ fn run_with(
     // --- 準備 ---
     let surface = extract_surface(mesh)?;
     let mut warnings = case.validate(mesh, &surface)?;
+    // 電極面（シェル要素と体表面パッチの両方）を引くための下ごしらえ。
+    // パッチ選択の索引は、パッチを使う電極があるときだけ作られる
+    let lookup = FaceLookup::new(mesh, &surface);
     let prepare = started.elapsed().as_secs_f64();
 
     // --- アセンブリ ---
@@ -380,7 +383,7 @@ fn run_with(
         matrix,
         load,
         electrodes,
-    } = assemble(mesh, case, parallel_assembly)?;
+    } = assemble(mesh, case, &lookup, parallel_assembly)?;
     let assemble_time = mark.elapsed().as_secs_f64();
 
     // --- 求解 ---
