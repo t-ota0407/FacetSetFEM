@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from PySide6.QtCore import QThread, Signal
 
-from .. import Case, SolverCancelled
+from .. import Case, SolverCancelled, Study
 
 __all__ = ["SolverThread"]
 
@@ -31,9 +31,12 @@ class SolverThread(QThread):
     #: 失敗・中断したときのメッセージ
     failed = Signal(str)
 
-    def __init__(self, case: Case, parent=None) -> None:
+    def __init__(self, case: Case, study: Study, parent=None) -> None:
         super().__init__(parent)
         self._case = case
+        #: `case` を組み立てたときの解析条件の写し。解いている間に利用者が条件を
+        #: 編集しても、結果には解いた条件のほうを添える（実行サマリ。SPEC §5.5）
+        self.study = study
         self._cancelled = False
 
     def cancel(self) -> None:

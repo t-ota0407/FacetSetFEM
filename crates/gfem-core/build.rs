@@ -1,38 +1,25 @@
 //! ビルド時に Git の状態とターゲットを埋め込む（SPEC §5.5 のプロビナンス記録）。
 //!
-//! git が無い環境やリポジトリ外でのビルドでも失敗しないよう、取れなければ
-//! 環境変数を設定しないだけにする（実行時は `None` になる）。
+//! 仕組みは `build_git.rs`（`gfem-py` と共有）を参照。ここでは **gfem-core 自身の
+//! ソース**だけを数える。gfem-core を編集すればどのみち再コンパイルになるので、
+//! 監視のせいでビルドが余計に走ることはない。
+//!
+//! Python から書く実行サマリは、`gfem-cuda`・`gfem-py` まで含めた最終バイナリの
+//! 状態（`crates/gfem-py/build.rs`）で上書きする。
 
-use std::process::Command;
+include!("build_git.rs");
 
 fn main() {
     println!(
         "cargo:rustc-env=GFEM_TARGET={}",
         std::env::var("TARGET").unwrap_or_else(|_| "unknown".into())
     );
-
-    // HEAD が動いたら埋め込み直す
-    for path in ["../../.git/HEAD", "../../.git/index"] {
-        if std::path::Path::new(path).exists() {
-            println!("cargo:rerun-if-changed={path}");
-        }
-    }
-
-    if let Some(commit) = git(&["rev-parse", "HEAD"]) {
-        println!("cargo:rustc-env=GFEM_GIT_COMMIT={commit}");
-    }
-    // 未コミットの変更があると、コミットハッシュだけでは結果を再現できない。
-    // 「汚れていたか」も残しておく
-    if let Some(status) = git(&["status", "--porcelain"]) {
-        let dirty = if status.is_empty() { "0" } else { "1" };
-        println!("cargo:rustc-env=GFEM_GIT_DIRTY={dirty}");
-    }
-}
-
-fn git(args: &[&str]) -> Option<String> {
-    let output = Command::new("git").args(args).output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    embed_git_state(&[
+        "crates/gfem-core/src",
+        "crates/gfem-core/build.rs",
+        "crates/gfem-core/build_git.rs",
+        "crates/gfem-core/Cargo.toml",
+        "Cargo.toml",
+        "Cargo.lock",
+    ]);
 }

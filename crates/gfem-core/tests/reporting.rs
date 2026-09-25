@@ -11,7 +11,7 @@ use gfem_core::case::{
     Backend, Case, Electrode, Preconditioner, ReferencePotential, SolverOptions,
 };
 use gfem_core::post::total_stats;
-use gfem_core::provenance::Provenance;
+use gfem_core::provenance::{Provenance, sha256_bytes, sha256_file};
 use gfem_core::{Analysis, Mesh, solve};
 
 const CURRENT: f64 = 2.0e-3;
@@ -245,5 +245,38 @@ fn provenance_records_the_input_hash() {
     std::fs::write(&path, b"GRID,1,,0.0,0.0,1.0\n").unwrap();
     let other = Provenance::capture().with_mesh(&path).unwrap();
     assert_ne!(hash, other.mesh_sha256.unwrap());
+    std::fs::remove_file(&path).ok();
+}
+
+#[test]
+fn reading_a_file_records_the_hash_of_every_byte_it_read() {
+    // 実行サマリに残すメッシュのハッシュは、**解いたメッシュを読んだときのバイト列**の
+    // もの（SPEC §5.5）。以前は書き出し時にファイルを読み直していたので、
+    // 読み込み後にファイルが書き換えられると、解いていないメッシュのハッシュが残った
+    let path = tmp_path("hashed.bdf");
+    let text = "BEGIN BULK\n\
+                GRID,1,,0.0,0.0,0.0\n\
+                GRID,2,,1.0,0.0,0.0\n\
+                GRID,3,,0.0,1.0,0.0\n\
+                GRID,4,,0.0,0.0,1.0\n\
+                PSOLID,1,1\n\
+                CTETRA,10,1,1,2,3,4\n\
+                ENDDATA\n\
+                $ ENDDATA の後ろも含めてファイル全体のハッシュになる（sha256sum と同じ値）\n";
+    std::fs::write(&path, text).unwrap();
+    let (_, report) = gfem_core::read_nastran(&path, gfem_core::LengthUnit::Meter).unwrap();
+    assert_eq!(
+        report.sha256.as_deref(),
+        Some(sha256_bytes(text.as_bytes()).as_str())
+    );
+
+    // 読んだ後にファイルが書き換えられても、記録されるのは読んだときのハッシュ
+    std::fs::write(&path, text.replace("1.0,0.0,0.0", "2.0,0.0,0.0")).unwrap();
+    let provenance = Provenance::capture().with_mesh_hash(&path, report.sha256.clone().unwrap());
+    assert_eq!(
+        provenance.mesh_sha256.as_deref(),
+        Some(sha256_bytes(text.as_bytes()).as_str())
+    );
+    assert_ne!(provenance.mesh_sha256, Some(sha256_file(&path).unwrap()));
     std::fs::remove_file(&path).ok();
 }

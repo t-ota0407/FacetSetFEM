@@ -12,6 +12,16 @@
 //! を必ず記録する。**コミットハッシュだけでは足りない**——未コミットの変更が
 //! あった状態で回した結果は、そのハッシュからは再現できないため、
 //! `git_dirty` も併せて残す。
+//!
+//! # Git の状態は 2 種類ある
+//!
+//! - **ビルド時**（`git_commit` / `git_dirty`）: そのバイナリを作ったソースの状態。
+//!   ビルドスクリプトが埋め込む（`crates/gfem-core/build_git.rs`）。何を数えたかは
+//!   `git_dirty_scope` に残す
+//! - **実行時**（[`SourceTree`]）: `maturin develop` の開発環境では Python のコードが
+//!   作業ツリーから直接読まれるので、ビルドし直さずに編集・コミットすると
+//!   ビルド時の状態とずれる。サマリを書く時点の作業ツリーも記録し、
+//!   ビルド後にコミットが進んでいたら（拡張のビルドし忘れ）その旨を書き添える
 
 use crate::error::{GfemError, Result};
 use crate::io::json::Json;
@@ -28,6 +38,10 @@ pub struct Provenance {
     pub git_commit: Option<String>,
     /// ビルド時に未コミットの変更があったか。`None` は判定できなかったことを表す
     pub git_dirty: Option<bool>,
+    /// `git_dirty` の判定に数えたソース（ワークスペースのルートからの相対パス）
+    pub git_dirty_scope: Vec<String>,
+    /// 実行時の作業ツリー（開発環境でだけ分かる）
+    pub source_tree: Option<SourceTree>,
     /// ビルド対象（ターゲットトリプル）
     pub target: String,
     /// 実行時刻（UTC、ISO 8601）
@@ -40,12 +54,26 @@ pub struct Provenance {
     pub mesh_sha256: Option<String>,
     /// ケースファイルのパス
     pub case_file: Option<String>,
-    /// ケースファイルの全文
+    /// ケースの全文
     pub case_text: Option<String>,
+}
+
+/// 実行時に読み込まれているソースの作業ツリー（開発環境でだけ分かる）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SourceTree {
+    /// リポジトリのルート
+    pub path: String,
+    /// その時点の HEAD
+    pub git_commit: Option<String>,
+    /// 結果に効くソースに未コミットの変更があるか
+    pub git_dirty: Option<bool>,
 }
 
 impl Provenance {
     /// 実行環境の情報を埋めたものを作る。
+    ///
+    /// Git の状態は gfem-core 自身のビルド時のもの。最終バイナリを作る側
+    /// （`gfem-py`）は [`with_git_state`](Self::with_git_state) で自分の値に差し替える。
     pub fn capture() -> Self {
         let unix_time = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -53,24 +81,57 @@ impl Provenance {
             .unwrap_or(0);
         Self {
             gfem_version: crate::VERSION.to_string(),
-            git_commit: option_env!("GFEM_GIT_COMMIT").map(str::to_string),
-            git_dirty: option_env!("GFEM_GIT_DIRTY").map(|v| v == "1"),
             target: option_env!("GFEM_TARGET").unwrap_or("unknown").to_string(),
             timestamp_utc: format_utc(unix_time),
             unix_time,
-            mesh_file: None,
-            mesh_sha256: None,
-            case_file: None,
-            case_text: None,
+            ..Self::default()
         }
+        .with_git_state(
+            option_env!("GFEM_GIT_COMMIT"),
+            option_env!("GFEM_GIT_DIRTY"),
+            option_env!("GFEM_GIT_SCOPE"),
+        )
     }
 
-    /// 入力メッシュのパスとハッシュを記録する。
+    /// ビルド時の Git の状態を設定する（`build_git.rs` が埋め込む環境変数の値をそのまま渡す）。
+    pub fn with_git_state(
+        mut self,
+        commit: Option<&str>,
+        dirty: Option<&str>,
+        scope: Option<&str>,
+    ) -> Self {
+        self.git_commit = commit.map(str::to_string);
+        self.git_dirty = dirty.map(|v| v == "1");
+        self.git_dirty_scope = scope
+            .map(|s| s.split(';').map(str::to_string).collect())
+            .unwrap_or_default();
+        self
+    }
+
+    /// 実行時の作業ツリーを記録する。
+    pub fn with_source_tree(mut self, tree: SourceTree) -> Self {
+        self.source_tree = Some(tree);
+        self
+    }
+
+    /// 入力メッシュのパスとハッシュを記録する（ここでファイルを読んでハッシュを取る）。
+    ///
+    /// 読み込んだときのハッシュが手元にあるなら [`with_mesh_hash`](Self::with_mesh_hash)
+    /// を使うこと。読み込んだ後にファイルが書き換えられていると、ここで取るハッシュは
+    /// 解いたメッシュのものではなくなる。
     pub fn with_mesh(mut self, path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         self.mesh_sha256 = Some(sha256_file(path)?);
         self.mesh_file = Some(path.display().to_string());
         Ok(self)
+    }
+
+    /// 入力メッシュのパスと、読み込んだときに取ったハッシュを記録する
+    /// （[`crate::ReadReport::sha256`]）。
+    pub fn with_mesh_hash(mut self, path: impl AsRef<Path>, sha256: impl Into<String>) -> Self {
+        self.mesh_file = Some(path.as_ref().display().to_string());
+        self.mesh_sha256 = Some(sha256.into());
+        self
     }
 
     /// ケースファイルのパスと全文を記録する。
@@ -83,10 +144,21 @@ impl Provenance {
         Ok(self)
     }
 
-    /// ケースの内容を文字列として記録する（ファイルが無い場合に使う）。
+    /// ケースの内容を文字列として記録する。
+    ///
+    /// **解いたときの解析条件そのもの**を渡すこと。ディスク上のケースファイルは、
+    /// 読み込んだ後に（GUI やスクリプトで）条件を変えて解いた場合に食い違う。
     pub fn with_case_text(mut self, text: impl Into<String>) -> Self {
         self.case_text = Some(text.into());
         self
+    }
+
+    /// ビルド後にコミットが進んでいるか（拡張モジュールのビルドし忘れ）。
+    ///
+    /// どちらかのコミットが分からなければ `None`。
+    pub fn source_matches_build(&self) -> Option<bool> {
+        let tree = self.source_tree.as_ref()?;
+        Some(tree.git_commit.as_ref()? == self.git_commit.as_ref()?)
     }
 
     /// JSON に変換する。
@@ -95,7 +167,23 @@ impl Provenance {
         json.set("gfem_version", self.gfem_version.clone())
             .set_option("git_commit", self.git_commit.clone())
             .set_option("git_dirty", self.git_dirty)
-            .set("target", self.target.clone())
+            .set("git_dirty_scope", self.git_dirty_scope.clone());
+        if let Some(tree) = &self.source_tree {
+            let mut t = Json::object();
+            t.set("path", tree.path.clone())
+                .set_option("git_commit", tree.git_commit.clone())
+                .set_option("git_dirty", tree.git_dirty)
+                .set_option("same_commit_as_build", self.source_matches_build());
+            if self.source_matches_build() == Some(false) {
+                t.set(
+                    "note",
+                    "拡張モジュールのビルド後にコミットが進んでいます。Rust 側は古いソースのまま\
+                     動いている可能性があるので、maturin develop でビルドし直してください",
+                );
+            }
+            json.set("source_tree", t);
+        }
+        json.set("target", self.target.clone())
             .set("timestamp_utc", self.timestamp_utc.clone())
             .set("unix_time", self.unix_time)
             .set_option("mesh_file", self.mesh_file.clone())
@@ -125,6 +213,39 @@ pub fn sha256_file(path: impl AsRef<Path>) -> Result<String> {
         hasher.update(&buffer[..n]);
     }
     Ok(hex(&hasher.finalize()))
+}
+
+/// 読んだバイト列をそのまま SHA-256 に流す [`Read`](std::io::Read)。
+///
+/// メッシュを読むのと同じ 1 回の読み取りでハッシュを取るために使う
+/// （[`crate::read_nastran`]）。読み終えた後にファイルを読み直してハッシュを取ると、
+/// その間にファイルが書き換えられていても気づけない。
+pub struct HashingReader<R> {
+    inner: R,
+    hasher: Sha256,
+}
+
+impl<R> HashingReader<R> {
+    /// `inner` から読むたびにハッシュを更新する。
+    pub fn new(inner: R) -> Self {
+        Self {
+            inner,
+            hasher: Sha256::new(),
+        }
+    }
+
+    /// ここまでに読んだバイト列の SHA-256（16 進小文字）。
+    pub fn finish(self) -> String {
+        hex(&self.hasher.finalize())
+    }
+}
+
+impl<R: std::io::Read> std::io::Read for HashingReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        self.hasher.update(&buf[..n]);
+        Ok(n)
+    }
 }
 
 /// バイト列の SHA-256 を 16 進小文字で返す。
@@ -229,6 +350,85 @@ mod tests {
         assert!(p.unix_time > 1_600_000_000, "実行時刻が取れていません");
         // ビルドスクリプトが通っていればターゲットが入る
         assert!(!p.target.is_empty());
+    }
+
+    #[test]
+    fn the_embedded_git_state_matches_the_working_tree() {
+        // build.rs が埋め込んだ状態が、いまの作業ツリーと一致すること。
+        // 以前はソースを編集して再ビルドしても build.rs が走り直さず、
+        // 編集済みのソースから作ったバイナリが git_dirty = false を名乗っていた
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let git = |args: &[&str]| -> Option<String> {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&root)
+                .output()
+                .ok()?;
+            output
+                .status
+                .success()
+                .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        };
+        let Some(head) = git(&["rev-parse", "HEAD"]) else {
+            return; // git もリポジトリも無い環境（配布物からのビルドなど）
+        };
+        let p = Provenance::capture();
+        assert_eq!(
+            p.git_commit.as_deref(),
+            Some(head.as_str()),
+            "コミットが古い"
+        );
+
+        assert!(
+            p.git_dirty_scope
+                .iter()
+                .any(|s| s == "crates/gfem-core/src")
+        );
+        let mut args = vec!["status", "--porcelain", "--"];
+        args.extend(p.git_dirty_scope.iter().map(String::as_str));
+        let status = git(&args).expect("git status");
+        assert_eq!(
+            p.git_dirty,
+            Some(!status.is_empty()),
+            "埋め込まれた git_dirty が作業ツリーと食い違う:\n{status}"
+        );
+    }
+
+    #[test]
+    fn a_stale_extension_is_called_out() {
+        let tree = SourceTree {
+            path: "/repo".to_string(),
+            git_commit: Some("bbbb".to_string()),
+            git_dirty: Some(false),
+        };
+        let stale = Provenance::capture()
+            .with_git_state(Some("aaaa"), Some("0"), Some("crates"))
+            .with_source_tree(tree.clone());
+        assert_eq!(stale.source_matches_build(), Some(false));
+        let text = stale.to_json().to_pretty_string();
+        assert!(text.contains("\"same_commit_as_build\": false"), "{text}");
+        assert!(text.contains("maturin develop"), "{text}");
+
+        let fresh = Provenance::capture()
+            .with_git_state(Some("bbbb"), Some("0"), Some("crates"))
+            .with_source_tree(tree);
+        assert_eq!(fresh.source_matches_build(), Some(true));
+        assert!(
+            !fresh
+                .to_json()
+                .to_pretty_string()
+                .contains("maturin develop")
+        );
+    }
+
+    #[test]
+    fn hashing_reader_hashes_what_it_reads() {
+        use std::io::Read;
+        let mut reader = HashingReader::new(&b"abc"[..]);
+        let mut text = String::new();
+        reader.read_to_string(&mut text).unwrap();
+        assert_eq!(text, "abc");
+        assert_eq!(reader.finish(), sha256_bytes(b"abc"));
     }
 
     #[test]

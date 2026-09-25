@@ -301,13 +301,21 @@ class Study:
             "output": self.output.to_dict(),
         }
 
+    def to_yaml(self) -> str:
+        """ケースファイルと同じ形の YAML 文字列。
+
+        実行サマリ（SPEC §5.5）には、ディスク上のファイルではなくこれを残す。
+        読み込んだ後に条件を変えて解くと、ファイルの中身は解いた条件と食い違うため。
+        `Study.from_dict(yaml.safe_load(...))` で読み直せば同じ条件に戻る。
+        """
+        return yaml.safe_dump(
+            self.to_dict(), allow_unicode=True, sort_keys=False, default_flow_style=False
+        )
+
     def save(self, path: str | Path) -> None:
         """ケースファイルを書き出す。"""
         path = Path(path)
-        text = yaml.safe_dump(
-            self.to_dict(), allow_unicode=True, sort_keys=False, default_flow_style=False
-        )
-        path.write_text(text, encoding="utf-8")
+        path.write_text(self.to_yaml(), encoding="utf-8")
         self.path = path
 
     # --- 実行 ---
@@ -362,7 +370,11 @@ class Study:
         return result
 
     def write_outputs(self, result: Solution) -> list[Path]:
-        """`output` 節で指定されたファイルを書き出し、そのパスを返す。"""
+        """`output` 節で指定されたファイルを書き出し、そのパスを返す。
+
+        実行サマリには**この Study の今の中身**を解析条件として残すので、
+        `result` を解いた後に条件を書き換えてから呼ばないこと（`solve` は解いた直後に呼ぶ）。
+        """
         base = self.path.parent if self.path else Path.cwd()
         written: list[Path] = []
         if self.output.vtu:
@@ -379,11 +391,9 @@ class Study:
             written.append(path)
         if self.output.summary_json:
             path = base / self.output.summary_json
-            # ケースファイルの全文をプロビナンスに残す（SPEC §5.5）
-            text = None
-            if self.path and self.path.exists():
-                text = self.path.read_text(encoding="utf-8")
-            result.write_summary_json(path, case_text=text)
+            # 解析条件の全文をプロビナンスに残す（SPEC §5.5）。ディスク上のファイルを
+            # 読むと、読み込み後に条件を変えて解いた場合に食い違う
+            result.write_summary_json(path, case_text=self.to_yaml(), case_file=self.path)
             written.append(path)
         return written
 

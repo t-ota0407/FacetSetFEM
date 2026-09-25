@@ -15,6 +15,7 @@ use crate::element::shape;
 use crate::element::{ElementKind, tet4_signed_volume};
 use crate::error::{ErrorKind, GfemError, Result, format_sample_list};
 use crate::mesh::{ElemId, ElementBlock, IdMap, Mesh, NodeId, NodeIndex, Nodes, PropId, Property};
+use crate::provenance::HashingReader;
 use crate::units::LengthUnit;
 use std::collections::BTreeMap;
 use std::fmt;
@@ -60,6 +61,11 @@ pub struct ReadReport {
     pub unsupported: Vec<CardCount>,
     /// 警告（致命的ではないが利用者が知るべきこと）
     pub warnings: Vec<String>,
+    /// 読み込んだファイル全体の SHA-256（16 進小文字。`sha256sum` と同じ値）
+    ///
+    /// **解いたメッシュそのもののハッシュ**として実行サマリに残す（SPEC §5.5）。
+    /// ファイルから読んだときだけ入る（[`read_nastran_from`] では `None`）。
+    pub sha256: Option<String>,
 }
 
 impl fmt::Display for ReadReport {
@@ -92,12 +98,19 @@ pub fn read_nastran(path: impl AsRef<Path>, length_unit: LengthUnit) -> Result<(
         GfemError::io(path, "Nastran ファイルを開けません", e)
             .with_hint("パスが正しいか、読み取り権限があるかを確認してください")
     })?;
-    // 1 MiB のバッファ。大規模ファイルでシステムコール回数を抑える
-    let reader = BufReader::with_capacity(1 << 20, file);
-    read_nastran_from(reader, path, length_unit)
+    // 読んだバイト列をその場でハッシュに流す（SPEC §5.5）。実行サマリを書く時点で
+    // ファイルを読み直すと、その間に書き換えられていても気づけない。
+    // 1 MiB のバッファは大規模ファイルでシステムコール回数を抑えるため
+    let mut reader = BufReader::with_capacity(1 << 20, HashingReader::new(file));
+    let (mesh, mut report) = read_nastran_from(&mut reader, path, length_unit)?;
+    // ENDDATA の後ろも含めたファイル全体のハッシュにする（sha256sum と同じ値になる）
+    std::io::copy(&mut reader, &mut std::io::sink())
+        .map_err(|e| GfemError::io(path, "ハッシュを取るためにファイルの残りを読めません", e))?;
+    report.sha256 = Some(reader.into_inner().finish());
+    Ok((mesh, report))
 }
 
-/// 任意の [`BufRead`] から読み込む（テストと `INCLUDE` 展開のため）。
+/// 任意の [`BufRead`] から読み込む（テストや、メモリ上のバイト列を読むため）。
 pub fn read_nastran_from<R: BufRead>(
     reader: R,
     name: impl AsRef<Path>,
@@ -602,6 +615,7 @@ impl Builder {
                 })
                 .collect(),
             warnings,
+            sha256: None,
         };
         Ok((mesh, report))
     }

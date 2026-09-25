@@ -793,7 +793,7 @@ class MainWindow(QMainWindow):
         if self.solver is not None and self.solver.isRunning():
             return
         try:
-            case = self.run_busy("解析条件を組み立てています", self.session.build_case)
+            case, study = self.run_busy("解析条件を組み立てています", self.session.prepare_solve)
             case.validate()
         except Exception as exc:  # noqa: BLE001
             self.show_error(exc)
@@ -805,7 +805,7 @@ class MainWindow(QMainWindow):
         self.log("solve を開始しました")
         self.action_cancel.setEnabled(True)
 
-        self.solver = SolverThread(case, self)
+        self.solver = SolverThread(case, study, self)
         self.solver.progressed.connect(self._on_progress)
         self.solver.succeeded.connect(self._on_solved)
         self.solver.failed.connect(self._on_solve_failed)
@@ -828,7 +828,7 @@ class MainWindow(QMainWindow):
             self._take_solution(scope, solution)
 
     def _take_solution(self, scope, solution) -> None:
-        self.session.set_solution(solution)
+        self.session.set_solution(solution, self.solver.study)
         self.convergence.set_history(solution.history)
         self.checks_view.setPlainText(self.session.result_summary())
         scope.step("領域統計を集計しています")

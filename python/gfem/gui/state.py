@@ -134,6 +134,9 @@ class Session:
         self.study: Study | None = None
         self.mesh: Mesh | None = None
         self.solution: Solution | None = None
+        #: `solution` を解いたときの解析条件の写し。実行サマリ（SPEC §5.5）に残すのは
+        #: これで、いま編集中の `study` ではない（解いた後に編集されうるため）
+        self.solved_study: Study | None = None
         self._grid: pv.UnstructuredGrid | None = None
         #: 表示用の外表面（SPEC §6.3）。メッシュを開き直すまで使い回す
         self._surface: pv.PolyData | None = None
@@ -205,9 +208,7 @@ class Session:
         self.clear_history()
         path = Path(path)
         self.mesh = read_nastran(path, length_unit=length_unit)
-        self.solution = None
-        self._grid = None
-        self._surface = None
+        self._forget_results()
         self.study = Study(
             mesh_file=path,
             length_unit=length_unit,
@@ -222,9 +223,7 @@ class Session:
         study = Study.load(path)
         self.study = study
         self.mesh = study.read_mesh()
-        self.solution = None
-        self._grid = None
-        self._surface = None
+        self._forget_results()
         # メッシュにあるのに YAML に無い PID を補う
         known = {m.pid for m in study.materials}
         for pid in self.mesh.solid_pids():
@@ -350,14 +349,33 @@ class Session:
         finally:
             study.electrodes = kept
 
+    def prepare_solve(self) -> tuple[Case, Study]:
+        """solve に渡すケースと、**その時点の解析条件の写し**を返す。
+
+        GUI は solve を別スレッドで回すので、終わるまでの間にも条件を編集できる。
+        実行サマリ（SPEC §5.5）に残すのは解いた条件そのものでなければならないので、
+        ケースを組み立てた瞬間に写しを取っておき、結果と一緒に `set_solution` へ渡す。
+        """
+        case = self.build_case()
+        return case, copy.deepcopy(self._require_study())
+
     def solve(self, progress: Callable[[int, float], bool] | None = None) -> Solution:
-        self.set_solution(self.build_case().solve(progress=progress))
+        case, study = self.prepare_solve()
+        self.set_solution(case.solve(progress=progress), study)
         return self.solution
 
-    def set_solution(self, solution: Solution) -> None:
-        """外（ワーカースレッド）で解いた結果を取り込む。"""
+    def set_solution(self, solution: Solution, study: Study) -> None:
+        """外（ワーカースレッド）で解いた結果を、解いたときの条件の写しと一緒に取り込む。"""
         self.solution = solution
+        self.solved_study = study
         self._grid = None  # 表示用データに結果を貼り直す
+        self._surface = None
+
+    def _forget_results(self) -> None:
+        """結果と、結果から作った表示用データを捨てる（モデルを開き直したとき）。"""
+        self.solution = None
+        self.solved_study = None
+        self._grid = None
         self._surface = None
 
     # --- 表示用データ -------------------------------------------------------
@@ -717,12 +735,19 @@ class Session:
         self._require_solution().write_convergence_csv(path)
 
     def write_summary_json(self, path) -> None:
-        """実行サマリ JSON（プロビナンス付き。SPEC §5.5）。"""
-        text = None
-        study = self.study
-        if study is not None and study.path is not None and Path(study.path).exists():
-            text = Path(study.path).read_text(encoding="utf-8")
-        self._require_solution().write_summary_json(path, case_text=text)
+        """実行サマリ JSON（プロビナンス付き。SPEC §5.5）。
+
+        解析条件は**解いたときの写し**（`solved_study`）を残す。ディスク上の
+        ケースファイルを読むと、保存していない編集や解いた後の編集が反映されず、
+        .bdf から開いた場合は何も残らなかった。
+        """
+        solution = self._require_solution()
+        study = self.solved_study
+        solution.write_summary_json(
+            path,
+            case_text=None if study is None else study.to_yaml(),
+            case_file=None if study is None else study.path,
+        )
 
     def write_vtu(self, path) -> None:
         self._require_solution().write_vtu(path)

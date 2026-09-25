@@ -11,10 +11,14 @@ SPEC §8 の M3 が満たすべきこと:
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
+import shutil
+import subprocess
 
 import numpy as np
 import pytest
+import yaml
 
 import gfem
 from conftest import SLAB_AREA, SLAB_LAYERS
@@ -130,6 +134,95 @@ def test_summary_json_records_the_provenance(solution, tmp_path):
     assert "version: 1" in provenance["case_text"]
     # コミットハッシュだけでなく「作業ツリーが汚れていたか」も残す
     assert "git_dirty" in provenance
+
+
+def test_the_mesh_hash_is_taken_when_the_mesh_is_read(tmp_path, sample_bdf, slab_sigma):
+    """サマリのメッシュのハッシュは、解いたメッシュを**読んだときの**もの（SPEC §5.5）。
+
+    以前はサマリを書く時点でファイルを読み直していたので、解いた後にファイルが
+    書き換えられると、解いていないメッシュのハッシュが残った。
+    """
+    bdf = tmp_path / "slab.bdf"
+    shutil.copy(sample_bdf, bdf)
+    original = hashlib.sha256(bdf.read_bytes()).hexdigest()
+
+    mesh = gfem.read_nastran(bdf, length_unit="mm")
+    assert mesh.report.sha256 == original  # sha256sum と同じ値
+    case = gfem.Case(mesh)
+    case.set_conductivity(slab_sigma)
+    case.add_electrode("E1", role="anode", current=CURRENT, shell_pids=[101])
+    case.add_electrode("E2", role="cathode", current=CURRENT, shell_pids=[201])
+    result = case.solve()
+
+    bdf.write_text(bdf.read_text(encoding="utf-8") + "$ 解いた後の編集\n", encoding="utf-8")
+    data = json.loads(result.summary_json())
+    assert data["provenance"]["mesh_sha256"] == original
+
+
+def test_the_summary_records_the_conditions_that_were_solved(tmp_path, sample_bdf):
+    """解析条件は、ディスク上のケースファイルではなく**解いた条件そのもの**を残す。
+
+    以前はファイルを読み直していたので、読み込んだ後にスクリプトや GUI で
+    条件を変えて解くと、サマリの条件が実際と食い違った。
+    """
+    shutil.copy(sample_bdf, tmp_path / "slab.bdf")
+    case_yaml = tmp_path / "case.yaml"
+    case_yaml.write_text(
+        "version: 1\n"
+        "mesh: {file: slab.bdf, length_unit: mm}\n"
+        "materials:\n"
+        "  - {pid: 1, sigma: 0.10}\n"
+        "  - {pid: 2, sigma: 0.04}\n"
+        "  - {pid: 3, sigma: 0.35}\n"
+        "electrodes:\n"
+        "  - {name: E1, role: anode, current: 2.0e-3, faces: {shell_pids: [101]}}\n"
+        "  - {name: E2, role: cathode, current: 2.0e-3, faces: {shell_pids: [201]}}\n"
+        "output: {summary_json: summary.json}\n",
+        encoding="utf-8",
+    )
+    study = gfem.Study.load(case_yaml)
+    study.materials[2].sigma = 0.50  # 読み込んだ後に条件を変えて解く
+    study.solve()
+
+    provenance = json.loads((tmp_path / "summary.json").read_text(encoding="utf-8"))[
+        "provenance"
+    ]
+    solved = gfem.Study.from_dict(yaml.safe_load(provenance["case_text"]))
+    assert {m.pid: m.sigma for m in solved.materials} == {1: 0.10, 2: 0.04, 3: 0.50}
+    assert provenance["case_file"] == str(case_yaml)
+
+
+def test_the_git_state_describes_this_build(solution):
+    """サマリの Git の状態が、この拡張モジュールを作ったソースと一致すること。
+
+    以前は build.rs がソースの編集で走り直さず、編集済みのソースから作った
+    バイナリが `git_dirty: false` を名乗っていた。開発環境（作業ツリーから
+    読み込んでいる）でだけ確かめられる。
+    """
+    _mesh, result = solution
+    provenance = json.loads(result.summary_json())["provenance"]
+    tree = provenance.get("source_tree")
+    if tree is None:
+        pytest.skip("作業ツリーの外で動いている（wheel で入れた環境など）")
+
+    assert tree["same_commit_as_build"] is True, (
+        "拡張モジュールのビルド後にコミットが進んでいます。maturin develop してください"
+    )
+    # Python 拡張の git_dirty は gfem-core だけでなく 3 クレート全部のソースを見る
+    scope = provenance["git_dirty_scope"]
+    assert "crates/gfem-py/src" in scope and "crates/gfem-core/src" in scope
+    status = subprocess.run(
+        ["git", "status", "--porcelain", "--", *scope],
+        cwd=tree["path"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=True,
+    ).stdout
+    assert provenance["git_dirty"] == bool(status.strip()), (
+        "埋め込まれた git_dirty が作業ツリーと食い違います"
+        "（ソースを編集した後なら maturin develop してください）:\n" + status
+    )
 
 
 def test_summary_json_records_the_run(solution):

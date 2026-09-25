@@ -101,6 +101,27 @@ def test_region_stats_table_volume_is_in_the_unit_of_its_heading(session):
     assert total == pytest.approx(48.0, rel=1e-3)
 
 
+def test_summary_records_the_conditions_that_were_solved(session, tmp_path):
+    """GUI の実行サマリにも、**解いたときの条件**が残る（SPEC §5.5）。
+
+    以前はディスク上のケースファイルを読み直していたので、.bdf から開いた
+    セッションでは条件が 1 行も残らず、解いた後の編集も区別できなかった。
+    """
+    import json
+
+    import yaml
+
+    session.solve()
+    session.set_conductivity(3, 0.99)  # 解いた後の編集はサマリに入らない
+    out = tmp_path / "summary.json"
+    session.write_summary_json(out)
+
+    text = json.loads(out.read_text(encoding="utf-8"))["provenance"]["case_text"]
+    solved = gfem.Study.from_dict(yaml.safe_load(text))
+    assert {m.pid: m.sigma for m in solved.materials} == SIGMA
+    assert [e.name for e in solved.electrodes] == ["E1", "E2"]
+
+
 def test_region_and_electrode_geometry_for_display(session):
     # 領域ハイライト
     region = session.region_grid(3)

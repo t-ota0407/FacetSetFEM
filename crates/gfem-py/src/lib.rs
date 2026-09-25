@@ -22,7 +22,7 @@ use gfem_core::case::{
 };
 use gfem_core::mesh::streamline::{TraceDirection, TraceOptions};
 use gfem_core::post::RegionStats;
-use gfem_core::provenance::Provenance;
+use gfem_core::provenance::{Provenance, SourceTree};
 use gfem_core::{Analysis, LengthUnit, VtuOptions};
 use numpy::{IntoPyArray, PyArray1, PyArray2, PyArrayMethods};
 use pyo3::create_exception;
@@ -125,6 +125,14 @@ impl PyReadReport {
     #[getter]
     fn warnings(&self) -> Vec<String> {
         self.inner.warnings.clone()
+    }
+
+    /// 読み込んだファイル全体の SHA-256（16 進小文字。`sha256sum` と同じ値）。
+    ///
+    /// 読み込むのと同じ 1 回の読み取りで取るので、解いたメッシュそのもののハッシュになる。
+    #[getter]
+    fn sha256(&self) -> Option<String> {
+        self.inner.sha256.clone()
     }
 
     fn __str__(&self) -> String {
@@ -881,6 +889,41 @@ pub struct PySolution {
 }
 
 impl PySolution {
+    /// 実行サマリに添えるプロビナンス（SPEC §5.5）。
+    ///
+    /// - Git の状態は gfem-core 単体ではなく、**この拡張モジュール全体**
+    ///   （gfem-core・gfem-cuda・gfem-py）を作ったソースのもの（`build.rs`）
+    /// - メッシュのハッシュは**読み込んだときに取ったもの**。いまファイルを読み直すと、
+    ///   読み込み後に書き換えられていた場合に、解いていないメッシュのハッシュになる
+    /// - 開発環境では、いまの作業ツリーの状態も添える（`gfem._provenance`）
+    fn provenance(
+        &self,
+        py: Python<'_>,
+        case_text: Option<String>,
+        case_file: Option<PathBuf>,
+    ) -> PyResult<Provenance> {
+        let mesh = self.mesh.get();
+        let mut provenance = Provenance::capture().with_git_state(
+            option_env!("GFEM_GIT_COMMIT"),
+            option_env!("GFEM_GIT_DIRTY"),
+            option_env!("GFEM_GIT_SCOPE"),
+        );
+        if let Some(tree) = source_tree(py)? {
+            provenance = provenance.with_source_tree(tree);
+        }
+        if let Some(source) = &mesh.inner.source {
+            provenance = match &mesh.report.sha256 {
+                Some(hash) => provenance.with_mesh_hash(source, hash.clone()),
+                None => provenance.with_mesh(source).map_err(to_py)?,
+            };
+        }
+        if let Some(text) = case_text {
+            provenance = provenance.with_case_text(text);
+        }
+        provenance.case_file = case_file.map(|p| p.display().to_string());
+        Ok(provenance)
+    }
+
     /// 表示・等値面用の節点値。要素値の量は体積重み平均で節点に移す（SPEC §5.1）。
     fn nodal_values(&self, quantity: &str) -> PyResult<Vec<f64>> {
         if quantity == "phi" {
@@ -1153,35 +1196,38 @@ impl PySolution {
 
     /// 実行サマリ JSON（プロビナンス付き）を書き出す（SPEC §5.5）。
     ///
-    /// 入力メッシュの SHA-256、ケースファイルの全文、Git のコミットハッシュと
+    /// 入力メッシュの SHA-256、解析条件の全文、Git のコミットハッシュと
     /// 作業ツリーの汚れ、実行時刻を記録するので、「この図はどの入力から出たか」を
     /// 後から追える。
-    #[pyo3(signature = (path, case_text = None))]
-    fn write_summary_json(&self, path: PathBuf, case_text: Option<String>) -> PyResult<()> {
+    ///
+    /// `case_text` には**解いたときの解析条件**を渡すこと（`Study.to_yaml()`）。
+    /// ディスク上のケースファイルは、読み込んだ後に条件を変えて解いた場合に食い違う。
+    /// `case_file` はその条件をどのファイルから読んだか（あれば）。
+    #[pyo3(signature = (path, case_text = None, case_file = None))]
+    fn write_summary_json(
+        &self,
+        py: Python<'_>,
+        path: PathBuf,
+        case_text: Option<String>,
+        case_file: Option<PathBuf>,
+    ) -> PyResult<()> {
+        let provenance = self.provenance(py, case_text, case_file)?;
         let mesh = &self.mesh.get().inner;
-        let mut provenance = Provenance::capture();
-        if let Some(source) = &mesh.source {
-            provenance = provenance.with_mesh(source).map_err(to_py)?;
-        }
-        if let Some(text) = case_text {
-            provenance = provenance.with_case_text(text);
-        }
         self.inner
             .write_summary_json(&path, mesh, &self.case, &provenance)
             .map_err(to_py)
     }
 
-    /// 実行サマリを JSON 文字列として返す。
-    #[pyo3(signature = (case_text = None))]
-    fn summary_json(&self, case_text: Option<String>) -> PyResult<String> {
+    /// 実行サマリを JSON 文字列として返す（引数は [`write_summary_json`] と同じ）。
+    #[pyo3(signature = (case_text = None, case_file = None))]
+    fn summary_json(
+        &self,
+        py: Python<'_>,
+        case_text: Option<String>,
+        case_file: Option<PathBuf>,
+    ) -> PyResult<String> {
+        let provenance = self.provenance(py, case_text, case_file)?;
         let mesh = &self.mesh.get().inner;
-        let mut provenance = Provenance::capture();
-        if let Some(source) = &mesh.source {
-            provenance = provenance.with_mesh(source).map_err(to_py)?;
-        }
-        if let Some(text) = case_text {
-            provenance = provenance.with_case_text(text);
-        }
         Ok(self
             .inner
             .summary_json(mesh, &self.case, &provenance)
@@ -1296,6 +1342,17 @@ impl PySolution {
 }
 
 // --- モジュール関数 ---------------------------------------------------------
+
+/// 実行時の作業ツリー（`gfem._provenance.source_tree()`）。開発環境でなければ `None`。
+fn source_tree(py: Python<'_>) -> PyResult<Option<SourceTree>> {
+    let value = py.import("gfem._provenance")?.call_method0("source_tree")?;
+    let tree: Option<(String, Option<String>, Option<bool>)> = value.extract()?;
+    Ok(tree.map(|(path, git_commit, git_dirty)| SourceTree {
+        path,
+        git_commit,
+        git_dirty,
+    }))
+}
 
 fn parse_role(role: &str) -> PyResult<ElectrodeRole> {
     match role.to_ascii_lowercase().as_str() {
