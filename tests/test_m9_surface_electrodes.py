@@ -162,6 +162,22 @@ def window(main_window, sample_bdf):
     return w
 
 
+def test_an_electrode_painted_only_by_brush_shows_its_area(window):
+    """パッチを置かず筆で塗っただけの電極でも、面数と面積を出す。
+
+    以前は「面が選択されていません」と表示していた（パッチ・シェルの有無しか見ていなかった）。
+    """
+    window.session.paint_faces("E1", (0.010, 0.010, 0.020), 0.003, None, erase=False)
+    spec = window.session.electrode("E1")
+    assert spec.added_faces and not spec.patches
+
+    page = window.page_electrode
+    page.bind("E1")
+    text = page.summary.text()
+    assert "面が選択されていません" not in text
+    assert f"{len(spec.added_faces)} 面" in text
+
+
 def test_clicking_the_view_adds_a_patch(window):
     """3D ビューのクリック（＝コールバック）で電極面が増えること。"""
     page = window.page_electrode

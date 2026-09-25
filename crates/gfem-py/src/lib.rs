@@ -843,7 +843,12 @@ impl PyCase {
                 })
             };
             // GPU を使うかはここで決める。gfem-core は CUDA を知らない（SPEC §7）
-            let (solver, note) = cuda::pick(case.solver.backend, mesh.nodes.len(), None);
+            let (solver, note) = cuda::pick(
+                case.solver.backend,
+                case.solver.preconditioner,
+                mesh.nodes.len(),
+                None,
+            );
             let analysis =
                 gfem_core::analysis::solve_with(mesh, case, Some(&mut cb), solver.as_deref());
             (analysis, note)
@@ -1545,11 +1550,17 @@ fn cuda_devices(py: Python<'_>) -> PyResult<Py<PyList>> {
 
 /// 節点数 `n_nodes` の問題を GPU で解けるか。
 ///
-/// 解けるなら `None`、駄目ならその理由（日本語）を返す。
+/// 解けるなら `None`、駄目ならその理由（日本語）を返す。AMG は階層を VRAM に置くので、
+/// 前処理によって要る VRAM が違う（`preconditioner` は `"jacobi"` / `"amg"` / `"none"`）。
 #[pyfunction]
-#[pyo3(signature = (n_nodes, nnz = None))]
-fn cuda_check(n_nodes: usize, nnz: Option<usize>) -> Option<String> {
-    cuda::check(n_nodes, nnz)
+#[pyo3(signature = (n_nodes, nnz = None, preconditioner = "jacobi"))]
+fn cuda_check(
+    n_nodes: usize,
+    nnz: Option<usize>,
+    preconditioner: &str,
+) -> PyResult<Option<String>> {
+    let preconditioner = Preconditioner::parse(preconditioner).map_err(to_py)?;
+    Ok(cuda::check(n_nodes, nnz, preconditioner))
 }
 
 #[pymodule]

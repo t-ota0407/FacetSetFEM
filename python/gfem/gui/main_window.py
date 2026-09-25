@@ -1557,7 +1557,10 @@ class ElectrodePage(QWidget):
     def _update_summary(self) -> None:
         session = self.window.session
         spec = session.electrode(self.name) if self.name else None
-        if spec is None or not (spec.shell_pids or spec.element_ids or spec.patches):
+        # 筆で塗っただけ（パッチなし）の電極も面を持つ（SPEC §11.1）
+        if spec is None or not (
+            spec.shell_pids or spec.element_ids or spec.patches or spec.added_faces
+        ):
             self.summary.setText("面が選択されていません")
             return
         try:

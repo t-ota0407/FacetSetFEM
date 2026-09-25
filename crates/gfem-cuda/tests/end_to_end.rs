@@ -334,10 +334,14 @@ fn ten_million_nodes_fit_on_the_gpu() {
     assert!(n >= 10_000_000, "節点数が足りません: {n}");
 
     // VRAM の見積りが実際に収まる範囲かを、確保する前に確かめる
-    let needed = gfem_cuda::required_memory(n, mesh.n_solid_elements() * 8);
+    let needed = gfem_cuda::required_memory(
+        n,
+        mesh.n_solid_elements() * 8,
+        gfem_core::case::Preconditioner::Jacobi,
+    );
     println!("VRAM 見積り {:.1} GB", needed as f64 / 1e9);
     assert!(
-        gfem_cuda::can_use_gpu(n, None).is_ok(),
+        gfem_cuda::can_use_gpu(n, None, gfem_core::case::Preconditioner::Jacobi).is_ok(),
         "この規模を GPU に載せられないと判定されました"
     );
 

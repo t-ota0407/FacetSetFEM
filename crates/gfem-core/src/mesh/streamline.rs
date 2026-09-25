@@ -22,6 +22,19 @@
 //! 突き抜けてメッシュの外に点が出る（M6 まではこの壊れ方をしていた。SPEC §6.3）。
 //! 稜線や頂点に載って歩幅が暴れたときは `MAX_STEP_IN_SIZES` で打ち切る。
 //!
+//! # 面の両側の場が向かい合うとき
+//!
+//! 1 次要素の E・J は要素ごとに一定なので、面の法線成分は面の両側で一致しない。
+//! 流れが面にほぼ沿っている場所（層の境界など）では、**法線成分の符号が両側で逆に
+//! なり、両側から面へ流れ込む**ことがある。隣の要素に入った直後の場が、
+//! 入ってきた面へ押し戻す向きになっている状態で、そのまま進むと要素の外へ出る
+//! （以前は入ってきた面を飛ばして別の面へ進み、点が要素の外に出ていた）。
+//!
+//! このときは**場から面の法線成分を落とし、面に沿って滑らせる**。区分的に一定な
+//! 場の流線を不連続面の上で定める標準的なやり方（Filippov の意味での解）で、
+//! 点は面の上に留まったまま進む。面に沿った成分も無ければ、そこが流れの
+//! 行き止まりなので [`StopReason::Sink`] で打ち切る。
+//!
 //! # 要素種
 //!
 //! Hex8 / Penta6 を含むメッシュは[面共役な四面体分割](crate::mesh::TetView)を通す
@@ -47,6 +60,14 @@ use crate::mesh::topology::{FaceAdjacency, build_face_adjacency};
 /// （電極の縁で電流が表面に平行に流れるときに実際に起きた）。
 /// 候補は減らさず、**歩幅そのものを見張る**。
 const MAX_STEP_IN_SIZES: f64 = 4.0;
+
+/// 面へ押し戻す成分（場の法線成分）が速さの何倍を超えたら、面に沿って滑らせるか。
+///
+/// 丸め誤差（相対 10⁻¹⁶ 程度）より十分大きく、形に効く角度（10⁻⁹ rad）より小さくとる。
+const SLIDE_RATIO: f64 = 1.0e-9;
+
+/// 面に沿って滑らせたとき、残った速さが元の何倍以下なら「行き止まり」とみなすか。
+const SINK_RATIO: f64 = 1.0e-9;
 
 /// 追跡する向き。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,6 +103,8 @@ pub enum StopReason {
     /// 流線が要素の稜線や頂点にちょうど載り続けると、出口面が数値的に決まらなくなる。
     /// 途中で打ち切って、そこまでの経路を返す。
     Degenerate,
+    /// 面の両側の場がまっすぐ向かい合っていて、面に沿った成分も無い（流れの行き止まり）
+    Sink,
 }
 
 /// 1 本の流線。
@@ -269,15 +292,38 @@ impl Navigator {
             let parent = self.tets.parent(tet) as usize;
             let p = self.tets.coords(mesh, tet);
             let shape = tet4::tet4_shape(&p);
-            let v = [
+            let mut v = [
                 sign * field[3 * parent],
                 sign * field[3 * parent + 1],
                 sign * field[3 * parent + 2],
             ];
-            let speed = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+            let mut speed = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
             if speed <= 0.0 {
                 stop_reason = StopReason::ZeroField;
                 break;
+            }
+
+            // 入ってきた面の向こうへ場が押し戻している＝面の両側の場が向かい合っている。
+            // そのまま進むと要素の外へ出るので、面に沿って滑らせる（モジュール冒頭を参照）
+            if let Some(entry) = entry_face {
+                let g = shape.grad[entry];
+                let g2 = g[0] * g[0] + g[1] * g[1] + g[2] * g[2];
+                let rate = g[0] * v[0] + g[1] * v[1] + g[2] * v[2];
+                // 押し戻しが丸め誤差の大きさなら滑らせない（場が面や稜線にぴったり沿う
+                // ときは法線成分が ±10⁻¹⁶ 程度で、符号はたまたま決まる）。滑らせると
+                // 稜線のまわりの四面体を歩幅ゼロで巡り続ける。この程度の押し戻しを
+                // 無視して外へはみ出す量は、要素の大きさの SLIDE_RATIO 倍以下
+                if rate < 0.0 && -rate > SLIDE_RATIO * speed * g2.sqrt() {
+                    // ∇N_entry は面に垂直なので、その成分を落とせば面に沿った向きが残る
+                    let k = rate / g2;
+                    v = [v[0] - k * g[0], v[1] - k * g[1], v[2] - k * g[2]];
+                    let along = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+                    if along <= SINK_RATIO * speed {
+                        stop_reason = StopReason::Sink;
+                        break;
+                    }
+                    speed = along;
+                }
             }
 
             // λ_i(x + s v) = λ_i(x) + s (∇N_i · v) が 0 になる最小の s
@@ -597,5 +643,86 @@ mod tests {
             .unwrap();
         assert_eq!(a.points, b.points);
         assert_eq!(a.elements, b.elements);
+    }
+
+    /// 点が元のソリッド要素 `element` に（境界込みで）入っているか。
+    fn inside_element(nav: &Navigator, mesh: &Mesh, element: usize, x: [f64; 3]) -> bool {
+        nav.tets.children(element).any(|t| {
+            let p = nav.tets.coords(mesh, t);
+            let shape = tet4::tet4_shape(&p);
+            barycentric(&shape, p[0], x).iter().all(|&l| l >= -1.0e-9)
+        })
+    }
+
+    #[test]
+    fn flow_converging_on_a_face_slides_along_it_instead_of_leaving_the_element() {
+        // 立方体 2 個の境界 x = 0.5 で、両側の場が面に向かい合う（1 次要素の
+        // 区分一定の場では、法線成分の符号が面の両側で逆になることがある）。
+        // 以前は入ってきた面を飛ばして別の面へ進み、点が要素の外に出ていた。
+        // 正しくは面に沿って滑る（法線成分を落とした向きに進む）
+        let mesh = bar(2);
+        let nav = Navigator::build(&mesh).unwrap();
+        let mut field = Vec::new();
+        for e in mesh.iter_solids() {
+            let x = mesh.element_centroid(e.conn)[0];
+            field.extend_from_slice(&if x < 0.5 {
+                [1.0, 0.0, 1.0]
+            } else {
+                [-1.0, 0.0, 1.0]
+            });
+        }
+        let line = nav
+            .trace(&mesh, &field, [0.25, 0.5, 0.3], &TraceOptions::default())
+            .unwrap()
+            .unwrap();
+
+        // どの区間も、その区間が属するとした要素の中にある
+        for (k, &element) in line.elements.iter().enumerate() {
+            for end in [k, k + 1] {
+                let x = [
+                    line.points[3 * end],
+                    line.points[3 * end + 1],
+                    line.points[3 * end + 2],
+                ];
+                assert!(
+                    inside_element(&nav, &mesh, element as usize, x),
+                    "区間 {k} の端点 {x:?} が要素 {element} の外にある"
+                );
+            }
+        }
+        // 面 x = 0.5 に沿って上面 z = 1 まで滑る
+        let n = line.n_points();
+        let last = [
+            line.points[3 * n - 3],
+            line.points[3 * n - 2],
+            line.points[3 * n - 1],
+        ];
+        assert!((last[0] - 0.5).abs() < 1e-9, "終点 {last:?}");
+        assert!((last[2] - 1.0).abs() < 1e-9, "終点 {last:?}");
+        assert_eq!(line.stop_reason, StopReason::Boundary);
+    }
+
+    #[test]
+    fn flow_meeting_head_on_at_a_face_stops_there() {
+        // 両側の場が面にまっすぐ向かい合い、面に沿った成分が無いときは、
+        // その面が流れの行き止まり。そこで打ち切る
+        let mesh = bar(2);
+        let nav = Navigator::build(&mesh).unwrap();
+        let mut field = Vec::new();
+        for e in mesh.iter_solids() {
+            let x = mesh.element_centroid(e.conn)[0];
+            field.extend_from_slice(&if x < 0.5 {
+                [1.0, 0.0, 0.0]
+            } else {
+                [-1.0, 0.0, 0.0]
+            });
+        }
+        let line = nav
+            .trace(&mesh, &field, [0.25, 0.5, 0.3], &TraceOptions::default())
+            .unwrap()
+            .unwrap();
+        assert_eq!(line.stop_reason, StopReason::Sink);
+        let n = line.n_points();
+        assert!((line.points[3 * n - 3] - 0.5).abs() < 1e-9);
     }
 }

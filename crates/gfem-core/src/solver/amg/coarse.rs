@@ -18,8 +18,22 @@
 //! 落とせば `A_c` の擬似逆行列による解が得られる。
 //!
 //! 密 Cholesky なので O(n³/6)。最粗レベルは数百節点に抑えるので一瞬で終わる。
+//!
+//! # 大きすぎる最粗レベルは分解しない
+//!
+//! ふつうは [`AmgOptions::coarse_size`](super::AmgOptions::coarse_size)（400）以下まで
+//! 粗くしてから分解するが、粗化が途中で進まなくなる（強連結がほとんど無い等）と、
+//! そのレベルがそのまま最粗になる。大きさを見ずに密に展開すると、n = 10 万で 80 GB を
+//! 確保しようとしてプロセスごと落ちるか、O(n³) の分解で何時間も止まる。
+//! [`MAX_DIRECT_SIZE`] を超えたら分解せず、呼び出し側の平滑化による代用に任せる
+//! （反復回数は増えるが答えは変わらない。実行サマリに `direct_coarse_solve: false` が残る）。
 
 use crate::assemble::csr::CsrMatrix;
+
+/// 密 Cholesky で分解する最粗レベルの上限（節点数）。
+///
+/// 2000 で密行列 32 MB・分解 1.3 × 10⁹ 回の積和（1 秒前後）。
+pub const MAX_DIRECT_SIZE: usize = 2000;
 
 /// 最粗レベルのソルバ。
 #[derive(Debug, Clone)]
@@ -46,7 +60,7 @@ impl CoarseSolver {
             null_norm2: nullspace.iter().map(|v| v * v).sum(),
             direct: false,
         };
-        if n == 0 || solver.null_norm2 == 0.0 {
+        if n == 0 || n > MAX_DIRECT_SIZE || solver.null_norm2 == 0.0 {
             return solver;
         }
 
@@ -226,6 +240,18 @@ mod tests {
             solver.solve(&rhs, &mut again);
             assert_eq!(first, again);
         }
+    }
+
+    #[test]
+    fn a_coarse_level_that_is_too_large_is_not_factorised() {
+        // 粗化が途中で止まって大きなレベルが最粗になっても、n² の密行列を
+        // 確保しに行かない（以前は大きさを見ずに展開していた）
+        let n = MAX_DIRECT_SIZE + 1;
+        let a = laplacian_1d(n);
+        let solver = CoarseSolver::factor(&a, &vec![1.0; n]);
+        assert!(!solver.is_direct());
+        assert_eq!(solver.n(), n);
+        assert!(solver.l.is_empty(), "密行列を確保している");
     }
 
     #[test]

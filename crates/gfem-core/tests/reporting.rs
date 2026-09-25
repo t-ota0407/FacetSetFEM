@@ -140,7 +140,7 @@ fn hotspot_points_at_the_layer_with_the_strongest_field() {
         assert!(stat.hotspot.j_magnitude > 0.0);
     }
     // 全領域を合わせたホットスポットは |E| が最大の層（σ が最小 = fat）に来る
-    let total = total_stats(&stats).unwrap();
+    let total = total_stats(&mesh, &analysis.fields).unwrap();
     let fat = &stats[1];
     assert!((total.electric_field.max - fat.electric_field.max).abs() < 1e-12);
     // 体積と電力は各層の和
@@ -279,4 +279,73 @@ fn reading_a_file_records_the_hash_of_every_byte_it_read() {
     );
     assert_ne!(provenance.mesh_sha256, Some(sha256_file(&path).unwrap()));
     std::fs::remove_file(&path).ok();
+}
+
+#[test]
+fn whole_domain_percentiles_are_taken_over_every_element() {
+    // 一様電流なので |E| = I/(σA) は層ごとに一定。体積の割合は
+    // 筋 70 % / 皮膚 10 % / 脂肪 20 %（|E| は 筋 < 皮膚 < 脂肪）なので、
+    // 全領域の体積重み中央値は筋の値、p95 と p99 は脂肪の値になる。
+    // 以前は中央値・p95・p99 を先頭の領域（皮膚）から写していた
+    let (mesh, _case, analysis) = setup();
+    let total = total_stats(&mesh, &analysis.fields).unwrap();
+    let e = |sigma: f64| CURRENT / AREA / sigma;
+    let close = |a: f64, b: f64| (a - b).abs() < 1e-8 * b;
+    assert!(
+        close(total.electric_field.median, e(0.35)),
+        "中央値 {}",
+        total.electric_field.median
+    );
+    assert!(
+        close(total.electric_field.p95, e(0.04)),
+        "p95 {}",
+        total.electric_field.p95
+    );
+    assert!(
+        close(total.electric_field.p99, e(0.04)),
+        "p99 {}",
+        total.electric_field.p99
+    );
+}
+
+#[test]
+fn a_solution_that_does_not_satisfy_the_equations_is_flagged() {
+    // 「収束した」と報告されても、本当の残差 ‖Kφ − f‖/‖f‖ が大きければ警告する
+    // （SPEC §5.4）。以前は値を記録するだけで、どれだけ大きくても警告しなかった
+    let (mesh, case, analysis) = setup();
+    let surface = gfem_core::mesh::extract_surface(&mesh).unwrap();
+    let lookup = gfem_core::case::FaceLookup::new(&mesh, &surface);
+    let system = gfem_core::assemble::assemble(&mesh, &case, &lookup, false).unwrap();
+    let check = |phi: &[f64]| {
+        gfem_core::post::check_conservation(
+            &system.matrix,
+            &system.load,
+            phi,
+            &analysis.fields,
+            &system.electrodes,
+            case.solver.tolerance,
+        )
+    };
+
+    let solved = check(&analysis.potential);
+    assert!(
+        solved.warnings.iter().all(|w| !w.contains("離散残差")),
+        "{:?}",
+        solved.warnings
+    );
+
+    let mut perturbed = analysis.potential.clone();
+    let scale = perturbed.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+    perturbed[0] += 1.0e-3 * scale;
+    let report = check(&perturbed);
+    assert!(
+        report.discrete_residual > 1.0e-6,
+        "{}",
+        report.discrete_residual
+    );
+    assert!(
+        report.warnings.iter().any(|w| w.contains("離散残差")),
+        "{:?}",
+        report.warnings
+    );
 }

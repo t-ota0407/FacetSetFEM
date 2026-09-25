@@ -29,6 +29,17 @@ pub const ENERGY_TOLERANCE: f64 = 1.0e-6;
 /// 電流保存の許容値（SPEC §2.2）。
 pub const CURRENT_BALANCE_TOLERANCE: f64 = 1.0e-12;
 
+/// 離散残差 ‖Kφ − f‖/‖f‖ が収束判定しきい値の何倍を超えたら警告するか（SPEC §5.4）。
+///
+/// CG は残差を漸化式で更新しながら収束を判定するので、丸めが積もると本当の残差
+/// ‖Kφ − f‖ とずれていく。「収束した」と報告したのに本当の残差が桁違いに大きければ、
+/// その解は報告どおりの精度ではない。以前はこの値を記録するだけで警告しなかった。
+pub const DISCRETE_RESIDUAL_FACTOR: f64 = 100.0;
+
+/// 離散残差の警告の下限。倍精度の丸めだけでこの程度にはなるので、
+/// 収束判定をこれより厳しくしても警告は出さない。
+pub const DISCRETE_RESIDUAL_FLOOR: f64 = 1.0e-12;
+
 /// 要素ごとの導出量（SPEC §5.1）。
 ///
 /// 並びは [`Mesh::iter_solids`] の通し番号順。
@@ -217,12 +228,15 @@ impl ConservationReport {
 }
 
 /// 保存則チェックを実行する（SPEC §5.4）。毎回自動で走らせる想定。
+///
+/// `tolerance` は CG の収束判定しきい値（相対残差）。離散残差の警告に使う。
 pub fn check_conservation(
     matrix: &CsrMatrix,
     load: &[f64],
     phi: &[f64],
     fields: &FieldResult,
     electrodes: &[ElectrodeGeometry],
+    tolerance: f64,
 ) -> ConservationReport {
     let mut warnings = Vec::new();
 
@@ -278,6 +292,12 @@ pub fn check_conservation(
     } else {
         0.0
     };
+    let residual_limit = (DISCRETE_RESIDUAL_FACTOR * tolerance).max(DISCRETE_RESIDUAL_FLOOR);
+    if discrete_residual > residual_limit {
+        warnings.push(format!(
+            "離散残差 ‖Kφ−f‖/‖f‖ = {discrete_residual:.3e} が、収束判定 {tolerance:.0e} から             見込まれる大きさ（{residual_limit:.0e} 以下）を超えています。CG の残差の更新に             丸めが積もっている可能性があるので、収束判定を緩めるか前処理を変えて解き直してください"
+        ));
+    }
 
     // 4. 電極間インピーダンス（SPEC §5.3）
     let electrode_potentials: Vec<(String, f64)> = electrodes

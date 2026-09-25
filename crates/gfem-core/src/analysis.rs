@@ -420,8 +420,26 @@ fn run_with(
     // --- ポスト処理 ---
     let mark = Instant::now();
     let fields = compute_fields(mesh, &case.conductivity, &potential)?;
-    let conservation = check_conservation(&matrix, &load, &potential, &fields, &electrodes);
+    let conservation = check_conservation(
+        &matrix,
+        &load,
+        &potential,
+        &fields,
+        &electrodes,
+        case.solver.tolerance,
+    );
     warnings.extend(conservation.warnings.iter().cloned());
+    // AMG の最粗レベルを直接解けなかった（SPEC §4.5）。答えは変わらないが、
+    // 反復が増えるうえ粗化がうまく進んでいない兆候なので知らせる
+    if let Some(info) = &report.amg
+        && !info.direct_coarse_solve
+    {
+        let (n_coarse, _) = info.levels.last().copied().unwrap_or_default();
+        warnings.push(format!(
+            "AMG の最粗レベル（{n_coarse} 節点）を直接解けなかったため、平滑化で代用しました。\
+             答えは変わりませんが反復回数が増えます（SPEC §4.5）"
+        ));
+    }
     let post = mark.elapsed().as_secs_f64();
 
     Ok(Analysis {

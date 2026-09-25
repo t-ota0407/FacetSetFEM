@@ -77,50 +77,17 @@ pub struct RegionStats {
 /// 要素種は問わない（Tet4 / Hex8 / Penta6）。要素値の並びは
 /// [`Mesh::iter_solids`] の通し番号順であることを前提にする。
 pub fn region_stats(mesh: &Mesh, case: &Case, fields: &FieldResult) -> Result<Vec<RegionStats>> {
-    if fields.n_elements != mesh.n_solid_elements() {
-        return Err(GfemError::internal(format!(
-            "要素値の個数がメッシュと合いません: {} 個ですがソリッド要素は {} 個です",
-            fields.n_elements,
-            mesh.n_solid_elements()
-        )));
-    }
+    check_lengths(mesh, fields)?;
 
-    // PID ごとに要素の通し番号を集める（昇順のまま）。
-    // 併せて要素 ID と重心も控えておく（ホットスポットの報告に使う）
+    // PID ごとに要素の通し番号を集める（昇順のまま）
     let mut by_pid: BTreeMap<PropId, Vec<usize>> = BTreeMap::new();
-    let mut element_ids: Vec<ElemId> = Vec::with_capacity(fields.n_elements);
-    let mut centroids: Vec<[f64; 3]> = Vec::with_capacity(fields.n_elements);
     for e in mesh.iter_solids() {
         by_pid.entry(e.pid).or_default().push(e.index);
-        element_ids.push(e.id);
-        centroids.push(mesh.element_centroid(e.conn));
     }
 
-    let mut out = Vec::with_capacity(by_pid.len());
-    for (pid, elements) in by_pid {
-        let volumes: Vec<f64> = elements.iter().map(|&e| fields.volume[e]).collect();
-        let j: Vec<f64> = elements.iter().map(|&e| fields.j_magnitude[e]).collect();
-        let e_mag: Vec<f64> = elements.iter().map(|&e| fields.e_magnitude[e]).collect();
-        let power_terms: Vec<f64> = elements
-            .iter()
-            .map(|&e| fields.power_density[e] * fields.volume[e])
-            .collect();
-        let volume = reduce::sum(&volumes);
-
-        // ホットスポットは |J| が最大の要素。同値なら通し番号の小さい方を採る
-        let hottest = elements
-            .iter()
-            .copied()
-            .reduce(|a, b| {
-                if fields.j_magnitude[b] > fields.j_magnitude[a] {
-                    b
-                } else {
-                    a
-                }
-            })
-            .expect("PID に属する要素が 1 つ以上ある");
-
-        out.push(RegionStats {
+    Ok(by_pid
+        .into_iter()
+        .map(|(pid, elements)| RegionStats {
             pid,
             name: case.region_names.get(&pid).cloned().unwrap_or_default(),
             sigma: case
@@ -128,20 +95,83 @@ pub fn region_stats(mesh: &Mesh, case: &Case, fields: &FieldResult) -> Result<Ve
                 .get(&pid)
                 .map(|s| s.scalar())
                 .unwrap_or(f64::NAN),
-            n_elements: elements.len(),
-            volume,
-            power: reduce::sum(&power_terms),
-            current_density: summarise(&j, &volumes, volume),
-            electric_field: summarise(&e_mag, &volumes, volume),
-            hotspot: Hotspot {
-                element_id: element_ids[hottest],
-                centroid: centroids[hottest],
-                j_magnitude: fields.j_magnitude[hottest],
-                e_magnitude: fields.e_magnitude[hottest],
-            },
-        });
+            ..summarise_elements(mesh, fields, &elements)
+        })
+        .collect())
+}
+
+/// 全領域をひとまとめにした統計。
+///
+/// **パーセンタイルは全要素の値から求め直す。** 領域ごとの統計の要約からは
+/// 全体の中央値・p95・p99 は決まらない（以前は先頭の領域の値を写していた）。
+/// `pid` は 0、`sigma` は NaN（領域をまたぐので 1 つに決まらない）。
+pub fn total_stats(mesh: &Mesh, fields: &FieldResult) -> Result<RegionStats> {
+    check_lengths(mesh, fields)?;
+    if fields.n_elements == 0 {
+        return Err(GfemError::model("ソリッド要素が 1 つもありません"));
     }
-    Ok(out)
+    let all: Vec<usize> = (0..fields.n_elements).collect();
+    Ok(RegionStats {
+        pid: 0,
+        name: "（全領域）".to_string(),
+        sigma: f64::NAN,
+        ..summarise_elements(mesh, fields, &all)
+    })
+}
+
+fn check_lengths(mesh: &Mesh, fields: &FieldResult) -> Result<()> {
+    if fields.n_elements != mesh.n_solid_elements() {
+        return Err(GfemError::internal(format!(
+            "要素値の個数がメッシュと合いません: {} 個ですがソリッド要素は {} 個です",
+            fields.n_elements,
+            mesh.n_solid_elements()
+        )));
+    }
+    Ok(())
+}
+
+/// 要素の集合（通し番号の昇順、1 つ以上）の統計。`pid`・`name`・`sigma` は呼び出し側で埋める。
+fn summarise_elements(mesh: &Mesh, fields: &FieldResult, elements: &[usize]) -> RegionStats {
+    let volumes: Vec<f64> = elements.iter().map(|&e| fields.volume[e]).collect();
+    let j: Vec<f64> = elements.iter().map(|&e| fields.j_magnitude[e]).collect();
+    let e_mag: Vec<f64> = elements.iter().map(|&e| fields.e_magnitude[e]).collect();
+    let power_terms: Vec<f64> = elements
+        .iter()
+        .map(|&e| fields.power_density[e] * fields.volume[e])
+        .collect();
+    let volume = reduce::sum(&volumes);
+
+    // ホットスポットは |J| が最大の要素。同値なら通し番号の小さい方を採る
+    let hottest = elements
+        .iter()
+        .copied()
+        .reduce(|a, b| {
+            if fields.j_magnitude[b] > fields.j_magnitude[a] {
+                b
+            } else {
+                a
+            }
+        })
+        .expect("要素が 1 つ以上ある");
+    // 重心が要るのはホットスポットの 1 要素だけ
+    let hot = mesh.solid(hottest);
+
+    RegionStats {
+        pid: 0,
+        name: String::new(),
+        sigma: f64::NAN,
+        n_elements: elements.len(),
+        volume,
+        power: reduce::sum(&power_terms),
+        current_density: summarise(&j, &volumes, volume),
+        electric_field: summarise(&e_mag, &volumes, volume),
+        hotspot: Hotspot {
+            element_id: hot.id,
+            centroid: mesh.element_centroid(hot.conn),
+            j_magnitude: fields.j_magnitude[hottest],
+            e_magnitude: fields.e_magnitude[hottest],
+        },
+    }
 }
 
 fn summarise(values: &[f64], volumes: &[f64], total_volume: f64) -> QuantityStats {
@@ -183,51 +213,6 @@ pub fn weighted_quantiles(values: &[f64], volumes: &[f64], quantiles: &[f64]) ->
         out.push(values[order[k] as usize]);
     }
     out
-}
-
-/// 全領域を合わせた統計。
-pub fn total_stats(stats: &[RegionStats]) -> Option<RegionStats> {
-    let first = stats.first()?;
-    let volumes: Vec<f64> = stats.iter().map(|s| s.volume).collect();
-    let powers: Vec<f64> = stats.iter().map(|s| s.power).collect();
-    let volume = reduce::sum(&volumes);
-    let hotspot = stats
-        .iter()
-        .map(|s| s.hotspot)
-        .reduce(|a, b| if b.j_magnitude > a.j_magnitude { b } else { a })?;
-    let weighted = |pick: fn(&RegionStats) -> f64| {
-        let terms: Vec<f64> = stats.iter().map(|s| pick(s) * s.volume).collect();
-        if volume > 0.0 {
-            reduce::sum(&terms) / volume
-        } else {
-            f64::NAN
-        }
-    };
-    Some(RegionStats {
-        pid: 0,
-        name: "（全領域）".to_string(),
-        sigma: f64::NAN,
-        n_elements: stats.iter().map(|s| s.n_elements).sum(),
-        volume,
-        power: reduce::sum(&powers),
-        current_density: QuantityStats {
-            max: stats
-                .iter()
-                .map(|s| s.current_density.max)
-                .fold(f64::NEG_INFINITY, f64::max),
-            mean: weighted(|s| s.current_density.mean),
-            ..first.current_density
-        },
-        electric_field: QuantityStats {
-            max: stats
-                .iter()
-                .map(|s| s.electric_field.max)
-                .fold(f64::NEG_INFINITY, f64::max),
-            mean: weighted(|s| s.electric_field.mean),
-            ..first.electric_field
-        },
-        hotspot,
-    })
 }
 
 /// 領域統計を CSV に書き出す（SPEC §5.5）。

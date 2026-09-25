@@ -20,8 +20,11 @@ use crate::error::{ErrorKind, GfemError, Result};
 use crate::mesh::{Mesh, NodeIndex};
 use std::collections::BTreeMap;
 
-/// 面積がゼロとみなすしきい値との比較に使う相対値。
-const MIN_AREA_RATIO: f64 = 1.0e-12;
+/// 電極の総面積がこれ以下なら「面積ゼロ」とみなす [m²]（1 µm²）。
+///
+/// 座標は読み込み時に必ず SI（m）に換算されている（設計原則 7）ので、絶対値で判定できる。
+/// 実在の電極パッドはこれより 6 桁以上大きい。
+const MIN_ELECTRODE_AREA_M2: f64 = 1.0e-12;
 
 /// 電極 1 個ぶんの幾何情報。ポスト処理（平均電位・インピーダンス）でも使う。
 #[derive(Debug, Clone)]
@@ -98,7 +101,7 @@ pub fn assemble_load(
             }
         }
 
-        if area <= MIN_AREA_RATIO {
+        if area <= MIN_ELECTRODE_AREA_M2 {
             return Err(GfemError::new(
                 ErrorKind::Case,
                 format!("電極 {} の総面積がゼロです: {area} m²", electrode.name),
