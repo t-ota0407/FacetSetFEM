@@ -91,11 +91,13 @@ fn the_v_cycle_is_a_symmetric_positive_definite_operator() {
     let hierarchy = amg::setup(&matrix, &AmgOptions::default()).unwrap();
     let backend = CpuSerial;
     let mut device = DeviceHierarchy::new(&backend, &hierarchy).unwrap();
+    // 最細レベルの行列は階層に持たせず、CG が載せたものを渡す（SPEC §4.5）
+    let fine = backend.upload_matrix(&matrix).unwrap();
 
     let mut apply = |v: &[f64]| -> Vec<f64> {
         let input = backend.upload(v).unwrap();
         let mut out = backend.zeros(n).unwrap();
-        device.apply(&backend, &input, &mut out).unwrap();
+        device.apply(&backend, &fine, &input, &mut out).unwrap();
         out
     };
 

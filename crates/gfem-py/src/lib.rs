@@ -18,7 +18,8 @@
 mod cuda;
 
 use gfem_core::case::{
-    Backend, Electrode, ElectrodeRole, FaceRef, Preconditioner, ReferencePotential, SurfacePatch,
+    Backend, Electrode, ElectrodeRole, FaceLookup, FaceRef, Preconditioner, ReferencePotential,
+    SurfaceIndex, SurfacePatch,
 };
 use gfem_core::mesh::streamline::{TraceDirection, TraceOptions};
 use gfem_core::post::RegionStats;
@@ -168,11 +169,26 @@ pub struct PyMesh {
     /// 抽出は 4 百万四面体で 3.8 秒かかる。表示にも電極のパッチ選択にも使うので、
     /// 1 度だけ作って使い回す
     surface: OnceLock<gfem_core::mesh::Surface>,
-    /// 体表面から電極面を選ぶための索引（SPEC §11.1）
-    picker: OnceLock<gfem_core::mesh::SurfacePicker>,
+    /// 外表面から電極面を引く索引（パッチ選択と面の識別子の逆引き。SPEC §11.1）。
+    ///
+    /// solve・検証・クリックのたびに作り直さないよう、ここで 1 つ持って貸す
+    /// （[`FaceLookup::with_index`]）。以前は毎回作り直していた
+    surface_index: SurfaceIndex,
 }
 
 impl PyMesh {
+    /// 読み込んだメッシュを包む。キャッシュは使われたときに作る。
+    fn new(inner: gfem_core::Mesh, report: gfem_core::ReadReport) -> Self {
+        Self {
+            inner,
+            report,
+            tets: OnceLock::new(),
+            navigator: OnceLock::new(),
+            surface: OnceLock::new(),
+            surface_index: SurfaceIndex::new(),
+        }
+    }
+
     /// 面共役な四面体分割（初回だけ作る）。
     fn tets(&self) -> PyResult<&gfem_core::mesh::TetView> {
         if let Some(t) = self.tets.get() {
@@ -191,22 +207,32 @@ impl PyMesh {
         Ok(self.navigator.get_or_init(|| built))
     }
 
-    /// 外表面（初回だけ抽出する）。
-    pub(crate) fn surface(&self) -> PyResult<&gfem_core::mesh::Surface> {
+    /// 外表面（初回だけ抽出する）。GIL を手放した中からも呼べるよう、コアのエラーで返す。
+    fn surface_core(&self) -> gfem_core::Result<&gfem_core::mesh::Surface> {
         if let Some(s) = self.surface.get() {
             return Ok(s);
         }
-        let built = gfem_core::mesh::extract_surface(&self.inner).map_err(to_py)?;
+        let built = gfem_core::mesh::extract_surface(&self.inner)?;
         Ok(self.surface.get_or_init(|| built))
+    }
+
+    /// 外表面（初回だけ抽出する）。
+    pub(crate) fn surface(&self) -> PyResult<&gfem_core::mesh::Surface> {
+        self.surface_core().map_err(to_py)
     }
 
     /// 体表面から面を選ぶ索引（初回だけ作る）。
     fn picker(&self) -> PyResult<&gfem_core::mesh::SurfacePicker> {
-        if let Some(p) = self.picker.get() {
-            return Ok(p);
-        }
-        let built = gfem_core::mesh::SurfacePicker::build(&self.inner, self.surface()?);
-        Ok(self.picker.get_or_init(|| built))
+        Ok(self.surface_index.picker(&self.inner, self.surface()?))
+    }
+
+    /// 電極面を引く下ごしらえ。外表面と索引は作り置きのものを貸す。
+    fn lookup(&self) -> gfem_core::Result<FaceLookup<'_>> {
+        Ok(FaceLookup::with_index(
+            &self.inner,
+            self.surface_core()?,
+            &self.surface_index,
+        ))
     }
 
     /// 外表面の面の集合を Python に返す形にまとめる。
@@ -271,6 +297,19 @@ impl PyMesh {
     #[getter]
     fn length_unit(&self) -> &'static str {
         self.inner.length_unit.symbol()
+    }
+
+    /// **m として読んだ**メッシュを、座標の単位が `length_unit` だったものとして返す（SPEC §3.2）。
+    ///
+    /// GUI は単位を選ばせる前に寸法を見せるため、まず m として読む。選ばれた単位で
+    /// 読み直すとファイルを 2 回パースすることになるので、代わりにこれを使う。
+    /// 最初からその単位で読んだものと座標はビット単位で同じになる。
+    fn with_length_unit(&self, py: Python<'_>, length_unit: &str) -> PyResult<PyMesh> {
+        let unit = LengthUnit::parse(length_unit).map_err(to_py)?;
+        let mesh = py
+            .detach(|| self.inner.reinterpret_length_unit(unit))
+            .map_err(to_py)?;
+        Ok(PyMesh::new(mesh, self.report.clone()))
     }
 
     /// 読み込み元ファイル。
@@ -458,8 +497,7 @@ impl PyMesh {
             added,
             removed,
         )?;
-        let surface = self.surface()?;
-        let lookup = gfem_core::case::FaceLookup::new(&self.inner, surface);
+        let lookup = self.lookup().map_err(to_py)?;
         let faces = gfem_core::case::resolve_faces(&lookup, &electrode).map_err(to_py)?;
 
         // 体表面の面だけ強調表示できる。シェル要素は従来どおり別経路で描く
@@ -592,8 +630,7 @@ impl PyMesh {
 
     /// 外表面の総面積 [m²]。
     fn surface_area(&self) -> PyResult<f64> {
-        let surface = gfem_core::mesh::extract_surface(&self.inner).map_err(to_py)?;
-        Ok(surface.total_area(&self.inner))
+        Ok(self.surface()?.total_area(&self.inner))
     }
 
     /// VTU（ParaView で開ける形式）としてメッシュだけを書き出す。
@@ -792,18 +829,19 @@ impl PyCase {
     /// 実行前の整合性チェック（SPEC §6.2 の手順 4）。
     ///
     /// 不備があれば例外、問題なければ警告の一覧を返す。
-    fn validate(&self) -> PyResult<Vec<String>> {
-        let mesh = &self.mesh.get().inner;
-        let surface = self.mesh.get().surface()?;
-        self.inner.validate(mesh, surface).map_err(to_py)
+    fn validate(&self, py: Python<'_>) -> PyResult<Vec<String>> {
+        let mesh = self.mesh.get();
+        // 外表面の抽出（初回）は大規模モデルで数秒かかるので GIL を離す（SPEC §6.4）
+        py.detach(|| self.inner.validate_with(&mesh.lookup()?))
+            .map_err(to_py)
     }
 
     /// 電極ごとの面積と電流密度。面を選びながら確認するために使う（SPEC §6.2 の手順 3）。
     fn electrode_info(&self, py: Python<'_>) -> PyResult<Py<PyList>> {
-        let mesh = &self.mesh.get().inner;
-        let lookup = gfem_core::case::FaceLookup::new(mesh, self.mesh.get().surface()?);
+        let mesh = self.mesh.get();
+        let lookup = mesh.lookup().map_err(to_py)?;
         let (_, geometries) =
-            gfem_core::assemble::assemble_load(mesh, &self.inner, &lookup).map_err(to_py)?;
+            gfem_core::assemble::assemble_load(&mesh.inner, &self.inner, &lookup).map_err(to_py)?;
         let list = PyList::empty(py);
         for g in geometries {
             let d = PyDict::new(py);
@@ -824,7 +862,8 @@ impl PyCase {
     /// `False` を返すと計算を中断する（`SolverCancelled` 例外）。
     #[pyo3(signature = (progress = None))]
     fn solve(&self, py: Python<'_>, progress: Option<Py<PyAny>>) -> PyResult<PySolution> {
-        let mesh = &self.mesh.get().inner;
+        let py_mesh = self.mesh.get();
+        let mesh = &py_mesh.inner;
         let case = &self.inner;
         let callback_error: Mutex<Option<PyErr>> = Mutex::new(None);
 
@@ -849,8 +888,11 @@ impl PyCase {
                 mesh.nodes.len(),
                 None,
             );
-            let analysis =
-                gfem_core::analysis::solve_with(mesh, case, Some(&mut cb), solver.as_deref());
+            // 外表面と電極面の索引は Mesh が作り置きしたものを使う。何度解いても
+            // 抽出し直さない（大規模モデルでは solve の準備の大半を占める）
+            let analysis = py_mesh.lookup().and_then(|lookup| {
+                gfem_core::analysis::solve_prepared(&lookup, case, Some(&mut cb), solver.as_deref())
+            });
             (analysis, note)
         });
         let (analysis, note) = analysis;
@@ -870,6 +912,7 @@ impl PyCase {
             mesh: self.mesh.clone_ref(py),
             case: case.clone(),
             inner: analysis,
+            stats: OnceLock::new(),
         })
     }
 
@@ -891,9 +934,24 @@ pub struct PySolution {
     /// 解いたときのケース。領域統計や実行サマリに σ と領域名が要る
     case: gfem_core::Case,
     inner: Analysis,
+    /// 領域統計（初回だけ求める）。表・CSV・実行サマリで使い回す。
+    /// 大規模モデルでは領域ごとのソートに数百ミリ秒かかる
+    stats: OnceLock<Vec<RegionStats>>,
 }
 
 impl PySolution {
+    /// 領域統計（初回だけ求める）。
+    fn stats(&self) -> PyResult<&[RegionStats]> {
+        if let Some(stats) = self.stats.get() {
+            return Ok(stats);
+        }
+        let built = self
+            .inner
+            .region_stats(&self.mesh.get().inner, &self.case)
+            .map_err(to_py)?;
+        Ok(self.stats.get_or_init(|| built))
+    }
+
     /// 実行サマリに添えるプロビナンス（SPEC §5.5）。
     ///
     /// - Git の状態は gfem-core 単体ではなく、**この拡張モジュール全体**
@@ -1177,10 +1235,8 @@ impl PySolution {
     /// パーセンタイルは**体積重み**。要素サイズが不均一なので、
     /// 要素数ベースの分位点では細かく切られた領域の値が過大に効いてしまう。
     fn region_stats(&self, py: Python<'_>) -> PyResult<Py<PyList>> {
-        let mesh = &self.mesh.get().inner;
-        let stats = self.inner.region_stats(mesh, &self.case).map_err(to_py)?;
         let list = PyList::empty(py);
-        for s in &stats {
+        for s in self.stats()? {
             list.append(region_stats_dict(py, s)?)?;
         }
         Ok(list.unbind())
@@ -1188,10 +1244,7 @@ impl PySolution {
 
     /// 領域統計を CSV に書き出す（SPEC §5.5）。
     fn write_region_stats_csv(&self, path: PathBuf) -> PyResult<()> {
-        let mesh = &self.mesh.get().inner;
-        self.inner
-            .write_region_stats_csv(&path, mesh, &self.case)
-            .map_err(to_py)
+        gfem_core::post::write_region_stats_csv(&path, self.stats()?).map_err(to_py)
     }
 
     /// 収束履歴を CSV に書き出す。
@@ -1219,7 +1272,7 @@ impl PySolution {
         let provenance = self.provenance(py, case_text, case_file)?;
         let mesh = &self.mesh.get().inner;
         self.inner
-            .write_summary_json(&path, mesh, &self.case, &provenance)
+            .write_summary_json_with_stats(&path, mesh, &self.case, &provenance, self.stats()?)
             .map_err(to_py)
     }
 
@@ -1235,8 +1288,7 @@ impl PySolution {
         let mesh = &self.mesh.get().inner;
         Ok(self
             .inner
-            .summary_json(mesh, &self.case, &provenance)
-            .map_err(to_py)?
+            .summary_json_with_stats(mesh, &self.case, &provenance, self.stats()?)
             .to_pretty_string())
     }
 
@@ -1506,14 +1558,7 @@ fn read_nastran(py: Python<'_>, path: PathBuf, length_unit: Option<&str>) -> PyR
     let (mesh, report) = py
         .detach(|| gfem_core::read_nastran(&path, unit))
         .map_err(to_py)?;
-    Ok(PyMesh {
-        inner: mesh,
-        report,
-        tets: OnceLock::new(),
-        navigator: OnceLock::new(),
-        surface: OnceLock::new(),
-        picker: OnceLock::new(),
-    })
+    Ok(PyMesh::new(mesh, report))
 }
 
 /// 対応する長さ単位の一覧。

@@ -29,7 +29,7 @@ pub mod provenance;
 pub mod solver;
 pub mod units;
 
-pub use analysis::{Analysis, Timings, solve, solve_with, write_analysis_vtu};
+pub use analysis::{Analysis, Timings, solve, solve_prepared, solve_with, write_analysis_vtu};
 pub use assemble::{CsrMatrix, LinearSystem, assemble};
 pub use case::{Case, Electrode, ElectrodeRole, Preconditioner, ReferencePotential, SolverOptions};
 pub use element::ElementKind;

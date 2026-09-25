@@ -332,6 +332,34 @@ impl Mesh {
         self.nodes.bounding_box()
     }
 
+    /// **m として読んだ**メッシュを、座標の単位が `unit` だったものとして読み直した形にする。
+    ///
+    /// GUI は単位を選ばせる前に寸法を見せる（SPEC §3.2）ため、まず m のつもりで読む。
+    /// 選ばれた単位で読み直すとファイルを 2 回パースすることになるので、代わりにこれを使う。
+    /// 読み込みは「座標変換 → 最後にまとめて単位換算」の順（SPEC §3.1）なので、
+    /// m で読んだ座標に換算係数を掛けたものは、最初から `unit` で読んだ座標と
+    /// **ビット単位で同じ**になる。形状のチェックは寸法によらないので、警告も変わらない。
+    ///
+    /// m 以外の単位で読んだメッシュに使うとエラー（割り戻しで丸めが入るため）。
+    pub fn reinterpret_length_unit(&self, unit: LengthUnit) -> crate::error::Result<Mesh> {
+        if self.length_unit != LengthUnit::Meter {
+            return Err(crate::error::GfemError::internal(format!(
+                "単位を付け替えられるのは m として読んだメッシュだけです（このメッシュは {}）",
+                self.length_unit.symbol()
+            ))
+            .with_hint("選んだ単位で read_nastran し直してください"));
+        }
+        let mut mesh = self.clone();
+        let scale = unit.to_meters();
+        // 読み込み（io::nastran::parse）と同じく、係数が 1 のときは掛けない
+        if scale != 1.0 {
+            let coords: Vec<f64> = self.nodes.coords().iter().map(|v| v * scale).collect();
+            mesh.nodes = Nodes::new(self.nodes.ids().to_vec(), coords);
+        }
+        mesh.length_unit = unit;
+        Ok(mesh)
+    }
+
     /// ソリッド要素が実際に使っている PID の一覧（昇順・重複なし）。
     pub fn solid_pids(&self) -> Vec<PropId> {
         let mut v: Vec<PropId> = self
@@ -379,12 +407,11 @@ impl Mesh {
 
     /// 要素の代表寸法（最大辺長, m）。退化判定の無次元化に使う。
     pub(crate) fn element_max_edge(&self, block: &ElementBlock, e: usize) -> f64 {
-        let pts: Vec<[f64; 3]> = block
-            .conn_of(e)
-            .iter()
-            .map(|&n| self.nodes.coord(n))
-            .collect();
-        max_edge_length(&pts)
+        // 読み込み時に全要素について呼ぶので、要素ごとに Vec を作らない
+        let conn = block.conn_of(e);
+        let mut buffer = [[0.0f64; 3]; crate::element::MAX_ELEMENT_NODES];
+        self.gather_coords(conn, &mut buffer[..conn.len()]);
+        max_edge_length(&buffer[..conn.len()])
     }
 }
 

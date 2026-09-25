@@ -65,24 +65,44 @@ pub fn build_sparsity(mesh: &Mesh) -> Result<CsrMatrix> {
         }
     }
 
-    // 3. 行ごとにソート・重複除去して詰める
+    // 3. 行ごとにソートして重複を詰める。行ごとに独立で、各行の結果は中身だけで
+    //    決まる（整数のソート）ので、並列にしても逐次と同じ構造になる
+    use crate::solver::amg::rowwise::split_rows;
+    use rayon::prelude::*;
+    let mut rows = split_rows(&mut scratch, &offsets);
+    let lengths: Vec<usize> = rows
+        .par_iter_mut()
+        .map(|row| {
+            row.sort_unstable();
+            dedup_sorted(row)
+        })
+        .collect();
+
+    // 4. 詰めた行を 1 本の列番号配列にまとめる
     let mut row_ptr = Vec::with_capacity(n + 1);
-    let mut col_idx = Vec::with_capacity(total / 4);
     row_ptr.push(0usize);
-    for i in 0..n {
-        let row = &mut scratch[offsets[i]..offsets[i + 1]];
-        row.sort_unstable();
-        let mut last: Option<u32> = None;
-        for &c in row.iter() {
-            if last != Some(c) {
-                col_idx.push(c);
-                last = Some(c);
-            }
-        }
-        row_ptr.push(col_idx.len());
+    for &len in &lengths {
+        row_ptr.push(row_ptr.last().copied().unwrap_or(0) + len);
     }
+    let mut col_idx = vec![0u32; row_ptr[n]];
+    split_rows(&mut col_idx, &row_ptr)
+        .into_par_iter()
+        .zip(rows.into_par_iter())
+        .for_each(|(out, row)| out.copy_from_slice(&row[..out.len()]));
 
     Ok(CsrMatrix::from_structure(n, row_ptr, col_idx))
+}
+
+/// 昇順に並んだ行から重複を取り除き、残った列を行の先頭に詰める。戻り値は残った個数。
+fn dedup_sorted(row: &mut [u32]) -> usize {
+    let mut kept = 0;
+    for k in 0..row.len() {
+        if kept == 0 || row[kept - 1] != row[k] {
+            row[kept] = row[k];
+            kept += 1;
+        }
+    }
+    kept
 }
 
 #[cfg(test)]

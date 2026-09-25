@@ -421,6 +421,15 @@ impl Case {
     /// GUI でリスト表示して一度に直せるようにするため。
     /// 戻り値は「実行はできるが知らせるべきこと」の警告一覧。
     pub fn validate(&self, mesh: &Mesh, surface: &Surface) -> Result<Vec<String>> {
+        self.validate_with(&FaceLookup::new(mesh, surface))
+    }
+
+    /// [`validate`](Self::validate) の、電極面の下ごしらえを渡す版。
+    ///
+    /// 解析（[`crate::analysis`]）は同じ `FaceLookup` で検証と荷重の組み立てをするので、
+    /// パッチ選択の索引を 2 度作らずに済む。
+    pub fn validate_with(&self, lookup: &FaceLookup) -> Result<Vec<String>> {
+        let (mesh, surface) = (lookup.mesh(), lookup.surface());
         let mut warnings = Vec::new();
 
         // --- 導電率 ---
@@ -521,13 +530,12 @@ impl Case {
         }
 
         // --- 電極面 ---
-        let lookup = FaceLookup::new(mesh, surface);
         // 面の重なりは「体表面のどの面か」で見る。シェル要素とパッチが同じ面を
         // 指していても重複として捕まえられるようにするため。
         // 値は電極の通し番号（名前で比べると、名前の検査をすり抜けたときに見逃す）
         let mut used_faces: BTreeMap<FaceKey, usize> = BTreeMap::new();
         for (index, e) in self.electrodes.iter().enumerate() {
-            let faces = self.resolve_faces(&lookup, e)?;
+            let faces = self.resolve_faces(lookup, e)?;
             let mut off_surface: Vec<String> = Vec::new();
             for &face in &faces {
                 let (_, nodes) = lookup.face_nodes(face);
@@ -774,28 +782,82 @@ pub enum ElectrodeFace {
     Surface(u32),
 }
 
-/// 電極面を引くための下ごしらえ。
+/// 外表面から電極面を引くための索引（パッチ選択と、面の識別子からの逆引き）。
 ///
-/// 外表面は解析の準備段階で 1 度だけ作る。パッチ選択に使う索引
-/// （[`SurfacePicker`]）は**パッチを使う電極があるときだけ**作るので、
-/// シェルだけのモデルでは何も余計に計算しない。
-pub struct FaceLookup<'a> {
-    mesh: &'a Mesh,
-    surface: &'a Surface,
+/// **メッシュと外表面だけで決まる**ので、1 度作れば電極を何個置いても、何度解いても
+/// 使い回せる。GUI や Python の `Mesh` は 1 つ持っておき、[`FaceLookup::with_index`] で
+/// 貸す（以前は検証・solve・クリックのたびに作り直していた）。どちらも使われたときに
+/// 初めて作るので、シェルだけのモデルでは何も余計に計算しない。
+///
+/// 作ったときと違うメッシュ・外表面と組み合わせてはいけない。
+#[derive(Debug, Default)]
+pub struct SurfaceIndex {
     picker: std::sync::OnceLock<SurfacePicker>,
     /// (ソリッドの EID, 局所面番号) → 外表面の面の通し番号。
     /// 手で足した / 外した面を引くときだけ作る
     by_element: std::sync::OnceLock<BTreeMap<(ElemId, u8), u32>>,
 }
 
+impl SurfaceIndex {
+    /// 空の索引。中身は使われたときに作る。
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// パッチ選択の索引（初回だけ作る）。
+    pub fn picker(&self, mesh: &Mesh, surface: &Surface) -> &SurfacePicker {
+        self.picker
+            .get_or_init(|| SurfacePicker::build(mesh, surface))
+    }
+
+    fn by_element(&self, mesh: &Mesh, surface: &Surface) -> &BTreeMap<(ElemId, u8), u32> {
+        self.by_element.get_or_init(|| {
+            surface
+                .faces()
+                .iter()
+                .enumerate()
+                .map(|(i, f)| ((mesh.solid(f.element as usize).id, f.local_face), i as u32))
+                .collect()
+        })
+    }
+}
+
+/// [`FaceLookup`] が索引を自分で持つか、借りるか。
+enum IndexSlot<'a> {
+    Owned(SurfaceIndex),
+    Shared(&'a SurfaceIndex),
+}
+
+/// 電極面を引くための下ごしらえ（メッシュ・外表面・[`SurfaceIndex`] の組）。
+pub struct FaceLookup<'a> {
+    mesh: &'a Mesh,
+    surface: &'a Surface,
+    index: IndexSlot<'a>,
+}
+
 impl<'a> FaceLookup<'a> {
-    /// メッシュと、そこから抽出済みの外表面から作る。
+    /// メッシュと、そこから抽出済みの外表面から作る。索引はこの `FaceLookup` が持つ。
     pub fn new(mesh: &'a Mesh, surface: &'a Surface) -> Self {
         Self {
             mesh,
             surface,
-            picker: std::sync::OnceLock::new(),
-            by_element: std::sync::OnceLock::new(),
+            index: IndexSlot::Owned(SurfaceIndex::new()),
+        }
+    }
+
+    /// 作り置きの索引を借りて作る（同じメッシュで何度も解く・電極面を選び直す場合）。
+    pub fn with_index(mesh: &'a Mesh, surface: &'a Surface, index: &'a SurfaceIndex) -> Self {
+        Self {
+            mesh,
+            surface,
+            index: IndexSlot::Shared(index),
+        }
+    }
+
+    fn index(&self) -> &SurfaceIndex {
+        match &self.index {
+            IndexSlot::Owned(index) => index,
+            IndexSlot::Shared(index) => index,
         }
     }
 
@@ -805,15 +867,8 @@ impl<'a> FaceLookup<'a> {
     /// 外表面に無い面を指しているということは、内部の面を指しているか、
     /// メッシュを差し替えて番号が変わったかのどちらか（SPEC §11.1）。
     pub fn face_of(&self, face: FaceRef, electrode: &Electrode) -> Result<u32> {
-        let index = self.by_element.get_or_init(|| {
-            let mut map = BTreeMap::new();
-            for (i, f) in self.surface.faces().iter().enumerate() {
-                let id = self.mesh.solid(f.element as usize).id;
-                map.insert((id, f.local_face), i as u32);
-            }
-            map
-        });
-        index
+        self.index()
+            .by_element(self.mesh, self.surface)
             .get(&(face.element_id, face.local_face))
             .copied()
             .ok_or_else(|| {
@@ -827,10 +882,14 @@ impl<'a> FaceLookup<'a> {
                     ),
                 )
                 .with_hint(
-                    "3D ビューで選び直してください。メッシュを差し替えた場合は、\
-                     手で足した面・外した面の指定が古くなっている可能性があります",
+                    "3D ビューで選び直してください。メッシュを差し替えた場合は、                     手で足した面・外した面の指定が古くなっている可能性があります",
                 )
             })
+    }
+
+    /// メッシュ。
+    pub fn mesh(&self) -> &'a Mesh {
+        self.mesh
     }
 
     /// 外表面。
@@ -840,11 +899,7 @@ impl<'a> FaceLookup<'a> {
 
     /// パッチ選択の索引（初回だけ作る）。
     pub fn picker(&self) -> &SurfacePicker {
-        if let Some(p) = self.picker.get() {
-            return p;
-        }
-        let built = SurfacePicker::build(self.mesh, self.surface);
-        self.picker.get_or_init(|| built)
+        self.index().picker(self.mesh, self.surface)
     }
 
     /// 面の種類と節点（面積分に渡す形）。

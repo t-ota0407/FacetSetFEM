@@ -138,6 +138,26 @@ def test_summary_records_the_conditions_that_were_solved(session, tmp_path):
     assert [e.name for e in solved.electrodes] == ["E1", "E2"]
 
 
+def test_the_whole_view_after_solving_does_not_build_the_volume_grid(session):
+    """「全体」表示に結果を貼るのに、体積メッシュ（`grid()`）は組み立てない。
+
+    要るのは配列だけで、大規模モデルでは体積メッシュの組み立てのほうが重い
+    （以前は配列を読むためだけに組み立てていた）。
+    """
+    import numpy as np
+
+    result = session.solve()
+    poly = session.display_surface("|J| [A/m2]")
+    assert session._grid is None
+    owners = poly.cell_data["__owner"]
+    assert np.array_equal(poly.cell_data["|J| [A/m2]"], result.j_magnitude[owners])
+    assert session.field_range("|J| [A/m2]") == (
+        float(result.j_magnitude.min()),
+        float(result.j_magnitude.max()),
+    )
+    assert session._grid is None
+
+
 def test_region_and_electrode_geometry_for_display(session):
     # 領域ハイライト
     region = session.region_grid(3)
@@ -231,6 +251,44 @@ def test_electrode_page_shows_area_and_current_density(window):
     assert "24 面" in text
     assert "300.0 mm²" in text
     assert "6.667 A/m²" in text
+
+
+def test_opening_a_mesh_with_the_unit_dialog_reads_the_file_once(main_window, sample_bdf, monkeypatch):
+    """単位を選ばせる経路でも、ファイルは 1 回しかパースしない。
+
+    以前は寸法を見せるための仮読み込みと、選んだ単位での読み直しで 2 回読んでいた
+    （大きなモデルでは読み込みがいちばん重い）。
+    """
+    from PySide6.QtWidgets import QDialog
+
+    import gfem.gui.main_window as main_window_module
+    import gfem.gui.state as state_module
+
+    reads: list[str] = []
+    real_read = gfem.read_nastran
+
+    def counting_read(path, length_unit=None):
+        reads.append(length_unit)
+        return real_read(path, length_unit=length_unit)
+
+    class AcceptMillimetre:
+        DialogCode = QDialog.DialogCode
+
+        def __init__(self, extent, parent=None):
+            self.extent = extent
+            self.length_unit = "mm"
+
+        def exec(self):
+            return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(main_window_module, "read_nastran", counting_read)
+    monkeypatch.setattr(state_module, "read_nastran", counting_read)
+    monkeypatch.setattr(main_window_module, "UnitSelector", AcceptMillimetre)
+
+    main_window.open_mesh_asking_unit(sample_bdf)
+    assert reads == ["m"]
+    assert main_window.session.mesh.length_unit == "mm"
+    assert "60 mm x 40 mm x 20 mm" in main_window.session.mesh_summary()
 
 
 def test_renaming_an_electrode_to_an_existing_name_is_refused(window, monkeypatch):

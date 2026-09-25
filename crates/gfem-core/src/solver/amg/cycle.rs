@@ -28,8 +28,12 @@
 //! # メモリ
 //!
 //! レベルごとに作業ベクトルを 4 本（x, rhs, tmp, tmp2）持つ。細かいレベルが
-//! 支配的なので、おおよそ節点数 × 4 本ぶん。最細レベルの行列は CG が持つものと
-//! 同じ内容を階層側でもう 1 つ持つ（改善の余地。SPEC §4.5）。
+//! 支配的なので、おおよそ節点数 × 4 本ぶん。
+//!
+//! **最細レベルの行列は載せない。** CG がすでにバックエンドへ載せているものを
+//! [`apply`](DeviceHierarchy::apply) で受け取って使う。以前は同じ行列を階層側でも
+//! もう 1 つ持ち、VRAM へ 2 回転送していた（1000 万節点で約 1.8 GB。SPEC §4.5）。
+//! 同じ行列なので、結果はビット単位で変わらない。
 
 use crate::error::Result;
 use crate::solver::amg::Hierarchy;
@@ -40,7 +44,8 @@ const COARSE_FALLBACK_SWEEPS: usize = 20;
 
 /// バックエンドに載せた 1 レベル。
 struct DeviceLevel<'h, B: LinearBackend> {
-    a: B::Matrix<'h>,
+    /// このレベルの行列。最細レベルは CG が載せたものを借りるので持たない（`None`）
+    a: Option<B::Matrix<'h>>,
     p: Option<B::Matrix<'h>>,
     r: Option<B::Matrix<'h>>,
     inv_diag: B::Vector,
@@ -59,7 +64,7 @@ struct LevelWork<B: LinearBackend> {
 
 /// バックエンドに載せた階層。
 pub struct DeviceHierarchy<'h, B: LinearBackend> {
-    host: &'h Hierarchy,
+    host: &'h Hierarchy<'h>,
     levels: Vec<DeviceLevel<'h, B>>,
     work: Vec<LevelWork<B>>,
     /// 最粗レベルをホストで解くための受け皿
@@ -68,14 +73,18 @@ pub struct DeviceHierarchy<'h, B: LinearBackend> {
 }
 
 impl<'h, B: LinearBackend> DeviceHierarchy<'h, B> {
-    /// 階層をバックエンドへ載せる（GPU なら VRAM へ転送する）。
-    pub fn new(backend: &B, host: &'h Hierarchy) -> Result<Self> {
+    /// 階層をバックエンドへ載せる（GPU なら VRAM へ転送する）。最細レベルの行列は載せない。
+    pub fn new(backend: &B, host: &'h Hierarchy<'h>) -> Result<Self> {
         let mut levels = Vec::with_capacity(host.levels.len());
         let mut work = Vec::with_capacity(host.levels.len());
-        for level in &host.levels {
+        for (index, level) in host.levels.iter().enumerate() {
             let n = level.a.n_rows();
             levels.push(DeviceLevel {
-                a: backend.upload_matrix(&level.a)?,
+                a: if index == 0 {
+                    None
+                } else {
+                    Some(backend.upload_matrix(&level.a)?)
+                },
                 p: match &level.transfer {
                     Some(t) => Some(backend.upload_matrix(&t.p)?),
                     None => None,
@@ -105,30 +114,48 @@ impl<'h, B: LinearBackend> DeviceHierarchy<'h, B> {
     }
 
     /// もとになった階層。
-    pub fn host(&self) -> &'h Hierarchy {
+    pub fn host(&self) -> &'h Hierarchy<'h> {
         self.host
     }
 
     /// `z = M⁻¹ r`。V サイクルを 1 回まわす。
-    pub fn apply(&mut self, backend: &B, r: &B::Vector, z: &mut B::Vector) -> Result<()> {
+    ///
+    /// `fine` は最細レベルの行列（階層を作った行列）をバックエンドに載せたもの。
+    /// CG が持っているものをそのまま渡す。
+    pub fn apply(
+        &mut self,
+        backend: &B,
+        fine: &B::Matrix<'_>,
+        r: &B::Vector,
+        z: &mut B::Vector,
+    ) -> Result<()> {
         backend.copy_from(r, &mut self.work[0].rhs)?;
-        self.v_cycle(backend)?;
+        self.v_cycle(backend, fine)?;
         backend.copy_from(&self.work[0].x, z)
     }
 
-    fn v_cycle(&mut self, backend: &B) -> Result<()> {
+    fn v_cycle(&mut self, backend: &B, fine: &B::Matrix<'_>) -> Result<()> {
         let last = self.levels.len() - 1;
         let (presmooth, postsmooth) = (self.host.presmooth, self.host.postsmooth);
         let levels = &self.levels;
         let work = &mut self.work;
 
+        // 各レベルの行列。最細レベルだけは借りたもの（寿命の違う型なので呼び分ける）
+        macro_rules! with_matrix {
+            ($level:expr, |$a:ident| $body:expr) => {
+                match &$level.a {
+                    Some($a) => $body,
+                    None => {
+                        let $a = fine;
+                        $body
+                    }
+                }
+            };
+        }
+
         // --- 下り: 平滑化して残差を粗いレベルへ渡す -------------------------
-        for l in 0..last {
-            smooth_from_zero(backend, &levels[l], &mut work[l], presmooth)?;
-            residual(backend, &levels[l], &mut work[l])?;
-            let (fine, coarse) = work.split_at_mut(l + 1);
-            let r = levels[l].r.as_ref().expect("最粗レベル以外には R がある");
-            backend.spmv(r, &fine[l].tmp, &mut coarse[0].rhs)?;
+        for (l, level) in levels.iter().enumerate().take(last) {
+            with_matrix!(level, |a| descend(backend, a, level, work, l, presmooth))?;
         }
 
         // --- 最粗レベル -----------------------------------------------------
@@ -138,30 +165,60 @@ impl<'h, B: LinearBackend> DeviceHierarchy<'h, B> {
             backend.upload_into(&self.coarse_x, &mut work[last].x)?;
         } else {
             // 分解できなかった場合の保険。反復回数は増えるが答えは変わらない
-            smooth_from_zero(
+            with_matrix!(levels[last], |a| smooth_from_zero(
                 backend,
+                a,
                 &levels[last],
                 &mut work[last],
                 COARSE_FALLBACK_SWEEPS,
-            )?;
+            ))?;
         }
 
         // --- 上り: 補正を補間して足し、もう一度平滑化 -----------------------
-        for l in (0..last).rev() {
-            let (fine, coarse) = work.split_at_mut(l + 1);
-            let p = levels[l].p.as_ref().expect("最粗レベル以外には P がある");
-            backend.spmv(p, &coarse[0].x, &mut fine[l].tmp)?;
-            let w = &mut fine[l];
-            backend.axpy(1.0, &w.tmp, &mut w.x)?;
-            smooth(backend, &levels[l], w, postsmooth)?;
+        for (l, level) in levels.iter().enumerate().take(last).rev() {
+            with_matrix!(level, |a| ascend(backend, a, level, work, l, postsmooth))?;
         }
         Ok(())
     }
 }
 
+/// 下り 1 レベル: 平滑化して残差を 1 つ粗いレベルの右辺へ制限する。
+fn descend<B: LinearBackend>(
+    backend: &B,
+    a: &B::Matrix<'_>,
+    level: &DeviceLevel<'_, B>,
+    work: &mut [LevelWork<B>],
+    l: usize,
+    sweeps: usize,
+) -> Result<()> {
+    smooth_from_zero(backend, a, level, &mut work[l], sweeps)?;
+    residual(backend, a, &mut work[l])?;
+    let (fine, coarse) = work.split_at_mut(l + 1);
+    let r = level.r.as_ref().expect("最粗レベル以外には R がある");
+    backend.spmv(r, &fine[l].tmp, &mut coarse[0].rhs)
+}
+
+/// 上り 1 レベル: 1 つ粗いレベルの補正を補間して足し、もう一度平滑化する。
+fn ascend<B: LinearBackend>(
+    backend: &B,
+    a: &B::Matrix<'_>,
+    level: &DeviceLevel<'_, B>,
+    work: &mut [LevelWork<B>],
+    l: usize,
+    sweeps: usize,
+) -> Result<()> {
+    let (fine, coarse) = work.split_at_mut(l + 1);
+    let p = level.p.as_ref().expect("最粗レベル以外には P がある");
+    backend.spmv(p, &coarse[0].x, &mut fine[l].tmp)?;
+    let w = &mut fine[l];
+    backend.axpy(1.0, &w.tmp, &mut w.x)?;
+    smooth(backend, a, level, w, sweeps)
+}
+
 /// `x ← 0` から始める平滑化。1 回目は `A x = 0` なので SpMV を 1 回省ける。
 fn smooth_from_zero<B: LinearBackend>(
     backend: &B,
+    a: &B::Matrix<'_>,
     level: &DeviceLevel<'_, B>,
     w: &mut LevelWork<B>,
     sweeps: usize,
@@ -173,7 +230,7 @@ fn smooth_from_zero<B: LinearBackend>(
     backend.multiply(&level.inv_diag, &w.rhs, &mut w.x)?;
     backend.scale(level.omega, &mut w.x)?;
     for _ in 1..sweeps {
-        sweep(backend, level, w)?;
+        sweep(backend, a, level, w)?;
     }
     Ok(())
 }
@@ -181,12 +238,13 @@ fn smooth_from_zero<B: LinearBackend>(
 /// 既に値の入っている `x` からの平滑化。
 fn smooth<B: LinearBackend>(
     backend: &B,
+    a: &B::Matrix<'_>,
     level: &DeviceLevel<'_, B>,
     w: &mut LevelWork<B>,
     sweeps: usize,
 ) -> Result<()> {
     for _ in 0..sweeps {
-        sweep(backend, level, w)?;
+        sweep(backend, a, level, w)?;
     }
     Ok(())
 }
@@ -194,20 +252,17 @@ fn smooth<B: LinearBackend>(
 /// 減衰 Jacobi を 1 回: `x += ω D⁻¹ (rhs − A x)`。
 fn sweep<B: LinearBackend>(
     backend: &B,
+    a: &B::Matrix<'_>,
     level: &DeviceLevel<'_, B>,
     w: &mut LevelWork<B>,
 ) -> Result<()> {
-    residual(backend, level, w)?;
+    residual(backend, a, w)?;
     backend.multiply(&level.inv_diag, &w.tmp, &mut w.tmp2)?;
     backend.axpy(level.omega, &w.tmp2, &mut w.x)
 }
 
 /// `tmp ← rhs − A x`。
-fn residual<B: LinearBackend>(
-    backend: &B,
-    level: &DeviceLevel<'_, B>,
-    w: &mut LevelWork<B>,
-) -> Result<()> {
-    backend.spmv(&level.a, &w.x, &mut w.tmp)?;
+fn residual<B: LinearBackend>(backend: &B, a: &B::Matrix<'_>, w: &mut LevelWork<B>) -> Result<()> {
+    backend.spmv(a, &w.x, &mut w.tmp)?;
     backend.xpby(&w.rhs, -1.0, &mut w.tmp)
 }

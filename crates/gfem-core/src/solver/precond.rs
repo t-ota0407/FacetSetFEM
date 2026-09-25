@@ -24,11 +24,20 @@ pub enum DevicePreconditioner<'h, B: LinearBackend> {
 
 impl<'h, B: LinearBackend> DevicePreconditioner<'h, B> {
     /// `z = M⁻¹ r`。
-    pub fn apply(&mut self, backend: &B, r: &B::Vector, z: &mut B::Vector) -> Result<()> {
+    ///
+    /// `a` は解いている行列をバックエンドに載せたもの（CG が持っているもの）。
+    /// AMG は最細レベルの行列を自分では持たず、これを使う（SPEC §4.5）。
+    pub fn apply(
+        &mut self,
+        backend: &B,
+        a: &B::Matrix<'_>,
+        r: &B::Vector,
+        z: &mut B::Vector,
+    ) -> Result<()> {
         match self {
             DevicePreconditioner::Identity => backend.copy_from(r, z),
             DevicePreconditioner::Jacobi(inv_diag) => backend.multiply(inv_diag, r, z),
-            DevicePreconditioner::Amg(h) => h.apply(backend, r, z),
+            DevicePreconditioner::Amg(h) => h.apply(backend, a, r, z),
         }
     }
 
@@ -55,7 +64,10 @@ impl<'h, B: LinearBackend> DevicePreconditioner<'h, B> {
 /// バックエンドを一切使わないので、**CPU 逐次・CPU 並列・GPU のどれで解いても
 /// まったく同じ階層になる**（CLAUDE.md 設計原則 1）。`preconditioner: amg`
 /// 以外では `None` を返す。
-pub fn build_hierarchy(matrix: &CsrMatrix, options: &SolverOptions) -> Result<Option<Hierarchy>> {
+pub fn build_hierarchy<'a>(
+    matrix: &'a CsrMatrix,
+    options: &SolverOptions,
+) -> Result<Option<Hierarchy<'a>>> {
     match options.preconditioner {
         Preconditioner::Amg => Ok(Some(amg::setup(matrix, &options.amg)?)),
         _ => Ok(None),
@@ -67,7 +79,7 @@ pub fn build<'h, B: LinearBackend>(
     backend: &B,
     matrix: &CsrMatrix,
     options: &SolverOptions,
-    hierarchy: Option<&'h Hierarchy>,
+    hierarchy: Option<&'h Hierarchy<'h>>,
 ) -> Result<DevicePreconditioner<'h, B>> {
     match options.preconditioner {
         Preconditioner::None => Ok(DevicePreconditioner::Identity),

@@ -85,8 +85,11 @@ pub fn region_stats(mesh: &Mesh, case: &Case, fields: &FieldResult) -> Result<Ve
         by_pid.entry(e.pid).or_default().push(e.index);
     }
 
-    Ok(by_pid
-        .into_iter()
+    // 領域ごとに独立なので並列に集計する（並びは PID の昇順のまま集まる）
+    use rayon::prelude::*;
+    let regions: Vec<(PropId, Vec<usize>)> = by_pid.into_iter().collect();
+    Ok(regions
+        .into_par_iter()
         .map(|(pid, elements)| RegionStats {
             pid,
             name: case.region_names.get(&pid).cloned().unwrap_or_default(),
@@ -196,9 +199,11 @@ pub fn weighted_quantiles(values: &[f64], volumes: &[f64], quantiles: &[f64]) ->
     if values.is_empty() {
         return vec![f64::NAN; quantiles.len()];
     }
-    // 安定ソートなので、同じ値のときは元の要素順（＝通し番号順）が保たれる
+    // 安定ソートなので、同じ値のときは元の要素順（＝通し番号順）が保たれる。
+    // rayon の par_sort_by も安定ソートなので、並列にしても並び方は逐次と同じ
+    use rayon::prelude::*;
     let mut order: Vec<u32> = (0..values.len() as u32).collect();
-    order.sort_by(|&a, &b| values[a as usize].total_cmp(&values[b as usize]));
+    order.par_sort_by(|&a, &b| values[a as usize].total_cmp(&values[b as usize]));
 
     let total = reduce::sum(volumes);
     let mut out = Vec::with_capacity(quantiles.len());

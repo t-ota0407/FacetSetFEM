@@ -85,69 +85,119 @@ pub fn compute_fields(
     conductivity: &BTreeMap<PropId, Conductivity>,
     phi: &[f64],
 ) -> Result<FieldResult> {
+    use rayon::prelude::*;
     let n = mesh.n_solid_elements();
     let mut out = FieldResult {
         n_elements: n,
-        electric_field: Vec::with_capacity(3 * n),
-        current_density: Vec::with_capacity(3 * n),
-        e_magnitude: Vec::with_capacity(n),
-        j_magnitude: Vec::with_capacity(n),
-        power_density: Vec::with_capacity(n),
-        volume: Vec::with_capacity(n),
+        electric_field: vec![0.0; 3 * n],
+        current_density: vec![0.0; 3 * n],
+        e_magnitude: vec![0.0; n],
+        j_magnitude: vec![0.0; n],
+        power_density: vec![0.0; n],
+        volume: vec![0.0; n],
     };
 
-    for e in mesh.iter_solids() {
-        let Some(sigma) = conductivity.get(&e.pid) else {
-            return Err(GfemError::new(
-                crate::error::ErrorKind::Case,
-                format!("PID={} に導電率が設定されていません", e.pid),
-            ));
-        };
-        let n = e.conn.len();
-        let mut points = [[0.0f64; 3]; MAX_ELEMENT_NODES];
-        mesh.gather_coords(e.conn, &mut points[..n]);
-        let mut nodal = [0.0f64; MAX_ELEMENT_NODES];
-        for (k, &node) in e.conn.iter().enumerate() {
-            nodal[k] = phi[node as usize];
-        }
-
-        // Tet4 は E が要素内で一定。Hex8 / Penta6 は要素内で変化するので、
-        // 要素の代表値としては**中心での値**を採る（SPEC §5.1）
-        let (field, volume) = match e.kind {
-            ElementKind::Tet4 => {
-                let p = mesh.tet4_coords(e.conn);
-                let shape = tet4::tet4_shape(&p);
-                let nodal = [nodal[0], nodal[1], nodal[2], nodal[3]];
-                (tet4::tet4_electric_field(&shape, &nodal), shape.volume)
+    // 要素ごとに独立なので、出力を塊ごとに切り分けて並列に書く。
+    // 各要素の値は逐次と同じ計算なので、結果はビット単位で変わらない
+    let results: Vec<Result<()>> = (
+        out.electric_field.par_chunks_mut(3 * FIELD_CHUNK),
+        out.current_density.par_chunks_mut(3 * FIELD_CHUNK),
+        out.e_magnitude.par_chunks_mut(FIELD_CHUNK),
+        out.j_magnitude.par_chunks_mut(FIELD_CHUNK),
+        out.power_density.par_chunks_mut(FIELD_CHUNK),
+        out.volume.par_chunks_mut(FIELD_CHUNK),
+    )
+        .into_par_iter()
+        .enumerate()
+        .map(|(chunk, (field, current, e_mag, j_mag, power, volume))| {
+            let start = chunk * FIELD_CHUNK;
+            for k in 0..volume.len() {
+                let f = element_field(mesh, conductivity, phi, &mesh.solid(start + k))?;
+                field[3 * k..3 * k + 3].copy_from_slice(&f.field);
+                current[3 * k..3 * k + 3].copy_from_slice(&f.current);
+                e_mag[k] = f.e_magnitude;
+                j_mag[k] = f.j_magnitude;
+                power[k] = f.power_density;
+                volume[k] = f.volume;
             }
-            ElementKind::Hex8 => (
-                shape::electric_field::<Hex8>(&points[..n], &nodal[..n], Hex8::CENTRE),
-                shape::volume::<Hex8>(&points[..n])?,
-            ),
-            ElementKind::Penta6 => (
-                shape::electric_field::<Penta6>(&points[..n], &nodal[..n], Penta6::CENTRE),
-                shape::volume::<Penta6>(&points[..n])?,
-            ),
-            other => {
-                return Err(GfemError::unsupported(format!(
-                    "{} はソリッド要素として扱えません",
-                    other.card_name()
-                )));
-            }
-        };
-        let j = sigma.apply(field);
-        let e_mag = norm(field);
-        let j_mag = norm(j);
-        out.electric_field.extend_from_slice(&field);
-        out.current_density.extend_from_slice(&j);
-        out.e_magnitude.push(e_mag);
-        out.j_magnitude.push(j_mag);
-        // σ|E|² = E·(σE) = E·J。異方性でも成り立つ形にしておく
-        out.power_density
-            .push(field[0] * j[0] + field[1] * j[1] + field[2] * j[2]);
-        out.volume.push(volume);
+            Ok(())
+        })
+        .collect();
+    // 塊は通し番号の順に並んでいて、塊の中では最初の不正な要素で止まるので、
+    // 逐次と同じく「通し番号がいちばん小さい要素のエラー」を返す
+    for r in results {
+        r?;
     }
     Ok(out)
+}
+
+/// [`compute_fields`] を並列に回すときの、1 タスクあたりの要素数。
+const FIELD_CHUNK: usize = 4096;
+
+/// 要素 1 個ぶんの導出量。
+struct ElementField {
+    field: [f64; 3],
+    current: [f64; 3],
+    e_magnitude: f64,
+    j_magnitude: f64,
+    power_density: f64,
+    volume: f64,
+}
+
+fn element_field(
+    mesh: &Mesh,
+    conductivity: &BTreeMap<PropId, Conductivity>,
+    phi: &[f64],
+    e: &crate::mesh::ElementRef<'_>,
+) -> Result<ElementField> {
+    let Some(sigma) = conductivity.get(&e.pid) else {
+        return Err(GfemError::new(
+            crate::error::ErrorKind::Case,
+            format!("PID={} に導電率が設定されていません", e.pid),
+        ));
+    };
+    let n = e.conn.len();
+    let mut points = [[0.0f64; 3]; MAX_ELEMENT_NODES];
+    mesh.gather_coords(e.conn, &mut points[..n]);
+    let mut nodal = [0.0f64; MAX_ELEMENT_NODES];
+    for (k, &node) in e.conn.iter().enumerate() {
+        nodal[k] = phi[node as usize];
+    }
+
+    // Tet4 は E が要素内で一定。Hex8 / Penta6 は要素内で変化するので、
+    // 要素の代表値としては**中心での値**を採る（SPEC §5.1）
+    let (field, volume) = match e.kind {
+        ElementKind::Tet4 => {
+            let p = mesh.tet4_coords(e.conn);
+            let shape = tet4::tet4_shape(&p);
+            let nodal = [nodal[0], nodal[1], nodal[2], nodal[3]];
+            (tet4::tet4_electric_field(&shape, &nodal), shape.volume)
+        }
+        ElementKind::Hex8 => (
+            shape::electric_field::<Hex8>(&points[..n], &nodal[..n], Hex8::CENTRE),
+            shape::volume::<Hex8>(&points[..n])?,
+        ),
+        ElementKind::Penta6 => (
+            shape::electric_field::<Penta6>(&points[..n], &nodal[..n], Penta6::CENTRE),
+            shape::volume::<Penta6>(&points[..n])?,
+        ),
+        other => {
+            return Err(GfemError::unsupported(format!(
+                "{} はソリッド要素として扱えません",
+                other.card_name()
+            )));
+        }
+    };
+    let current = sigma.apply(field);
+    Ok(ElementField {
+        field,
+        current,
+        e_magnitude: norm(field),
+        j_magnitude: norm(current),
+        // σ|E|² = E·(σE) = E·J。異方性でも成り立つ形にしておく
+        power_density: field[0] * current[0] + field[1] * current[1] + field[2] * current[2],
+        volume,
+    })
 }
 
 /// 要素値を体積重み平均で節点値に外挿する（SPEC §5.1）。

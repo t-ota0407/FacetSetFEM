@@ -173,7 +173,7 @@ pub fn solve<B: LinearBackend>(
         });
     }
 
-    precond.apply(backend, &r, &mut z)?;
+    precond.apply(backend, &a, &r, &mut z)?;
     backend.project_mean_zero(&mut z)?;
     backend.copy_from(&z, &mut p)?;
     let mut rz = backend.dot(&r, &z)?;
@@ -232,7 +232,7 @@ pub fn solve<B: LinearBackend>(
             break;
         }
 
-        precond.apply(backend, &r, &mut z)?;
+        precond.apply(backend, &a, &r, &mut z)?;
         backend.project_mean_zero(&mut z)?;
         let rz_next = backend.dot(&r, &z)?;
         let beta = rz_next / rz;

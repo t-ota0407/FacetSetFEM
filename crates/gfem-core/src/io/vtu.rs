@@ -459,8 +459,12 @@ fn write_block<W: Write>(out: &mut Out<W>, bytes: &[u8], opts: &VtuOptions) -> s
     let n_blocks = bytes.len().div_ceil(BLOCK_SIZE);
     // 最終ブロックがちょうど BLOCK_SIZE のときは 0 を書く（VTK の規約）
     let last = bytes.len() % BLOCK_SIZE;
+    // ブロックは互いに独立に圧縮され、並びは元の順のまま集めるので、
+    // 並列にしても書き出すバイト列は逐次と 1 バイトも変わらない。
+    // 28 万節点・162 万四面体の結果で 4.4 秒かかっていた大半がここだった
+    use rayon::prelude::*;
     let compressed: Vec<Vec<u8>> = bytes
-        .chunks(BLOCK_SIZE)
+        .par_chunks(BLOCK_SIZE)
         .map(|c| zlib_compress(c, opts.level))
         .collect();
     out.u64(n_blocks as u64)?;
@@ -574,6 +578,40 @@ mod tests {
             assert!(!head.contains("offset=\"                    \""), "{head}");
             std::fs::remove_file(&p).ok();
         }
+    }
+
+    #[test]
+    fn parallel_compression_writes_the_same_bytes_as_serial() {
+        // ブロックごとに並列で圧縮しても、書き出すバイト列は逐次と同じ（出力の再現性）
+        let data: Vec<u8> = (0..BLOCK_SIZE * 5 + 123)
+            .map(|i| (i * 31 % 251) as u8)
+            .collect();
+        let mut out = Out::new(Vec::new());
+        write_block(
+            &mut out,
+            &data,
+            &VtuOptions {
+                compress: true,
+                level: 6,
+            },
+        )
+        .unwrap();
+
+        let blocks: Vec<Vec<u8>> = data
+            .chunks(BLOCK_SIZE)
+            .map(|c| zlib_compress(c, 6))
+            .collect();
+        let mut expected = Vec::new();
+        for header in [blocks.len(), BLOCK_SIZE, data.len() % BLOCK_SIZE] {
+            expected.extend_from_slice(&(header as u64).to_ne_bytes());
+        }
+        for b in &blocks {
+            expected.extend_from_slice(&(b.len() as u64).to_ne_bytes());
+        }
+        for b in &blocks {
+            expected.extend_from_slice(b);
+        }
+        assert_eq!(out.inner, expected);
     }
 
     #[test]

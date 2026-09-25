@@ -204,7 +204,7 @@ def test_falling_back_to_the_cpu_is_never_silent(sample_bdf):
 
 @requires_gpu
 def test_amg_is_checked_against_the_vram_it_really_needs():
-    """AMG は階層（全レベルの A・P・R）も VRAM に置くので、見積りに入れる（SPEC §4.5）。
+    """AMG は階層（粗いレベルの A と全レベルの P・R）も VRAM に置くので、見積りに入れる（SPEC §4.5）。
 
     以前は前処理を見ずに見積もっていたので、Jacobi なら載る規模で AMG を選ぶと、
     見積りを通ったあと解いている途中で VRAM が尽きて止まった。
@@ -213,7 +213,7 @@ def test_amg_is_checked_against_the_vram_it_really_needs():
     free = max(d["free_memory"] for d in gfem.cuda_devices() if d["usable"])
     csr_per_node = 8 + 15 * 12  # 行ポインタ + 節点あたり 15 非ゼロ（gfem-cuda の見積りと同じ）
     jacobi_per_node = csr_per_node + 7 * 8
-    amg_per_node = jacobi_per_node + 2.4 * csr_per_node
+    amg_per_node = jacobi_per_node + 1.4 * csr_per_node
     n = int(0.9 * free / ((jacobi_per_node + amg_per_node) / 2))
 
     assert gfem.cuda_check(n) is None

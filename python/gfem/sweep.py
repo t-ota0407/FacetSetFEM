@@ -183,14 +183,17 @@ def _summarise(solution: Any) -> dict[str, Any]:
     列名は ASCII で単位付き（SPEC §5.5 の CSV の取り決めに合わせる）。
     """
     conservation = solution.conservation
+    # 配列は取り出すたびに複製されるので 1 度だけ受け取り、numpy で集計する
+    # （Python の組み込み max は 1 要素ずつ回るので、大規模モデルで遅い）
+    potential = solution.potential
     return {
         "impedance_ohm": solution.impedance,
         "voltage_V": solution.voltage,
         "power_W": conservation["power_from_field"],
-        "j_max_A_per_m2": float(max(solution.j_magnitude)),
-        "e_max_V_per_m": float(max(solution.e_magnitude)),
-        "phi_min_V": float(min(solution.potential)),
-        "phi_max_V": float(max(solution.potential)),
+        "j_max_A_per_m2": float(solution.j_magnitude.max()),
+        "e_max_V_per_m": float(solution.e_magnitude.max()),
+        "phi_min_V": float(potential.min()),
+        "phi_max_V": float(potential.max()),
         "iterations": solution.iterations,
         "residual": solution.residual,
         "backend": solution.backend,

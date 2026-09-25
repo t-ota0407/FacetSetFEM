@@ -151,7 +151,12 @@ impl Surface {
 /// メッシュ生成側の破綻を示しており、そのまま解いても意味のある結果にならないため。
 pub fn extract_surface(mesh: &Mesh) -> Result<Surface> {
     // (面キー, 要素通し番号, 局所面番号)
-    let mut entries: Vec<(FaceKey, u32, u8)> = Vec::new();
+    let n_faces: usize = mesh
+        .solids
+        .iter()
+        .map(|b| b.len() * b.kind().faces().len())
+        .sum();
+    let mut entries: Vec<(FaceKey, u32, u8)> = Vec::with_capacity(n_faces);
     for e in mesh.iter_solids() {
         for (lf, face) in e.kind.faces().iter().enumerate() {
             let mut nodes = [0u32; 4];
@@ -161,7 +166,7 @@ pub fn extract_surface(mesh: &Mesh) -> Result<Surface> {
             entries.push((face_key(&nodes[..face.len()]), e.index as u32, lf as u8));
         }
     }
-    entries.sort_unstable();
+    sort_face_entries(&mut entries);
 
     let mut faces: Vec<SurfaceFace> = Vec::new();
     let mut keys: Vec<FaceKey> = Vec::new();
@@ -212,6 +217,17 @@ pub fn extract_surface(mesh: &Mesh) -> Result<Surface> {
     }
 
     Ok(Surface { faces, keys })
+}
+
+/// `(面キー, 要素（四面体）の通し番号, 局所面番号)` の列を並べる。
+///
+/// 並列に並べても結果は逐次と同じ（CLAUDE.md 設計原則 1）。要素番号と局所面番号の組は
+/// どの 2 つも異なるので、並べ終わった列は入力によって一意に決まり、不安定ソートでも
+/// 並び方がぶれない。外表面の抽出は大規模モデルの前処理でいちばん重い段階
+/// （1000 万節点で 2.4 億件）なので、ここを並列にする。
+fn sort_face_entries(entries: &mut [(FaceKey, u32, u8)]) {
+    use rayon::prelude::*;
+    entries.par_sort_unstable();
 }
 
 /// 隣接要素が無いことを表す番兵。
@@ -267,7 +283,7 @@ pub fn build_face_adjacency(tets: &TetView) -> Result<FaceAdjacency> {
             entries.push((face_key(&nodes), t as u32, lf as u8));
         }
     }
-    entries.sort_unstable();
+    sort_face_entries(&mut entries);
 
     let mut adjacency = FaceAdjacency {
         neighbours: vec![NO_NEIGHBOUR; n * 4],

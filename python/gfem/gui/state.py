@@ -137,6 +137,8 @@ class Session:
         #: `solution` を解いたときの解析条件の写し。実行サマリ（SPEC §5.5）に残すのは
         #: これで、いま編集中の `study` ではない（解いた後に編集されうるため）
         self.solved_study: Study | None = None
+        #: 表示量の配列（解ごとに 1 度だけ受け取る。`result_array`）
+        self._arrays: dict[str, np.ndarray] = {}
         self._grid: pv.UnstructuredGrid | None = None
         #: 表示用の外表面（SPEC §6.3）。メッシュを開き直すまで使い回す
         self._surface: pv.PolyData | None = None
@@ -203,11 +205,22 @@ class Session:
 
     # --- 読み込み -----------------------------------------------------------
 
-    def open_mesh(self, path: str | Path, length_unit: str) -> Study:
-        """メッシュを読み、既定のケースを組み立てる（SPEC §6.2 の手順 1）。"""
+    def open_mesh(self, path: str | Path, length_unit: str, mesh: Mesh | None = None) -> Study:
+        """メッシュを読み、既定のケースを組み立てる（SPEC §6.2 の手順 1）。
+
+        `mesh` を渡すと読み込みを省く。GUI は単位を選ばせる前に寸法を見せるため
+        m として 1 度読んでいるので、それを `Mesh.with_length_unit` で付け替えて渡す
+        （ファイルを 2 回パースしない）。
+        """
         self.clear_history()
         path = Path(path)
-        self.mesh = read_nastran(path, length_unit=length_unit)
+        if mesh is None:
+            mesh = read_nastran(path, length_unit=length_unit)
+        elif mesh.length_unit != length_unit:
+            raise GfemError(
+                f"[内部エラー] 渡されたメッシュの単位 {mesh.length_unit} が {length_unit} と違います"
+            )
+        self.mesh = mesh
         self._forget_results()
         self.study = Study(
             mesh_file=path,
@@ -368,6 +381,7 @@ class Session:
         """外（ワーカースレッド）で解いた結果を、解いたときの条件の写しと一緒に取り込む。"""
         self.solution = solution
         self.solved_study = study
+        self._arrays = {}
         self._grid = None  # 表示用データに結果を貼り直す
         self._surface = None
 
@@ -375,10 +389,28 @@ class Session:
         """結果と、結果から作った表示用データを捨てる（モデルを開き直したとき）。"""
         self.solution = None
         self.solved_study = None
+        self._arrays = {}
         self._grid = None
         self._surface = None
 
     # --- 表示用データ -------------------------------------------------------
+
+    def result_array(self, key: str) -> np.ndarray | None:
+        """表示量（`FIELD_ARRAYS` の鍵）の配列。解いていないか、表示量でなければ `None`。
+
+        `Solution` の配列は取り出すたびに丸ごと複製されて numpy に渡る（SPEC §6.3 の
+        zero-copy は未実装）ので、解ごとに 1 度だけ受け取って持っておく。
+        """
+        if self.solution is None or key not in FIELD_ARRAYS:
+            return None
+        if key not in self._arrays:
+            self._arrays[key] = FIELD_ARRAYS[key](self.solution)
+        return self._arrays[key]
+
+    def model_box(self) -> tuple[np.ndarray, np.ndarray]:
+        """モデルのバウンディングボックス `(最小, 最大)` [m]。"""
+        lo, hi = self._require_mesh().bounding_box()
+        return np.asarray(lo), np.asarray(hi)
 
     def grid(self) -> pv.UnstructuredGrid:
         """表示用の `UnstructuredGrid`（結果があれば貼り付け済み）。
@@ -397,14 +429,12 @@ class Session:
 
         result = self.solution
         if result is not None:
-            grid.point_data["phi [V]"] = result.potential
-            grid.point_data["|E| (nodal) [V/m]"] = result.nodal_average("e_magnitude")
-            grid.point_data["|J| (nodal) [A/m2]"] = result.nodal_average("j_magnitude")
+            for key in FIELD_ARRAYS:
+                spec = field_by_key(key)
+                target = grid.cell_data if spec.is_element_value else grid.point_data
+                target[key] = self.result_array(key)
             grid.cell_data["E [V/m]"] = result.electric_field
             grid.cell_data["J [A/m2]"] = result.current_density
-            grid.cell_data["|E| [V/m]"] = result.e_magnitude
-            grid.cell_data["|J| [A/m2]"] = result.j_magnitude
-            grid.cell_data["power density [W/m3]"] = result.power_density
         self._grid = grid
         return grid
 
@@ -607,13 +637,17 @@ class Session:
         """
         poly = self.surface_polydata()
         spec = field_by_key(field) if field else None
-        if spec is None or self.solution is None or field in poly.array_names:
+        if spec is None or field in poly.array_names:
             return poly
-        grid = self.grid()
-        if spec.is_element_value and field in grid.cell_data:
-            poly.cell_data[field] = grid.cell_data[field][poly.cell_data["__owner"]]
-        elif field in grid.point_data:
-            poly.point_data[field] = grid.point_data[field]
+        # 体積メッシュ（`grid()`）は組み立てない。外表面に貼るのに要るのは
+        # 配列だけで、大規模モデルでは体積メッシュの組み立てのほうが重い
+        values = self.result_array(field)
+        if values is None:
+            return poly
+        if spec.is_element_value:
+            poly.cell_data[field] = values[poly.cell_data["__owner"]]
+        else:
+            poly.point_data[field] = values
         return poly
 
     def field_range(self, field: str | None) -> tuple[float, float] | None:
@@ -623,9 +657,9 @@ class Session:
         違う値を指す**ことになる。全体の値域に固定すれば、全体表示と断面と
         等値面で色の意味が揃う。
         """
-        if self.solution is None or field not in FIELD_ARRAYS:
+        values = self.result_array(field)
+        if values is None:
             return None
-        values = FIELD_ARRAYS[field](self.solution)
         return (float(np.min(values)), float(np.max(values)))
 
     def region_polydata(self, pid: int) -> pv.PolyData:
@@ -708,9 +742,9 @@ class Session:
         if len(centres) > count:
             step = max(1, len(centres) // count)
             centres = centres[::step][:count]
-        grid = self.grid()
-        model_centre = np.asarray(grid.center)
-        diagonal = float(np.linalg.norm(np.array(grid.bounds[1::2]) - np.array(grid.bounds[0::2])))
+        lo, hi = self.model_box()
+        model_centre = 0.5 * (lo + hi)
+        diagonal = float(np.linalg.norm(hi - lo))
         direction = model_centre - centres
         norms = np.linalg.norm(direction, axis=1, keepdims=True)
         norms[norms == 0.0] = 1.0
@@ -725,8 +759,8 @@ class Session:
                     seeds = self.electrode_seed_points(electrode.name, count)
                     if len(seeds):
                         return seeds
-        grid = self.grid()
-        return np.asarray([grid.center])
+        lo, hi = self.model_box()
+        return np.asarray([0.5 * (lo + hi)])
 
     def write_region_stats_csv(self, path) -> None:
         self._require_solution().write_region_stats_csv(path)

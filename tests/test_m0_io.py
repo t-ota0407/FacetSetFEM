@@ -180,3 +180,21 @@ def test_module_surface(sample_bdf):
     assert mesh.length_unit == "mm"
     assert mesh.source.endswith("slab_3layer.bdf")
     assert "nodes=936" in repr(mesh)
+
+
+def test_a_metre_read_can_take_on_the_chosen_unit(sample_bdf):
+    """GUI は寸法を見せるため m として読み、選ばれた単位へ付け替える（SPEC §3.2）。
+
+    ファイルを 2 回パースしない代わりに、最初からその単位で読んだのと
+    ビット単位で同じ座標にならなければならない。
+    """
+    as_metre = gfem.read_nastran(sample_bdf, length_unit="m")
+    for unit in ["mm", "cm", "inch", "m"]:
+        relabelled = as_metre.with_length_unit(unit)
+        direct = gfem.read_nastran(sample_bdf, length_unit=unit)
+        assert relabelled.length_unit == unit
+        assert np.array_equal(relabelled.points(), direct.points())
+        assert relabelled.report.sha256 == direct.report.sha256
+    # m 以外で読んだものからは付け替えない（割り戻しで丸めが入る）
+    with pytest.raises(gfem.GfemError):
+        gfem.read_nastran(sample_bdf, length_unit="mm").with_length_unit("m")

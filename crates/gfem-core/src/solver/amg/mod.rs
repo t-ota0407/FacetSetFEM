@@ -46,6 +46,7 @@ pub mod spmm;
 use crate::assemble::csr::CsrMatrix;
 use crate::error::Result;
 use coarse::CoarseSolver;
+use std::borrow::Cow;
 
 /// AMG の設定（SPEC §4.5）。
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -100,9 +101,10 @@ pub struct Transfer {
 
 /// 階層の 1 レベル。
 #[derive(Debug, Clone)]
-pub struct Level {
-    /// このレベルの行列
-    pub a: CsrMatrix,
+pub struct Level<'a> {
+    /// このレベルの行列。最細レベルは [`setup`] に渡された行列を借りる（複製しない。
+    /// 1000 万節点で約 1.9 GB）。粗いレベルは階層が自分で持つ
+    pub a: Cow<'a, CsrMatrix>,
     /// 対角の逆数（平滑化に使う）
     pub inv_diag: Vec<f64>,
     /// 減衰 Jacobi の緩和係数 ω = 4/(3ρ)
@@ -113,11 +115,11 @@ pub struct Level {
     pub transfer: Option<Transfer>,
 }
 
-/// AMG の階層。
+/// AMG の階層。最細レベルの行列を借りているので、その行列より長くは生きられない。
 #[derive(Debug, Clone)]
-pub struct Hierarchy {
+pub struct Hierarchy<'a> {
     /// `levels[0]` が最細
-    pub levels: Vec<Level>,
+    pub levels: Vec<Level<'a>>,
     /// 最粗レベルの直接解法
     pub coarse: CoarseSolver,
     /// 平滑化回数（[`AmgOptions`] から写す）
@@ -139,7 +141,7 @@ pub struct AmgInfo {
     pub direct_coarse_solve: bool,
 }
 
-impl Hierarchy {
+impl Hierarchy<'_> {
     /// 記録用の要約。
     pub fn info(&self) -> AmgInfo {
         let levels: Vec<(usize, usize)> = self
@@ -167,9 +169,10 @@ impl Hierarchy {
 /// 行列 `a` から階層を作る（SPEC §4.5）。
 ///
 /// 近零空間は定数ベクトル span{1}（全 Neumann の電流場。SPEC §2.2）を仮定する。
-pub fn setup(a: &CsrMatrix, options: &AmgOptions) -> Result<Hierarchy> {
-    let mut levels: Vec<Level> = Vec::new();
-    let mut current = a.clone();
+pub fn setup<'a>(a: &'a CsrMatrix, options: &AmgOptions) -> Result<Hierarchy<'a>> {
+    let mut levels: Vec<Level<'a>> = Vec::new();
+    // 最細レベルは借りる。CG が同じ行列を持っているので複製しない
+    let mut current: Cow<'a, CsrMatrix> = Cow::Borrowed(a);
     let mut nullspace = vec![1.0f64; a.n_rows()];
 
     loop {
@@ -226,7 +229,7 @@ pub fn setup(a: &CsrMatrix, options: &AmgOptions) -> Result<Hierarchy> {
             nullspace,
             transfer: Some(Transfer { p, r }),
         });
-        current = coarse_a;
+        current = Cow::Owned(coarse_a);
         nullspace = coarse_null;
     }
 

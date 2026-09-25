@@ -31,6 +31,21 @@ const IGNORED_CARDS: &[&str] = &[
 /// エラー一覧に並べる最大件数。
 const SAMPLE_LIMIT: usize = 20;
 
+/// 節点フィールドのエラーに出す名前（G1〜G8）。
+///
+/// 要素 1 個につき節点の数だけ引くので、`format!` で作ると 1000 万節点級のモデルで
+/// 数億回の文字列確保になる。エラーにならない限り使わない名前なので、固定の表にしておく。
+const NODE_FIELD_NAMES: [&str; 8] = [
+    "節点 G1",
+    "節点 G2",
+    "節点 G3",
+    "節点 G4",
+    "節点 G5",
+    "節点 G6",
+    "節点 G7",
+    "節点 G8",
+];
+
 /// 退化要素とみなす無次元体積のしきい値。`|V| / h³` がこれ以下なら潰れている。
 ///
 /// 形の良い四面体では `V / h³ ≈ 0.118`。極端に薄いスライバ要素を誤検出しないよう、
@@ -329,10 +344,8 @@ impl Builder {
         block.ids.push(eid);
         block.pids.push(pid);
         block.lines.push(card.line() as u32);
-        for k in 0..n {
-            block
-                .conn_ids
-                .push(field_id(card, 3 + k, &format!("節点 G{}", k + 1))?);
+        for (k, name) in NODE_FIELD_NAMES.iter().take(n).enumerate() {
+            block.conn_ids.push(field_id(card, 3 + k, name)?);
         }
         Ok(())
     }
@@ -346,10 +359,8 @@ impl Builder {
         block.ids.push(eid);
         block.pids.push(pid);
         block.lines.push(card.line() as u32);
-        for k in 0..n {
-            block
-                .conn_ids
-                .push(field_id(card, 3 + k, &format!("節点 G{}", k + 1))?);
+        for (k, name) in NODE_FIELD_NAMES.iter().take(n).enumerate() {
+            block.conn_ids.push(field_id(card, 3 + k, name)?);
         }
         // THETA/MCID・ZOFFS 以降は構造解析用なので読み飛ばす
         Ok(())
@@ -693,14 +704,13 @@ fn check_isoparametric_geometry(mesh: &Mesh) -> Result<()> {
         };
         let mut bad: Vec<String> = Vec::new();
         for e in 0..block.len() {
-            let points: Vec<[f64; 3]> = block
-                .conn_of(e)
-                .iter()
-                .map(|&n| mesh.nodes.coord(n))
-                .collect();
+            let conn = block.conn_of(e);
+            let mut buffer = [[0.0f64; 3]; shape::MAX_ELEMENT_NODES];
+            let points = &mut buffer[..conn.len()];
+            mesh.gather_coords(conn, points);
             let volume = match kind {
-                ElementKind::Hex8 => shape::volume::<Hex8>(&points),
-                _ => shape::volume::<Penta6>(&points),
+                ElementKind::Hex8 => shape::volume::<Hex8>(points),
+                _ => shape::volume::<Penta6>(points),
             };
             let h = mesh.element_max_edge(block, e);
             let degenerate = match volume {
@@ -957,6 +967,40 @@ CTETRA,10,1,1,2,3,4
         // CP を使わない節点はそのまま
         assert_eq!(mesh.nodes.coord(1), [1.0, 0.0, 0.0]);
         assert!(report.unsupported.is_empty(), "{:?}", report.unsupported);
+    }
+
+    #[test]
+    fn a_metre_read_can_take_on_another_unit_without_rereading() {
+        // GUI は寸法を見せるために m として読み、選ばれた単位に付け替える。
+        // 最初からその単位で読んだものとビット単位で同じ座標にならなければならない
+        // （座標変換を含むメッシュでも）
+        let text = "\
+CORD2C,7,0,0.1,0.2,0.3,0.1,0.2,1.3
+,1.1,0.2,0.3
+GRID,1,7,2.3,37.0,3.1
+GRID,2,,1.7,0.3,0.1
+GRID,3,,0.2,1.9,0.4
+GRID,4,,0.3,0.1,1.3
+PSOLID,1,1
+CTETRA,10,1,1,2,3,4
+";
+        let (as_metre, metre_report) = read(text, LengthUnit::Meter).unwrap();
+        for unit in [
+            LengthUnit::Millimeter,
+            LengthUnit::Centimeter,
+            LengthUnit::Inch,
+            LengthUnit::Meter,
+        ] {
+            let (direct, report) = read(text, unit).unwrap();
+            let relabelled = as_metre.reinterpret_length_unit(unit).unwrap();
+            assert_eq!(relabelled.nodes.coords(), direct.nodes.coords(), "{unit}");
+            assert_eq!(relabelled.length_unit, unit);
+            // 形状のチェックは寸法によらないので、警告も同じ
+            assert_eq!(report.warnings, metre_report.warnings);
+        }
+        // m 以外で読んだものからは付け替えない（割り戻しで丸めが入る）
+        let (as_mm, _) = read(text, LengthUnit::Millimeter).unwrap();
+        assert!(as_mm.reinterpret_length_unit(LengthUnit::Meter).is_err());
     }
 
     #[test]

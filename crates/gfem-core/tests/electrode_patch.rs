@@ -286,3 +286,33 @@ fn the_same_face_cannot_belong_to_two_electrodes() {
     let err = case.validate(&mesh, &surface).unwrap_err().to_string();
     assert!(err.contains("両方に含まれています"), "{err}");
 }
+
+#[test]
+fn solving_with_a_prepared_surface_gives_bitwise_the_same_answer() {
+    // GUI や Python の Mesh は外表面と電極面の索引を作り置きし、何度解いても
+    // 抽出し直さない（solve_prepared）。毎回作り直して解いた結果と 1 ビットも
+    // 違ってはいけない。同じ索引で 2 回解いても同じ（索引を使い回しても壊れない）
+    let mesh = read(SOLID_ONLY);
+    let case = case_with(
+        Electrode::anode("E1", 2.0e-3).with_patches([top_patch()]),
+        Electrode::cathode("E2", 2.0e-3).with_patches([bottom_patch()]),
+    );
+    let fresh = gfem_core::solve(&mesh, &case, None).unwrap();
+
+    let surface = extract_surface(&mesh).unwrap();
+    let index = gfem_core::case::SurfaceIndex::new();
+    for _ in 0..2 {
+        let lookup = FaceLookup::with_index(&mesh, &surface, &index);
+        let prepared = gfem_core::solve_prepared(&lookup, &case, None, None).unwrap();
+        assert_eq!(prepared.potential, fresh.potential);
+        assert_eq!(
+            prepared.fields.current_density,
+            fresh.fields.current_density
+        );
+        assert_eq!(prepared.solver.history, fresh.solver.history);
+        assert_eq!(
+            prepared.conservation.impedance,
+            fresh.conservation.impedance
+        );
+    }
+}

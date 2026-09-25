@@ -49,7 +49,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import GfemError, describe_gpus
+from .. import GfemError, describe_gpus, read_nastran
 from .busy import REVEAL_DELAY_MS, BusyOverlay, busy_scope, run_in_thread
 from .solver_thread import SolverThread
 from .state import (
@@ -336,12 +336,14 @@ class MainWindow(QMainWindow):
         ファイルを開く経路は（コマンドラインの引数を含めて）すべてここを通す。
         """
         try:
-            # SPEC §3.2: 単位の選択前に寸法を見せたいので、一度そのままの値で読む
-            probe = self.session.__class__()
-            self.run_busy(
-                "寸法を確認しています", lambda: probe.open_mesh(path, "m"), Path(path).name
+            # SPEC §3.2: 単位の選択前に寸法を見せたいので、一度そのままの値（m）で読む。
+            # 選ばれた単位へは付け替えるだけにして、ファイルを 2 回パースしない
+            as_metre = self.run_busy(
+                "寸法を確認しています",
+                lambda: read_nastran(path, length_unit="m"),
+                Path(path).name,
             )
-            box = probe.mesh.bounding_box()
+            box = as_metre.bounding_box()
             extent = tuple(hi - lo for lo, hi in zip(*box))
         except Exception as exc:  # noqa: BLE001
             self.show_error(exc)
@@ -350,14 +352,20 @@ class MainWindow(QMainWindow):
         dialog = UnitSelector(extent, self)
         if dialog.exec() != dialog.DialogCode.Accepted:
             return
-        self.open_mesh(path, dialog.length_unit)
+        unit = dialog.length_unit
+        self.open_mesh(path, unit, lambda: as_metre.with_length_unit(unit))
 
-    def open_mesh(self, path: str | Path, length_unit: str) -> None:
-        """メッシュを読み込む（テストからも呼べるようダイアログを挟まない）。"""
+    def open_mesh(self, path: str | Path, length_unit: str, loaded=None) -> None:
+        """メッシュを読み込む（テストからも呼べるようダイアログを挟まない）。
+
+        `loaded` は読み込み済みのメッシュを返す関数（ワーカースレッドで呼ぶ）。
+        """
         try:
             self.run_busy(
                 "メッシュを読み込んでいます",
-                lambda: self.session.open_mesh(path, length_unit),
+                lambda: self.session.open_mesh(
+                    path, length_unit, None if loaded is None else loaded()
+                ),
                 Path(path).name,
             )
         except Exception as exc:  # noqa: BLE001
@@ -970,15 +978,17 @@ class MainWindow(QMainWindow):
         scalars = options["field"]
         mode = options["mode"]
 
-        if mode == "volume":
-            # **体積メッシュではなく外表面を描く**（SPEC §6.3）。
-            # 頭部モデルで 2.7 秒 → 0.09 秒。しかも法線が付くので形が読める
-            target = self.session.display_surface(scalars)
-            grid = target
-        else:
-            scope.step("断面・等値面を切り出しています")
+        if mode in ("slice", "clip"):
+            # 体積メッシュが要るのは断面とクリップだけ
+            scope.step("断面を切り出しています")
             grid = self.session.grid()
             target = grid
+        else:
+            # **体積メッシュではなく外表面を描く**（SPEC §6.3）。
+            # 頭部モデルで 2.7 秒 → 0.09 秒。しかも法線が付くので形が読める。
+            # 等値面は Rust 側で切り出すので、空だったときの代わりの表示もこれで足りる
+            target = self.session.display_surface(scalars)
+            grid = target
         if mode == "slice":
             target = grid.slice(
                 normal=options["slice_normal"], origin=self._slice_origin(grid, options)

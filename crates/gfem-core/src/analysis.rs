@@ -19,7 +19,7 @@ use crate::error::{ErrorKind, GfemError, Result};
 use crate::io::json::Json;
 use crate::io::vtu::{DataArray, VtuData, VtuOptions, write_vtu};
 use crate::mesh::Mesh;
-use crate::mesh::topology::{Surface, extract_surface};
+use crate::mesh::topology::extract_surface;
 use crate::post::{
     ConservationReport, FieldResult, RegionStats, check_conservation, compute_fields,
     pad_for_shells, region_stats, write_convergence_csv, write_region_stats_csv,
@@ -34,7 +34,7 @@ use std::time::Instant;
 /// 各段階の所要時間 [秒]。出力 JSON のプロビナンス（SPEC §5.5）に記録する。
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Timings {
-    /// 外表面抽出と検証
+    /// 外表面抽出と検証（外表面を作り置きして [`solve_prepared`] で解いた場合は検証だけ）
     pub prepare: f64,
     /// CSR 構築 + 剛性 + 荷重
     pub assemble: f64,
@@ -59,8 +59,6 @@ pub struct Analysis {
     pub solver: CgReport,
     /// 電極ごとの幾何情報
     pub electrodes: Vec<ElectrodeGeometry>,
-    /// 外表面
-    pub surface: Surface,
     /// 実行中に出た警告（ケース検証 + 保存則チェック）
     pub warnings: Vec<String>,
     /// 所要時間
@@ -108,6 +106,21 @@ impl Analysis {
     /// 保存則チェックの結果、領域統計をひとまとめにする。
     /// 「この図はどの入力から出たか」を後から追えるようにするための記録。
     pub fn summary_json(&self, mesh: &Mesh, case: &Case, provenance: &Provenance) -> Result<Json> {
+        let stats = self.region_stats(mesh, case)?;
+        Ok(self.summary_json_with_stats(mesh, case, provenance, &stats))
+    }
+
+    /// [`summary_json`](Self::summary_json) の、計算済みの領域統計を渡す版。
+    ///
+    /// 領域統計は大規模モデルで数百ミリ秒かかる（領域ごとのソート）ので、
+    /// 表示・CSV・サマリで使い回す呼び出し側（Python の `Solution`）はこちらを使う。
+    pub fn summary_json_with_stats(
+        &self,
+        mesh: &Mesh,
+        case: &Case,
+        provenance: &Provenance,
+        stats: &[RegionStats],
+    ) -> Json {
         let mut root = Json::object();
         root.set("provenance", provenance.to_json());
 
@@ -228,11 +241,7 @@ impl Analysis {
             );
         root.set("results", results);
 
-        let regions: Vec<Json> = self
-            .region_stats(mesh, case)?
-            .iter()
-            .map(region_stats_json)
-            .collect();
+        let regions: Vec<Json> = stats.iter().map(region_stats_json).collect();
         root.set("region_stats", Json::Array(regions));
 
         let t = &self.timings;
@@ -246,7 +255,7 @@ impl Analysis {
         root.set("timings", timings);
 
         root.set("warnings", self.warnings.clone());
-        Ok(root)
+        root
     }
 
     /// 実行サマリ JSON をファイルに書き出す。
@@ -257,15 +266,30 @@ impl Analysis {
         case: &Case,
         provenance: &Provenance,
     ) -> Result<()> {
-        let path = path.as_ref();
-        let text = self
-            .summary_json(mesh, case, provenance)?
-            .to_pretty_string();
-        std::fs::write(path, text).map_err(|e| {
-            GfemError::io(path, "実行サマリ JSON を書き出せません", e)
-                .with_hint("出力先のディレクトリが存在し、書き込み権限があるかを確認してください")
-        })
+        write_json(path.as_ref(), &self.summary_json(mesh, case, provenance)?)
     }
+
+    /// [`write_summary_json`](Self::write_summary_json) の、計算済みの領域統計を渡す版。
+    pub fn write_summary_json_with_stats(
+        &self,
+        path: impl AsRef<Path>,
+        mesh: &Mesh,
+        case: &Case,
+        provenance: &Provenance,
+        stats: &[RegionStats],
+    ) -> Result<()> {
+        write_json(
+            path.as_ref(),
+            &self.summary_json_with_stats(mesh, case, provenance, stats),
+        )
+    }
+}
+
+fn write_json(path: &Path, json: &Json) -> Result<()> {
+    std::fs::write(path, json.to_pretty_string()).map_err(|e| {
+        GfemError::io(path, "実行サマリ JSON を書き出せません", e)
+            .with_hint("出力先のディレクトリが存在し、書き込み権限があるかを確認してください")
+    })
 }
 
 fn region_stats_json(s: &RegionStats) -> Json {
@@ -325,13 +349,45 @@ pub fn solve_with(
     progress: Option<ProgressFn<'_>>,
     solver: Option<&dyn LinearSolver>,
 ) -> Result<Analysis> {
-    let n = mesh.nodes.len();
+    let started = Instant::now();
+    let surface = extract_surface(mesh)?;
+    let lookup = FaceLookup::new(mesh, &surface);
+    let extract = started.elapsed().as_secs_f64();
+    dispatch(&lookup, case, progress, solver, extract)
+}
+
+/// 外表面と電極面の索引を作り置きして解く（同じメッシュで何度も解く場合）。
+///
+/// 大規模モデルでは外表面の抽出が solve の準備の大半を占める（28 万節点・162 万四面体で
+/// 0.6 秒、solve 全体の 4 割）。GUI・Python の `Mesh` やパラメータスタディは
+/// 外表面と [`crate::case::SurfaceIndex`] を 1 度だけ作り、ここへ渡す。
+/// `lookup` の外表面は、そのメッシュから [`extract_surface`] で抽出したものであること。
+///
+/// ソルバの扱いは [`solve_with`] と同じ。
+pub fn solve_prepared(
+    lookup: &FaceLookup,
+    case: &Case,
+    progress: Option<ProgressFn<'_>>,
+    solver: Option<&dyn LinearSolver>,
+) -> Result<Analysis> {
+    dispatch(lookup, case, progress, solver, 0.0)
+}
+
+/// バックエンドを選んで解く。`extract` は外表面の抽出にかかった時間（準備の時間に足す）。
+fn dispatch(
+    lookup: &FaceLookup,
+    case: &Case,
+    progress: Option<ProgressFn<'_>>,
+    solver: Option<&dyn LinearSolver>,
+    extract: f64,
+) -> Result<Analysis> {
+    let n = lookup.mesh().nodes.len();
     let resolved = case.solver.backend.resolve(n);
     match solver {
         // 外部ソルバのときは規模だけでアセンブリの並列度を決める
         Some(s) => {
             let parallel = Backend::Auto.resolve(n) == Backend::CpuParallel;
-            run_with(s, mesh, case, progress, parallel)
+            run_with(s, lookup, case, progress, parallel, extract)
         }
         None if resolved == Backend::Cuda => Err(GfemError::new(
             ErrorKind::Case,
@@ -341,10 +397,22 @@ pub fn solve_with(
             "gfem-core 単体は CUDA に依存しません（SPEC §7）。Python API から使うか、\
              gfem_cuda のソルバを solve_with に渡してください",
         )),
-        None if resolved == Backend::CpuParallel => {
-            run_with(&BackendSolver(CpuParallel), mesh, case, progress, true)
-        }
-        None => run_with(&BackendSolver(CpuSerial), mesh, case, progress, false),
+        None if resolved == Backend::CpuParallel => run_with(
+            &BackendSolver(CpuParallel),
+            lookup,
+            case,
+            progress,
+            true,
+            extract,
+        ),
+        None => run_with(
+            &BackendSolver(CpuSerial),
+            lookup,
+            case,
+            progress,
+            false,
+            extract,
+        ),
     }
 }
 
@@ -357,25 +425,35 @@ pub fn solve_with_backend<B: LinearBackend>(
     case: &Case,
     progress: Option<ProgressFn<'_>>,
 ) -> Result<Analysis> {
-    run_with(&BackendSolver(backend), mesh, case, progress, false)
+    let started = Instant::now();
+    let surface = extract_surface(mesh)?;
+    let lookup = FaceLookup::new(mesh, &surface);
+    let extract = started.elapsed().as_secs_f64();
+    run_with(
+        &BackendSolver(backend),
+        &lookup,
+        case,
+        progress,
+        false,
+        extract,
+    )
 }
 
 fn run_with(
     solver: &dyn LinearSolver,
-    mesh: &Mesh,
+    lookup: &FaceLookup,
     case: &Case,
     progress: Option<ProgressFn<'_>>,
     parallel_assembly: bool,
+    extract: f64,
 ) -> Result<Analysis> {
     let started = Instant::now();
+    let mesh = lookup.mesh();
 
     // --- 準備 ---
-    let surface = extract_surface(mesh)?;
-    let mut warnings = case.validate(mesh, &surface)?;
-    // 電極面（シェル要素と体表面パッチの両方）を引くための下ごしらえ。
-    // パッチ選択の索引は、パッチを使う電極があるときだけ作られる
-    let lookup = FaceLookup::new(mesh, &surface);
-    let prepare = started.elapsed().as_secs_f64();
+    // 検証と荷重の組み立てで同じ下ごしらえ（パッチ選択の索引など）を使う
+    let mut warnings = case.validate_with(lookup)?;
+    let prepare = extract + started.elapsed().as_secs_f64();
 
     // --- アセンブリ ---
     let mark = Instant::now();
@@ -383,7 +461,7 @@ fn run_with(
         matrix,
         load,
         electrodes,
-    } = assemble(mesh, case, &lookup, parallel_assembly)?;
+    } = assemble(mesh, case, lookup, parallel_assembly)?;
     let assemble_time = mark.elapsed().as_secs_f64();
 
     // --- 求解 ---
@@ -448,14 +526,13 @@ fn run_with(
         conservation,
         solver: report,
         electrodes,
-        surface,
         warnings,
         timings: Timings {
             prepare,
             assemble: assemble_time,
             solve: solve_time,
             post,
-            total: started.elapsed().as_secs_f64(),
+            total: extract + started.elapsed().as_secs_f64(),
         },
     })
 }
