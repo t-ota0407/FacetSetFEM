@@ -801,7 +801,8 @@ class Session:
         lines += [
             "",
             "保存則チェック（SPEC §5.4）:",
-            f"  電流保存 1ᵀf/max|f|: {c['current_balance']:.3e}",
+            # 総注入電流 I で割る（M2 で max|f| から変更。SPEC §2.2 (a)）
+            f"  電流保存 1ᵀf/I: {c['current_balance']:.3e}",
             f"  エネルギー収支の相対誤差: {c['energy_relative_error']:.3e}",
             f"  離散残差 ‖Kφ−f‖/‖f‖: {c['discrete_residual']:.3e}",
         ]

@@ -20,16 +20,25 @@
 | M5: CUDA バックエンド | **完了**（2026-08-21） |
 | M6: AMG 前処理 | **完了**（2026-08-21） |
 | M7: 使い勝手の仕上げ | **完了**（2026-08-21） |
+| M8: 処理中のローディング表示 | **完了**（2026-08-22） |
+| M9: 体表面から選ぶ電極（クリック・筆） | **完了**（2026-08-23） |
+| M10: 3D ビューの描画の作り直し | **完了**（2026-08-23） |
+| 全体の見直し（リファクタリング） | **進行中**（2026-09〜。残りは「次にやること」） |
 
-マイルストーンの定義は SPEC.md §8 を参照。
+マイルストーンの定義と経緯（入れたもの・実測・見つけた不具合）は SPEC.md §8 にまとめてある。
 
 ### いま動くもの
 
 GUI:
 
 ```bash
-.venv/Scripts/python.exe -m gfem.gui tests/models/slab_3layer.yaml
+.venv/Scripts/python.exe -m gfem.gui tests/models/slab_3layer.yaml          # ケースファイル
+.venv/Scripts/python.exe -m gfem.gui tests/models/slab_3layer.bdf           # 寸法を見せてから単位を選ばせる
+.venv/Scripts/python.exe -m gfem.gui tests/models/slab_3layer.bdf --unit mm # 単位を明示する
 ```
+
+Nastran には単位情報が無いので、**単位を黙って決めることはない**（SPEC §3.2）。
+Python API の `read_nastran` も `length_unit` を省略するとエラーになる。
 
 大きなモデルを開いたとき、ツリーで領域や電極を選び直したとき、表示を作り直すときは
 **処理中のローディング**が出る。読み込みと書き出しはワーカースレッドで走るので、
@@ -157,47 +166,18 @@ library = gfem.load_library("my_tissues.yaml")   # 自前の表に差し替え�
 | パラメータスタディ（Python API と GUI） | ✔ |
 | 組織物性プリセット | ✔ |
 
-### 規模と速度（M5 実測）
+### 規模と速度
 
-RTX A6000 / 20 コア、release ビルド、3 層スラブ（tol = 1e-12）。
-**3 つのバックエンドはビット単位で同じ答え**を出す。速度だけが変わる。
+**3 つのバックエンド（CPU 逐次・CPU 並列・GPU）はビット単位で同じ答え**を出す。速度だけが変わる。
+RTX A6000 / 20 コア、release ビルドでの目安:
 
-| 節点 | 四面体 | 反復 | 逐次 [s] | 並列 [s] | GPU [s] | CG だけ 逐次 / 並列 / GPU [s] |
-|---|---|---|---|---|---|---|
-| 14,973 | 79,200 | 287 | 0.16 | 0.20 | 0.20 | 0.10 / 0.15 / 0.14 |
-| 151,470 | 855,360 | 517 | 3.15 | 1.02 | 1.33 | 2.63 / 0.51 / 0.81 |
-| 301,070 | 1,715,472 | 638 | 7.87 | 2.18 | 2.09 | 6.82 / 1.13 / 1.04 |
-| 602,775 | 3,474,240 | 776 | 20.2 | 4.88 | 3.83 | 18.1 / 2.73 / 1.67 |
+- 60 万節点（Jacobi、tol = 1e-12）: 逐次 20.2 秒 / 並列 4.9 秒 / GPU 3.8 秒
+- 1000 万節点（GPU）: Jacobi で 57 秒（1,423 反復）、AMG で 50 秒（42 反復）
+- AMG の反復回数は 4 万〜150 万節点で 34〜49 回とほぼ一定
+- `solver.backend: auto` は 2 万節点以上で CPU 並列、25 万節点以上で GPU（使えれば）を選ぶ。
+  **25 万節点より小さいうちは CPU 並列のほうが速い**
 
-1000 万節点（10,022,646 節点 / 59,099,040 四面体、tol = 1e-9）は GPU で **57 秒**
-（準備 25 / アセンブリ 10 / CG 17.5 / ポスト 4）、VRAM 6.3 GB、解析解との相対誤差 6.5e-14。
-
-`solver.backend` は `auto` / `cpu` / `cpu_parallel` / `cuda`。
-`auto` は 2 万節点以上で CPU 並列、25 万節点以上で GPU（使えれば）を選ぶ。
-**25 万節点より小さいうちは CPU 並列のほうが速い**——GPU は万能ではない。
-
-### 前処理（M6 実測）
-
-`solver.preconditioner` は `jacobi`（既定）/ `amg` / `none`。
-**バックエンドと違い、前処理を変えると反復の道筋が変わる**ので、答えは
-収束判定の範囲内でしか一致しない（同じ前処理を選べばビット単位で一致する）。
-
-GPU での比較（時間は CG のみ。AMG は階層構築を含む）:
-
-| 節点 | Jacobi 反復 | Jacobi [s] | AMG 反復 | AMG [s] | うち階層 [s] | 倍率 |
-|---|---|---|---|---|---|---|
-| 41,055 | 342 | 0.20 | 34 | 0.07 | 0.04 | 2.8 |
-| 151,470 | 517 | 0.55 | 41 | 0.20 | 0.13 | 2.7 |
-| 602,775 | 776 | 1.51 | 36 | 0.75 | 0.49 | 2.0 |
-| 1,519,560 | 1,017 | 2.74 | 49 | 1.63 | 1.23 | 1.7 |
-
-1000 万節点では **1,423 反復 → 42 反復**、GPU の CG が 17.5 秒 → 9.2 秒、全体 57 → 50 秒。
-**反復回数が規模にほとんど依存しなくなる**のが AMG を入れた目的で、そこは達成できている。
-一方で**階層の構築が新しい律速**になった（150 万節点で 1.63 秒のうち 1.23 秒。
-反復そのものは 0.4 秒で Jacobi の 6.8 倍速い）。
-
-導電率コントラストが大きいケース（骨 0.02 と筋肉 0.35 で 17 倍）では Jacobi 168 回 →
-AMG 22 回。**小さい問題では Jacobi のほうが速い**——階層構築の元が取れないため。
+表と測定条件は SPEC §8 M4〜M6 と §4.5。計測は次のコマンドで回せる:
 
 ```bash
 cargo test --release -p gfem-core --test scaling -- --ignored --nocapture
@@ -213,27 +193,12 @@ print(gfem.describe_gpus())
 print(gfem.cuda_check(10_000_000))   # この規模を GPU に載せられるか（None なら OK）
 ```
 
-### 正しさの裏づけ（M2）
+### 正しさの裏づけ
 
-SPEC §8 M2 の解析解ベンチマーク 5 件と、メッシュ収束性試験を実装済み。
-
-| 検証 | 結果 |
-|---|---|
-| 一様場・層状媒質（1 次元） | 厳密一致（誤差は丸めレベル） |
-| 同心球殻（多層含む） | R の相対誤差 1.5 % |
-| 半無限媒質上の点電極 | 一様半空間で ρ_a が理論値の 0.02 % 以内 |
-| 二層半無限媒質（鏡像法級数） | Wenner 見かけ比抵抗比が 0.4 % 以内 |
-| 収束次数 φ / E | 実測 1.93 / 0.87（理論 2 / 1） |
-
+解析解ベンチマーク 5 件（一様場・層状媒質・同心球殻・半無限媒質上の点電極・二層半無限媒質）と、
+メッシュ収束次数（φ 1.93 次 / E 0.87 次。理論は 2 / 1）を回帰テストで確かめている（SPEC §8 M2）。
 保存則（電流保存・エネルギー収支・離散残差）は**全ての solve で自動チェック**され、
 逸脱があれば結果に警告として載る。
-
-```bash
-cargo test                                   # 通常の回帰
-cargo test --release -- --include-ignored    # 二層半無限媒質を含む検証一式
-```
-
----
 
 ## 開発環境
 
@@ -247,19 +212,9 @@ cargo test --release -- --include-ignored    # 二層半無限媒質を含む検
 | Python 依存 | `requirements.txt` に固定。NumPy 2.5.2 / SciPy 1.18.0 / pandas 3.0.5 / VTK 9.6.2 / PyVista 0.48.4 / PySide6 6.11.1 / maturin 1.14.1 / pytest 9.1.1 |
 | PyO3 | 0.29.2（`maturin develop` → Python から import・呼び出しまで疎通確認済み） |
 | 描画 | PyVista のオフスクリーン描画が RTX A6000 上で動作確認済み（OpenGL 4.5） |
-| CUDA | Toolkit 11.8 / Driver 596.72 |
+| CUDA | Toolkit 11.8 / 12.1 / 12.5 が同居（cudarc は 12.5 のバインディングを使う。理由は SPEC §10.1）/ Driver 596.72 |
 
-### ハードウェア
-
-| 項目 | 内容 |
-|---|---|
-| GPU | **NVIDIA RTX A6000 × 2**（各 48 GB VRAM、Compute Capability 8.6） |
-| CPU | 20 コア |
-| RAM | 128 GB |
-
-SPEC.md §4.2 の見積り（1000 万節点で GPU 常駐 2.5 GB）に対して VRAM が 48 GB あるため、**1 億節点クラスまで載る**計算になる。v1.0 の目標は 1000 万節点のまま据え置く。
-
-RTX A6000（Ampere）の FP64 スループットは FP32 の 1/32 だが、**CG はメモリ帯域律速（768 GB/s）**なので実害はない。倍精度を使う判断に変更はない。
+実機のハードウェア（RTX A6000 × 2・20 コア・128 GB）と、それが設計判断にどう効いているかは SPEC §10.1。
 
 ---
 
@@ -290,13 +245,14 @@ export PATH="$HOME/.cargo/bin:$PATH"
 | 目的 | コマンド |
 |---|---|
 | Rust のビルド | `cargo build --release` |
-| Rust のテスト | `cargo test` |
-| Lint | `cargo clippy -- -D warnings` |
+| Rust のテスト（通常の回帰） | `cargo test` |
+| Rust の検証一式（重いテストを含む） | `cargo test --release -- --include-ignored` |
+| Lint | `cargo clippy --workspace --all-targets -- -D warnings` |
 | フォーマット | `cargo fmt` |
 | Python 拡張のビルド（開発時） | `.venv/Scripts/maturin.exe develop --release` |
 | Python のテスト | `.venv/Scripts/python.exe -m pytest` |
 | サンプルモデルの再生成 | `.venv/Scripts/python.exe scripts/make_sample_mesh.py` |
-| GUI 起動 | `.venv/Scripts/python.exe -m gfem.gui [model.bdf \| case.yaml]` |
+| GUI 起動 | `.venv/Scripts/python.exe -m gfem.gui [case.yaml \| model.bdf [--unit mm]]` |
 | 配布用 wheel の作成 | `.venv/Scripts/python.exe scripts/build_release.py` |
 
 `maturin develop` は `VIRTUAL_ENV` を見るので、Git Bash からは環境変数を明示するのが確実:
@@ -314,69 +270,66 @@ env -u CONDA_PREFIX VIRTUAL_ENV='C:\Users\t-ota\Desktop\GenericFEM\.venv' .venv/
 Rust だけを触ったときは `cargo test`、Python から見える形まで確認するときは
 `maturin develop` してから `pytest` を回す。
 
+**コミットした後も `maturin develop` し直すこと。** 実行サマリには拡張モジュールを
+ビルドしたときの Git の状態が埋め込まれる（SPEC §5.5）ので、ビルドし直すまでは
+「ビルド後にコミットが進んでいる」と注記され、`pytest` の
+`test_the_git_state_describes_this_build` も落ちる。
+
+GPU のテストは GPU が無い機械では skip される。ただし `backend: cuda` で GPU が
+使えないときのフォールバックは、GPU を隠した別プロセスで必ず確かめている。
+
 ---
 
-## 構成（SPEC.md §7 の計画）
+## 構成
 
-```
-Cargo.toml            ワークスペース
-pyproject.toml        maturin（Rust 拡張）と pytest の設定
-crates/
-  gfem-core/          Rust コア。CUDA・Python に一切依存しない
-    src/element/      形状関数 trait（shape）、tet4 / hex8 / penta6、面積分
-    src/mesh/         メッシュ表現、ID 索引、外表面抽出、等値面、流線、
-                      面共役な四面体分割（tetview）、要素探索の一様格子（spatial）
-    src/io/nastran/   バルクデータパーサ（field / reader / parse / coord の 4 層）
-    src/io/vtu.rs     VTU ライタ
-    src/assemble/     CSR、非ゼロ構造、剛性・荷重のアセンブリ、並列アセンブリ
-    src/solver/       決定的リダクション、バックエンド trait（逐次 / 並列）、射影 CG、
-                      外部バックエンドの差し込み口（external.rs）
-    src/solver/amg/   代数マルチグリッド（凝集・補間・疎行列積・V サイクル）
-    src/post/         E・J・保存則チェック・領域統計・解析解との誤差評価
-    src/provenance.rs 入力ハッシュ・Git の状態・実行時刻
-    src/analysis.rs   SPEC §4.1 の流れを通す入口
-  gfem-cuda/          CUDA バックエンド。gfem-core にのみ依存する
-    src/kernels.cu    f64 の CSR SpMV・ベクトル演算・決定的リダクション
-    src/backend.rs    LinearBackend の実装（CSR と作業ベクトルは VRAM 常駐）
-  gfem-py/            PyO3 バインディング（cuda フィーチャで GPU 対応）
-python/gfem/          高レベル Python API
-  study.py            ケースファイル（YAML）
-  sweep.py            パラメータスタディ
-  tissues.py          組織物性プリセット
-  gui/                PySide6 + PyVista の GUI
-    busy.py           処理中のローディング表示とワーカースレッド（SPEC §6.4）
-scripts/              サンプルモデル生成、配布用 wheel の作成
-tests/                Python テストとサンプルモデル
-```
+ディレクトリとファイルの役割は SPEC.md §7 にまとめてある。
 
 ---
 
 ## 次にやること
 
-v1.0 のマイルストーンは全て終わった。次に効くのは**速度ではなく前後処理**（下記）と、
-SPEC §9 に穴を空けてある拡張（異方性導電率・2 次要素・完全電極モデル）。
+### 全体の見直しの残り（2026-09 に見つけたもの）
 
-### M5・M6 で見えた課題（速度）
+**性能（大規模モデルの前後処理）**。1000 万節点の内訳は AMG で準備 25 秒 / アセンブリ 11 秒 /
+CG 9 秒 / ポスト 4 秒で、**CG より前後処理のほうが重い**。
 
-1000 万節点の内訳は AMG で **準備 25 秒 / アセンブリ 11 秒 / CG 9 秒 / ポスト 4 秒**。
-CG を速くした結果、**外表面抽出（準備の大半）が CG の 2.8 倍まで相対的に重くなった。**
-次に効くのは前後処理の並列化で、CG のさらなる高速化ではない。
+- 外表面の抽出をやり直している。Python の `Mesh` が持っている外表面をコアの solve が使わず、
+  毎回抽出し直す（頭部モデルで 1 回 3.8 秒、パラメータスタディでは回数分）。電極面の索引
+  （`SurfacePicker`）も validate・solve・クリックのたびに作り直している
+- 逐次のまま残っている処理: 外表面抽出のソート、非ゼロ構造の行ソート、E・J の計算、
+  節点値の平均化、読み込み時の形状チェック（いずれも結果を変えずに並列化できる）
+- Nastran の読み込みで、節点ごとに文字列を作っている（`parse.rs` の `format!`）
+- GUI でメッシュを開くと、寸法を見せるための仮読み込みでファイルを 2 回パースしている
+- `Solution` の配列の getter が呼ぶたびに丸ごとコピーする（SPEC §6.3 の zero-copy は未実装）。
+  領域統計も呼ぶたびに計算し直す
+- 解いた後の「全体」表示が、配列を読むためだけに体積メッシュ全体を組み立てている
+- AMG の階層構築（1000 万節点で 7.1 秒）: 最細レベル行列の複製と VRAM への 2 回目の転送は
+  CG が持っているものを共有すれば省ける（SPEC §4.5 の末尾）
 
-AMG 自体の残りの伸びしろは階層構築（1000 万節点で 7.1 秒）。凝集は決定性のため
-逐次でなければならないが、最細レベル行列の複製と VRAM への 2 回目の転送は
-CG が持っているものを共有すれば省ける（SPEC §4.5 の末尾）。
+**不具合の疑い**（コードを読んで見つけたもの。まだ再現していない）
 
-### M7 で見つけた既存の不具合（流線）
+- `post::total_stats` の「全領域」の中央値・p95・p99 が、先頭の領域の値になっている
+  （公開 API。今はテストからしか使われていない）
+- AMG の最粗レベルの密 Cholesky に大きさの上限が無い。粗化が途中で止まって大きなレベルが
+  残ると、n² の確保でメモリ不足になるか長時間止まる
+- 流線が要素の境界で行き場を失うと（隣の要素の場が戻る向き）、点が要素の外へ出うる
+- GPU の VRAM の見積りが AMG の分を含まない（見積りを通った後にメモリ不足で止まりうる）
+- 離散残差 ‖Kφ−f‖/‖f‖ にしきい値が無く、どれだけ大きくても警告にならない（SPEC §5.4）
+- 筆で塗っただけの電極（パッチなし）で「面が選択されていません」と表示される
+- `load.rs` の `MIN_AREA_RATIO` が「相対値」と書かれているのに、絶対値（1 µm²）として使われている
 
-四面体分割を通したことで、M6 までの流線追跡が 2 つの壊れ方をしていたことが分かった。
+**重複と構造の整理**
 
-1. **入ってきた面を出口の候補から無条件に外していた。** そこが本当に最も近い出口の
-   ときに、より遠い面まで突き抜けて**メッシュの外に点が出る**
-2. **稜線にちょうど載った始点で破綻していた。** 場が外向きの四面体を選んでしまい、
-   実測では 10²⁹ m 先へ飛んだ。GUI は始点を格子状に置くので日常的に踏む経路だった
+- 単位の換算表が 3 か所（Rust・`gfem/__init__.py`・`gui/widgets.py`）にある。
+  バックエンド・前処理の別名も Rust と `study.py` に二重に定義されている
+- 同じ処理が複数か所にある: `case::shell_at` と `Mesh::solid`、陰極の平均電位、
+  パッチの半径・中心の検証、小さなベクトル関数（5 ファイル）、テスト用の Kuhn 分割メッシュ（7 か所）
+- `gui/main_window.py`（約 1,800 行・6 クラス）をページごとのモジュールに分ける
 
-どちらも直し、「メッシュの外に点が出ていないか」を見張る回帰テストを入れた
-（SPEC §6.3）。
+### その先
+
+- SPEC §9 に穴を空けてある拡張（異方性導電率・2 次要素・完全電極モデル）
+- CI の設定（いまは手元で `cargo test` と `pytest` を回している）
 
 ---
 
@@ -395,6 +348,8 @@ python -m gfem.gui
 ```
 
 だけでよく、**Rust も CUDA Toolkit も要らない**（GPU で走らせるには NVIDIA ドライバは要る）。
+GUI に要るもの（PySide6・PyVista・pyvistaqt）も wheel の依存として一緒に入る。
+wheel の依存と、パッケージが実際に import しているものが一致していることはテストで見ている。
 PyInstaller で 1 つの exe に固めない理由は SPEC §12 の未決事項 3 に書いてある。
 
 ---

@@ -79,6 +79,20 @@ def test_unknown_unit_is_rejected(sample_bdf):
     assert "mm / cm / m / inch" in str(excinfo.value)
 
 
+def test_the_length_unit_must_be_given(sample_bdf):
+    """Nastran には単位情報が無いので、単位は既定値を置かず必須にする（SPEC §3.2）。
+
+    以前は黙って mm とみなしていた。m で書かれたモデルが 1000 倍に膨らんだまま、
+    もっともらしい絵が出てしまう。
+    """
+    with pytest.raises(gfem.GfemError) as excinfo:
+        gfem.read_nastran(sample_bdf)
+    message = str(excinfo.value)
+    assert "長さ単位が指定されていません" in message
+    assert "mm / cm / m / inch" in message
+    assert "SPEC §3.2" in message
+
+
 # --- 書式 -------------------------------------------------------------------
 
 

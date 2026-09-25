@@ -6,7 +6,9 @@ Nastran ファイルは形状と領域分けだけを担い、解析条件はこ
 YAML の解釈を Rust ではなく Python 側に置いているのは、
 
 - `gfem-core` の依存を増やさない（CLAUDE.md 設計原則 5）
-- 行番号つきの親切なエラー（設計原則 6）を Rust と Python の二重に作らずに済む
+- 場所つきの親切なエラー（設計原則 6）を Rust と Python の二重に作らずに済む。
+  場所はファイル名と項目の位置（`case.yaml の electrodes[1]` など）で示す。
+  YAML の構文エラーだけは PyYAML が行番号を出す
 - GUI もバッチスクリプトも Python から使う（SPEC §6.5）
 
 ため。

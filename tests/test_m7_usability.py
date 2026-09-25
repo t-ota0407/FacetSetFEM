@@ -453,3 +453,63 @@ def test_the_sweep_dialog_runs_and_fills_the_table(main_window, sample_bdf, tmp_
     dialog.table.write_csv(path)
     assert path.exists()
     dialog.close()
+
+
+# --- 配布（wheel の依存関係。SPEC §12 の 3）---------------------------------
+
+#: import 名 → それを入れる配布パッケージ名。
+#: vtkmodules は pyvista が必ず連れてくるので、pyvista を宣言していれば足りる
+_DISTRIBUTION_OF = {
+    "numpy": "numpy",
+    "yaml": "PyYAML",
+    "pyvista": "pyvista",
+    "pyvistaqt": "pyvistaqt",
+    "PySide6": "PySide6",
+    "vtkmodules": "pyvista",
+}
+
+
+def _third_party_imports() -> set[str]:
+    """gfem パッケージが import しているサードパーティのモジュール（トップレベル名）。"""
+    import ast
+    import sys
+    from pathlib import Path
+
+    package = Path(gfem.__file__).parent
+    found: set[str] = set()
+    for source in package.rglob("*.py"):
+        tree = ast.parse(source.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                names = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                names = [node.module]
+            else:
+                continue
+            for name in names:
+                top = name.split(".")[0]
+                if top not in sys.stdlib_module_names and top not in {"gfem", "__future__"}:
+                    found.add(top)
+    return found
+
+
+def test_the_wheel_declares_everything_the_package_imports(repo_root):
+    """`pip install` した人が GUI まで動かせること。
+
+    以前は GUI が使う pyvistaqt が依存に無く、wheel を入れただけでは
+    `python -m gfem.gui` が import で落ちた。逆に使っていない pandas が入っていた。
+    """
+    import tomllib
+
+    declared = {
+        requirement.split(">")[0].split("=")[0].split("<")[0].strip()
+        for requirement in tomllib.loads(
+            (repo_root / "pyproject.toml").read_text(encoding="utf-8")
+        )["project"]["dependencies"]
+    }
+    imported = _third_party_imports()
+    unknown = imported - set(_DISTRIBUTION_OF)
+    assert not unknown, f"配布パッケージとの対応が未登録の import: {sorted(unknown)}"
+    needed = {_DISTRIBUTION_OF[name] for name in imported}
+    assert needed <= declared, f"pyproject.toml に足りない依存: {sorted(needed - declared)}"
+    assert declared <= needed, f"使っていない依存: {sorted(declared - needed)}"

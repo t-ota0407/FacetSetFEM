@@ -326,8 +326,15 @@ class MainWindow(QMainWindow):
         path, _ = QFileDialog.getOpenFileName(
             self, "モデルを開く", "", "Nastran バルクデータ (*.bdf *.nas);;すべて (*)"
         )
-        if not path:
-            return
+        if path:
+            self.open_mesh_asking_unit(path)
+
+    def open_mesh_asking_unit(self, path: str | Path) -> None:
+        """長さ単位を選ばせてからメッシュを読む（SPEC §3.2）。
+
+        Nastran ファイルには単位情報が無い。**単位を黙って決めてはいけない**ので、
+        ファイルを開く経路は（コマンドラインの引数を含めて）すべてここを通す。
+        """
         try:
             # SPEC §3.2: 単位の選択前に寸法を見せたいので、一度そのままの値で読む
             probe = self.session.__class__()

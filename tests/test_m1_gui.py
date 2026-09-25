@@ -75,6 +75,22 @@ def test_missing_conductivity_is_caught_before_solving(sample_bdf):
     assert "導電率が未設定" in str(excinfo.value)
 
 
+def test_the_command_line_never_guesses_the_length_unit():
+    """`python -m gfem.gui model.bdf` は単位を黙って決めない（SPEC §3.2）。
+
+    以前は mm とみなして開いていた。`--unit` で明示するか、GUI で寸法を見て選ぶ。
+    """
+    from gfem.gui import parse_arguments
+
+    assert parse_arguments(["model.bdf"]).unit is None  # → 寸法を見せて選ばせる
+    assert parse_arguments(["model.bdf", "--unit", "cm"]).unit == "cm"
+    assert parse_arguments(["case.yaml"]).unit is None
+    with pytest.raises(SystemExit):
+        parse_arguments(["case.yaml", "--unit", "mm"])  # ケースは単位を持っている
+    with pytest.raises(SystemExit):
+        parse_arguments(["model.bdf", "--unit", "furlong"])
+
+
 def test_electrode_names_stay_unique(session):
     """電極名はツリー・削除・結果で電極を引く鍵なので、重複を作らせない。"""
     with pytest.raises(gfem.GfemError, match="すでにあります"):

@@ -1,6 +1,7 @@
 //! 要素の種類と、種類ごとの幾何量。
 //!
-//! M0 の時点では「要素の識別」と「幾何チェックに必要な最小限の量」だけを持つ。
+//! ここに置くのは「要素の識別」（節点数・面・VTK のセル型）と、幾何チェックに
+//! 使う最小限の量（Tet4 の符号付き体積・最大辺長）。
 //! 要素剛性（SPEC §2.3）は要素種ごとのサブモジュールに置く:
 //! [`tet4`]・[`hex8`]・[`penta6`]。共通のアイソパラメトリック処理は [`shape`] にあり、
 //! 新しい要素種は [`ShapeFunctions`] を実装したファイルを 1 つ足すだけで入る（SPEC §7）。
@@ -64,9 +65,10 @@ impl ElementKind {
 
     /// VTK のセルタイプ番号（VTU 出力に使う）。
     ///
-    /// Nastran の節点順序と VTK の節点順序は、ここで扱う 1 次要素については一致する:
-    /// CTETRA(G1..G4) → VTK_TETRA(10), CPENTA(G1..G6) → VTK_WEDGE(13),
-    /// CHEXA(G1..G8) → VTK_HEXAHEDRON(12), CTRIA3 → VTK_TRIANGLE(5), CQUAD4 → VTK_QUAD(9)。
+    /// CTETRA → VTK_TETRA(10), CPENTA → VTK_WEDGE(13), CHEXA → VTK_HEXAHEDRON(12),
+    /// CTRIA3 → VTK_TRIANGLE(5), CQUAD4 → VTK_QUAD(9)。
+    /// 節点の並びは CPENTA だけ VTK と逆向きなので、書き出すときは
+    /// [`vtk_node_order`](Self::vtk_node_order) で並べ替えること。
     pub const fn vtk_cell_type(self) -> u8 {
         match self {
             ElementKind::Tet4 => 10,

@@ -142,6 +142,24 @@ def test_unknown_shell_pid_is_reported(sample_bdf, slab_sigma):
     assert "PID=999" in str(excinfo.value)
 
 
+def test_the_documented_example_gives_the_documented_numbers(sample_bdf, repo_root):
+    """README と `gfem` の docstring に載せている例の出力が、実際の値と一致すること。
+
+    以前は docstring の等価抵抗が 83.0 Ω のまま古くなっていた（実際は 206.4 Ω）。
+    結果はビット単位で再現する（CLAUDE.md 設計原則 1）ので、表示の文字列ごと比べられる。
+    """
+    mesh = gfem.read_nastran(sample_bdf, length_unit="mm")
+    case = gfem.Case(mesh)
+    case.set_conductivity({1: 0.10, 2: 0.04, 3: 0.35})
+    case.add_electrode("E1", role="anode", current=2e-3, shell_pids=[101])
+    case.add_electrode("E2", role="cathode", current=2e-3, shell_pids=[201])
+    result = case.solve()
+
+    readme = (repo_root / "README.md").read_text(encoding="utf-8")
+    assert repr(result) in readme, f"README の例を {repr(result)} に直してください"
+    assert f">>> round(result.impedance, 1)\n    {round(result.impedance, 1)}" in gfem.__doc__
+
+
 def test_duplicate_electrode_names_are_rejected(sample_bdf, slab_sigma):
     """同名の陽極と陰極が同じ面を指しても、以前は検証を素通りしていた。
 

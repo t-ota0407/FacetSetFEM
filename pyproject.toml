@@ -9,11 +9,13 @@ description = "経皮電気刺激シミュレーションのための有限要�
 readme = "README.md"
 requires-python = ">=3.12"
 classifiers = ["Private :: Do Not Upload"]
+# wheel を受け取った人が `pip install` だけで GUI まで動かせること（SPEC §12 の 3）。
+# pyvistaqt は GUI の 3D ビュー（QtInteractor）に要る
 dependencies = [
   "numpy>=2.0",
-  "pandas>=2.0",
   "PyYAML>=6.0",
   "pyvista>=0.44",
+  "pyvistaqt>=0.11",
   "PySide6>=6.7",
 ]
 

@@ -49,7 +49,6 @@ create_exception!(
 /// バウンディングボックスを Python 側に返すときの形。
 type BoundingBox = ((f64, f64, f64), (f64, f64, f64));
 
-/// シェル要素の三角形分割を返すときの形。`(三角形, PID, 要素 ID)`。
 /// 等値面を Python 側に返すときの形。`(頂点, 三角形, 頂点のスカラー)`。
 type IsoSurfaceArrays<'py> = (
     Bound<'py, PyArray2<f64>>,
@@ -57,6 +56,7 @@ type IsoSurfaceArrays<'py> = (
     Bound<'py, PyArray1<f64>>,
 );
 
+/// シェル要素の三角形分割を返すときの形。`(三角形, PID, 要素 ID)`。
 type ShellTriangles<'py> = (
     Bound<'py, PyArray2<u32>>,
     Bound<'py, PyArray1<i32>>,
@@ -1390,7 +1390,8 @@ fn build_electrode(
             .map(|(eid, local)| {
                 if local == 0 {
                     return Err(GfemError::new_err(format!(
-                        "電極 {name} の{what}の面番号が 0 です（EID={eid}）。                         面番号は 1 始まりで指定してください"
+                        "電極 {name} の{what}の面番号が 0 です（EID={eid}）。\
+                         面番号は 1 始まりで指定してください"
                     )));
                 }
                 Ok(FaceRef::new(eid, local - 1))
@@ -1477,11 +1478,25 @@ fn parse_reference(reference: &str) -> PyResult<ReferencePotential> {
 /// Nastran バルクデータ（.bdf / .nas）を読み込む。
 ///
 /// `length_unit` はファイル中の座標値の単位（`"mm"` / `"cm"` / `"m"` / `"inch"`）。
-/// Nastran ファイルには単位情報が無いため必ず指定する（SPEC §3.2）。
-/// 読み込んだ座標は内部で SI（m）に換算される。
+/// Nastran ファイルには単位情報が無いため**必ず指定する**（SPEC §3.2）。既定値は
+/// 置かない——黙って mm とみなすと、m で書かれたモデルが 1000 倍に膨らんだまま、
+/// もっともらしい絵が出てしまう。読み込んだ座標は内部で SI（m）に換算される。
 #[pyfunction]
-#[pyo3(signature = (path, length_unit = "mm"))]
-fn read_nastran(py: Python<'_>, path: PathBuf, length_unit: &str) -> PyResult<PyMesh> {
+#[pyo3(signature = (path, length_unit = None))]
+fn read_nastran(py: Python<'_>, path: PathBuf, length_unit: Option<&str>) -> PyResult<PyMesh> {
+    let Some(length_unit) = length_unit else {
+        return Err(to_py(
+            gfem_core::GfemError::new(
+                gfem_core::ErrorKind::Case,
+                "長さ単位が指定されていません",
+            )
+            .with_file(&path)
+            .with_hint(
+                "read_nastran(path, length_unit=\"mm\") のように mm / cm / m / inch を指定して\
+                 ください。Nastran ファイルには単位情報が無いので、既定値は置いていません（SPEC §3.2）",
+            ),
+        ));
+    };
     let unit: LengthUnit = LengthUnit::parse(length_unit).map_err(to_py)?;
     let (mesh, report) = py
         .detach(|| gfem_core::read_nastran(&path, unit))
