@@ -1525,7 +1525,16 @@ class ElectrodePage(QWidget):
         if spec is None:
             return
         self.window.checkpoint(f"電極 {self.name} の設定を変更")
-        spec.name = self.name_edit.text() or spec.name
+        new_name = self.name_edit.text().strip()
+        if new_name and new_name != spec.name:
+            try:
+                session.rename_electrode(spec.name, new_name)
+            except GfemError as exc:
+                # ほかの電極と同じ名前にはできない。入力欄を元の名前に戻す
+                self.name_edit.setText(spec.name)
+                self.window.show_error(exc)
+        elif not new_name:
+            self.name_edit.setText(spec.name)
         spec.role = self.role_combo.currentText()
         spec.current = self.current_spin.value() * 1e-3
         spec.shell_pids = [
@@ -1618,14 +1627,16 @@ class SolverPage(QWidget):
         self._loading = True
         self.tolerance.setText(f"{study.solver.tolerance:g}")
         self.max_iterations.setValue(study.solver.max_iterations)
-        # ケースファイルに未知の値が入っていたときに黙って既定値へ戻さない
-        if self.preconditioner.findText(study.solver.preconditioner) < 0:
-            self.preconditioner.addItem(study.solver.preconditioner)
-        self.preconditioner.setCurrentText(study.solver.preconditioner)
-        if self.backend.findText(study.solver.backend) < 0:
-            self.backend.addItem(study.solver.backend)
-        self.backend.setCurrentText(study.solver.backend)
-        self.reference.setCurrentText(study.output.reference_potential)
+        # ケースファイルに選択肢に無い値（`node:<ID>` の基準電位など）が入っていたときに、
+        # 黙って既定値へ戻さない。戻すと、ほかの項目を触った時点で上書きされて消える
+        for combo, value in (
+            (self.preconditioner, study.solver.preconditioner),
+            (self.backend, study.solver.backend),
+            (self.reference, study.output.reference_potential),
+        ):
+            if combo.findText(value) < 0:
+                combo.addItem(value)
+            combo.setCurrentText(value)
         self._loading = False
 
     def _commit(self) -> None:

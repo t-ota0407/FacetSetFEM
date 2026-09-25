@@ -463,6 +463,33 @@ impl Case {
                 .with_hint("電流の流入口と流出口の両方が必要です"));
             }
         }
+        // 電極名は結果（平均電位・実行サマリ）とケースファイルで電極を指す鍵。
+        // 重複を許すと、同名の陽極と陰極が同じ面を指していても重なりとして
+        // 捕まらず、荷重が打ち消し合って「R = 0 Ω・警告なし」という結果が出てしまう
+        let mut seen_names: BTreeSet<&str> = BTreeSet::new();
+        let mut duplicated: BTreeSet<&str> = BTreeSet::new();
+        for e in &self.electrodes {
+            if e.name.trim().is_empty() {
+                return Err(GfemError::new(ErrorKind::Case, "名前が空の電極があります")
+                    .with_hint("電極には E1・E2 のような名前を付けてください"));
+            }
+            if !seen_names.insert(e.name.as_str()) {
+                duplicated.insert(e.name.as_str());
+            }
+        }
+        if !duplicated.is_empty() {
+            let names: Vec<String> = duplicated.iter().map(|n| n.to_string()).collect();
+            return Err(GfemError::new(
+                ErrorKind::Case,
+                format!(
+                    "同じ名前の電極が複数あります: {}",
+                    format_sample_list(&names, SAMPLE_LIMIT)
+                ),
+            )
+            .with_hint(
+                "電極名は結果とケースファイルで電極を指す鍵なので、電極ごとに違う名前にしてください",
+            ));
+        }
         for e in &self.electrodes {
             if !e.current.is_finite() || e.current <= 0.0 {
                 return Err(GfemError::new(
@@ -496,9 +523,10 @@ impl Case {
         // --- 電極面 ---
         let lookup = FaceLookup::new(mesh, surface);
         // 面の重なりは「体表面のどの面か」で見る。シェル要素とパッチが同じ面を
-        // 指していても重複として捕まえられるようにするため
-        let mut used_faces: BTreeMap<FaceKey, String> = BTreeMap::new();
-        for e in &self.electrodes {
+        // 指していても重複として捕まえられるようにするため。
+        // 値は電極の通し番号（名前で比べると、名前の検査をすり抜けたときに見逃す）
+        let mut used_faces: BTreeMap<FaceKey, usize> = BTreeMap::new();
+        for (index, e) in self.electrodes.iter().enumerate() {
             let faces = self.resolve_faces(&lookup, e)?;
             let mut off_surface: Vec<String> = Vec::new();
             for &face in &faces {
@@ -507,14 +535,15 @@ impl Case {
                     // パッチは外表面から選ぶので、ここに来るのはシェル要素だけ
                     off_surface.push(lookup.label(face));
                 }
-                if let Some(other) = used_faces.insert(face_key(nodes), e.name.clone())
-                    && other != e.name
+                if let Some(other) = used_faces.insert(face_key(nodes), index)
+                    && other != index
                 {
                     return Err(GfemError::new(
                         ErrorKind::Case,
                         format!(
-                            "{} が電極 {other} と {} の両方に含まれています",
+                            "{} が電極 {} と {} の両方に含まれています",
                             lookup.label(face),
+                            self.electrodes[other].name,
                             e.name
                         ),
                     )
@@ -954,6 +983,31 @@ CTRIA3,200,201,1,2,4
         case.electrodes[1].shell_pids = vec![101];
         let e = case.validate(&mesh, &surface).unwrap_err();
         assert!(e.to_string().contains("両方に含まれています"), "{e}");
+    }
+
+    #[test]
+    fn rejects_duplicate_electrode_names() {
+        // 同名の陽極と陰極が同じ面を指すと、荷重が打ち消し合って
+        // 「R = 0 Ω・警告なし」の結果が出ていた。名前の重複そのものを止める
+        let (mesh, surface) = setup();
+        let mut case = valid_case();
+        case.electrodes[1].name = "E1".to_string();
+        let e = case.validate(&mesh, &surface).unwrap_err();
+        assert!(e.to_string().contains("同じ名前の電極"), "{e}");
+        assert!(e.to_string().contains("E1"), "{e}");
+
+        case.electrodes[1].shell_pids = vec![101];
+        let e = case.validate(&mesh, &surface).unwrap_err();
+        assert!(e.to_string().contains("同じ名前の電極"), "{e}");
+    }
+
+    #[test]
+    fn rejects_blank_electrode_names() {
+        let (mesh, surface) = setup();
+        let mut case = valid_case();
+        case.electrodes[0].name = "  ".to_string();
+        let e = case.validate(&mesh, &surface).unwrap_err();
+        assert!(e.to_string().contains("名前が空"), "{e}");
     }
 
     #[test]

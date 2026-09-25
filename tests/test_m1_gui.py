@@ -75,6 +75,32 @@ def test_missing_conductivity_is_caught_before_solving(sample_bdf):
     assert "導電率が未設定" in str(excinfo.value)
 
 
+def test_electrode_names_stay_unique(session):
+    """電極名はツリー・削除・結果で電極を引く鍵なので、重複を作らせない。"""
+    with pytest.raises(gfem.GfemError, match="すでにあります"):
+        session.add_electrode("E1")
+    with pytest.raises(gfem.GfemError, match="すでにあります"):
+        session.rename_electrode("E2", "E1")
+    with pytest.raises(gfem.GfemError, match="空"):
+        session.rename_electrode("E2", "  ")
+    session.rename_electrode("E2", "E3")
+    assert [e.name for e in session.study.electrodes] == ["E1", "E3"]
+
+
+def test_region_stats_table_volume_is_in_the_unit_of_its_heading(session):
+    """体積の見出しと値の単位が揃っていること。
+
+    以前は見出しが mm³ なのに値は m³ × 1e6（＝ cm³）で、1000 倍ずれていた。
+    サンプルモデルは 60 mm × 40 mm × 20 mm = 48 cm³。
+    """
+    from gfem.gui.state import REGION_STATS_COLUMNS
+
+    session.solve()
+    column = REGION_STATS_COLUMNS.index("体積 [cm³]")
+    total = sum(float(row[column]) for row in session.region_stats_rows())
+    assert total == pytest.approx(48.0, rel=1e-3)
+
+
 def test_region_and_electrode_geometry_for_display(session):
     # 領域ハイライト
     region = session.region_grid(3)
@@ -168,6 +194,41 @@ def test_electrode_page_shows_area_and_current_density(window):
     assert "24 面" in text
     assert "300.0 mm²" in text
     assert "6.667 A/m²" in text
+
+
+def test_renaming_an_electrode_to_an_existing_name_is_refused(window, monkeypatch):
+    shown: list[str] = []
+    monkeypatch.setattr(
+        "gfem.gui.main_window.QMessageBox.critical", lambda *args: shown.append(args[2])
+    )
+    page = window.page_electrode
+    page.bind("E2")
+    page.name_edit.setText("E1")
+    page._commit()
+
+    assert [e.name for e in window.session.study.electrodes] == ["E1", "E2"]
+    assert page.name_edit.text() == "E2"  # 入力欄も元の名前に戻る
+    assert shown and "E1" in shown[0]
+
+    # 重複しない名前なら変えられる
+    page.name_edit.setText("陰極")
+    page._commit()
+    assert [e.name for e in window.session.study.electrodes] == ["E1", "陰極"]
+
+
+def test_solver_page_keeps_a_node_reference_from_the_case_file(window):
+    """選択肢に無い基準電位（`node:<ID>`）を、ほかの項目の編集で上書きしない。
+
+    以前は他の項目を 1 つ触った時点で `zero_mean` などに置き換わっていた。
+    """
+    window.session.study.output.reference_potential = "node:1"
+    page = window.page_solver
+    page.reload()
+    assert page.reference.currentText() == "node:1"
+
+    page.max_iterations.setValue(12_345)  # 別の項目を編集する
+    assert window.session.study.solver.max_iterations == 12_345
+    assert window.session.study.output.reference_potential == "node:1"
 
 
 def test_consistency_check_reports_electrode_geometry(window):

@@ -210,6 +210,21 @@ def test_electrode_without_faces_is_reported(tmp_path):
     assert "面が指定されていません" in message
 
 
+def test_duplicate_electrode_names_are_reported(tmp_path):
+    """電極名は結果とケースファイルで電極を指す鍵なので、重複を許さない。"""
+    message = _load_bad(
+        tmp_path,
+        "version: 1\n"
+        "mesh: {file: m.bdf, length_unit: mm}\n"
+        "electrodes:\n"
+        "  - {name: E1, role: anode, current: 1.0e-3, faces: {shell_pids: [101]}}\n"
+        "  - {name: E1, role: cathode, current: 1.0e-3, faces: {shell_pids: [201]}}\n",
+    )
+    assert "E1" in message and "重複" in message
+    # どこが重複しているかを両方挙げる（CLAUDE.md 設計原則 6）
+    assert "electrodes[1]" in message and "electrodes[0]" in message
+
+
 def test_pin_gauge_is_refused(tmp_path):
     """1 節点ピン留めは採用しない（SPEC §2.2）。"""
     message = _load_bad(

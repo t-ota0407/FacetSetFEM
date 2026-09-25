@@ -286,7 +286,9 @@ impl LinearBackend for CpuParallel {
 
     fn spmv(&self, a: &&CsrMatrix, x: &Vec<f64>, y: &mut Vec<f64>) -> Result<()> {
         use rayon::prelude::*;
-        debug_assert_eq!(x.len(), a.n_rows());
+        // AMG の補間 P・制限 R は矩形なので、x は列数、y は行数に合わせる（SPEC §4.5）
+        debug_assert_eq!(x.len(), a.n_cols());
+        debug_assert_eq!(y.len(), a.n_rows());
         let (row_ptr, col_idx, values) = (a.row_ptr(), a.col_idx(), a.values());
         y.par_chunks_mut(CHUNK)
             .enumerate()
@@ -499,6 +501,38 @@ mod tests {
             CpuSerial.spmv(&ms, &x, &mut ys).unwrap();
             CpuParallel.spmv(&mp, &x, &mut yp).unwrap();
             assert_eq!(ys, yp, "n = {n}");
+        }
+    }
+
+    #[test]
+    fn parallel_spmv_handles_rectangular_matrices() {
+        // AMG の制限 R（粗 × 細）と補間 P（細 × 粗）は矩形。x は列数、y は行数になる。
+        // 以前は debug ビルドでだけ長さの検査が行数と比べていて落ちていた
+        let (rows, cols) = (CHUNK + 3, 3 * CHUNK + 7);
+        let mut row_ptr = vec![0usize];
+        let mut col_idx: Vec<u32> = Vec::new();
+        for i in 0..rows {
+            for j in [i, 2 * i + 1, cols - 1 - i] {
+                col_idx.push(j as u32);
+            }
+            let row = row_ptr.len() - 1;
+            col_idx[row_ptr[row]..].sort_unstable();
+            row_ptr.push(col_idx.len());
+        }
+        let mut r = CsrMatrix::from_structure_rect(rows, cols, row_ptr, col_idx);
+        for (k, v) in r.values_mut().iter_mut().enumerate() {
+            *v = (k as f64 * 0.61).cos();
+        }
+        let p = r.transpose();
+
+        let fine: Vec<f64> = (0..cols).map(|i| (i as f64 * 0.37).sin()).collect();
+        let coarse: Vec<f64> = (0..rows).map(|i| 1.0 / (i as f64 + 1.0)).collect();
+        for (matrix, x, n_out) in [(&r, &fine, rows), (&p, &coarse, cols)] {
+            let mut ys = vec![0.0; n_out];
+            let mut yp = vec![0.0; n_out];
+            CpuSerial.spmv(&matrix, x, &mut ys).unwrap();
+            CpuParallel.spmv(&matrix, x, &mut yp).unwrap();
+            assert_eq!(ys, yp, "{} × {}", matrix.n_rows(), matrix.n_cols());
         }
     }
 

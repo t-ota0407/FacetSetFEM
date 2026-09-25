@@ -102,7 +102,7 @@ REGION_STATS_COLUMNS = [
     "名前",
     "σ [S/m]",
     "要素数",
-    "体積 [mm³]",
+    "体積 [cm³]",
     "電力 [mW]",
     "|J| 最大",
     "|J| 平均",
@@ -268,11 +268,42 @@ class Session:
         current: float = 2.0e-3,
         shell_pids: list[int] | None = None,
     ) -> ElectrodeSpec:
+        study = self._require_study()
+        self._require_free_name(name)
         spec = ElectrodeSpec(
             name=name, role=role, current=current, shell_pids=list(shell_pids or [])
         )
-        self._require_study().electrodes.append(spec)
+        study.electrodes.append(spec)
         return spec
+
+    def rename_electrode(self, old: str, new: str) -> ElectrodeSpec:
+        """電極の名前を変える。**ほかの電極と同じ名前にはできない。**
+
+        電極名は結果とケースファイルで電極を指す鍵で、GUI のツリーや削除も
+        名前で引いている。重複を許すと、削除で両方消える・同名の陽極と陰極が
+        同じ面を指しても重なりとして捕まらない、といった壊れ方をする。
+        """
+        spec = self.electrode(old)
+        if spec is None:
+            raise GfemError(f"[設定エラー] 電極 {old} がありません")
+        new = new.strip()
+        if new == old:
+            return spec
+        self._require_free_name(new)
+        spec.name = new
+        return spec
+
+    def _require_free_name(self, name: str) -> None:
+        if not name.strip():
+            raise GfemError(
+                "[設定エラー] 電極の名前が空です\n  対処: E1・E2 のような名前を付けてください"
+            )
+        if self.electrode(name) is not None:
+            raise GfemError(
+                f"[設定エラー] 電極 {name} はすでにあります"
+                "\n  対処: 電極ごとに違う名前を付けてください"
+                "（名前は結果とケースファイルで電極を指す鍵です）"
+            )
 
     def remove_electrode(self, name: str) -> None:
         study = self._require_study()
@@ -775,6 +806,7 @@ class Session:
                     s["name"],
                     f"{s['sigma']:.4g}",
                     f"{s['n_elements']:,}",
+                    # m³ → cm³（見出しの単位と必ず揃える。以前は ×1e6 のまま mm³ と書いていた）
                     f"{s['volume'] * 1e6:.4g}",
                     f"{s['power'] * 1e3:.4g}",
                     f"{j['max']:.4g}",

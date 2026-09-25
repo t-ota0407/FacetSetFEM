@@ -276,6 +276,7 @@ class Study:
             _electrode_from(e, f"{where} の electrodes[{i}]")
             for i, e in enumerate(data.get("electrodes") or [])
         ]
+        _require_unique_names(electrodes, where)
         solver = _solver_from(data.get("solver") or {}, f"{where} の solver")
         output = _output_from(data.get("output") or {}, f"{where} の output")
 
@@ -461,6 +462,24 @@ def _electrode_from(data: Any, where_: str) -> ElectrodeSpec:
         removed_faces=removed,
         distribution=distribution,
     )
+
+
+def _require_unique_names(electrodes: list[ElectrodeSpec], where_: str) -> None:
+    """電極名の重複を止める。
+
+    電極名は結果（平均電位・実行サマリ）とケースファイルで電極を指す鍵。
+    重複していると、同名の陽極と陰極が同じ面を指しても重なりとして捕まらない
+    （コアの `Case::validate` も同じ検査をする。ここでは場所を添えて早めに止める）。
+    """
+    first: dict[str, int] = {}
+    for i, e in enumerate(electrodes):
+        if e.name in first:
+            raise _error(
+                f"電極の名前 {e.name} が重複しています",
+                f"{where_} の electrodes[{i}]（electrodes[{first[e.name]}] と同じ名前）",
+                "電極名は結果とケースファイルで電極を指す鍵なので、電極ごとに違う名前にしてください",
+            )
+        first[e.name] = i
 
 
 def _face_refs_from(data: Any, where_: str) -> list[tuple[int, int]]:

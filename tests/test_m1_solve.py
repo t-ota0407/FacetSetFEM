@@ -142,6 +142,22 @@ def test_unknown_shell_pid_is_reported(sample_bdf, slab_sigma):
     assert "PID=999" in str(excinfo.value)
 
 
+def test_duplicate_electrode_names_are_rejected(sample_bdf, slab_sigma):
+    """同名の陽極と陰極が同じ面を指しても、以前は検証を素通りしていた。
+
+    荷重が打ち消し合って 0 反復で「収束」し、R = 0 Ω・|J| = 0 の結果が
+    警告なしで返っていた。電極名の重複そのものを止める。
+    """
+    mesh = gfem.read_nastran(sample_bdf, length_unit="mm")
+    case = gfem.Case(mesh)
+    case.set_conductivity(slab_sigma)
+    case.add_electrode("E", role="anode", current=CURRENT, shell_pids=[101])
+    case.add_electrode("E", role="cathode", current=CURRENT, shell_pids=[101])
+    with pytest.raises(gfem.GfemError) as excinfo:
+        case.solve()
+    assert "同じ名前の電極" in str(excinfo.value)
+
+
 def test_bad_role_name_lists_the_choices(sample_bdf):
     mesh = gfem.read_nastran(sample_bdf, length_unit="mm")
     case = gfem.Case(mesh)

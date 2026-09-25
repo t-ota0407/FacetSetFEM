@@ -9,6 +9,11 @@ GPU が無い環境ではテストごとに `skip` する。
 
 from __future__ import annotations
 
+import json
+import os
+import subprocess
+import sys
+
 import numpy as np
 import pytest
 
@@ -136,17 +141,62 @@ def test_auto_stays_on_the_cpu_for_small_meshes(tmp_path):
     assert result.backend.startswith("cpu")
 
 
-def test_falling_back_to_the_cpu_is_never_silent(tmp_path):
-    """GPU を明示したのに使えないときは、結果に理由が残る（SPEC §4.4）。"""
-    if gpu_ready():
-        pytest.skip("GPU が使えるのでフォールバックは起きない")
-    mesh = write_deck(tmp_path, "tet")
-    case = gfem.Case(mesh)
-    case.set_conductivity(SIGMA)
-    case.add_electrode("E1", role="anode", current=CURRENT, shell_pids=[TOP_PID])
-    case.add_electrode("E2", role="cathode", current=CURRENT, shell_pids=[BOTTOM_PID])
-    case.set_solver(backend="cuda")
-    result = case.solve()
+#: GPU を隠した別プロセスで `backend: cuda` を解くスクリプト。
+#:
+#: CUDA の初期化はプロセスにつき 1 回なので、すでに GPU を掴んだテストの
+#: プロセスの中では GPU を隠せない。
+_FALLBACK_SCRIPT = r"""
+import json, sys
+import gfem
 
-    assert result.backend.startswith("cpu")
-    assert any("CPU で解きます" in w for w in result.warnings), result.warnings
+mesh = gfem.read_nastran(sys.argv[1], length_unit="mm")
+case = gfem.Case(mesh)
+case.set_conductivity({1: 0.10, 2: 0.04, 3: 0.35})
+case.add_electrode("E1", role="anode", current=2e-3, shell_pids=[101])
+case.add_electrode("E2", role="cathode", current=2e-3, shell_pids=[201])
+case.set_solver(backend="cuda")
+result = case.solve()
+summary = json.loads(result.summary_json())
+print(json.dumps({
+    "backend": result.backend,
+    "backend_setting": summary["solver"]["backend_setting"],
+    "warnings": result.warnings,
+    "potential": [float(v) for v in result.potential],
+}))
+"""
+
+
+def test_falling_back_to_the_cpu_is_never_silent(sample_bdf):
+    """GPU を明示したのに使えないときは、CPU で解いて理由を結果に残す（SPEC §4.4）。
+
+    以前はこの経路が「CUDA バックエンドが渡されていません」というエラーで止まり、
+    本当の理由（GPU が無い・VRAM が足りない）も失われていた。GPU のある開発機では
+    フォールバックが起きずに skip されていたので気づけなかった。
+    **GPU を隠した別プロセスで必ず走らせる**（`CUDA_VISIBLE_DEVICES=-1`。
+    Windows では空文字の環境変数は未設定と同じになるので -1 を使う）。
+    """
+    env = dict(os.environ, CUDA_VISIBLE_DEVICES="-1", PYTHONUTF8="1")
+    done = subprocess.run(
+        [sys.executable, "-c", _FALLBACK_SCRIPT, str(sample_bdf)],
+        env=env,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=300,
+    )
+    assert done.returncode == 0, done.stderr
+    out = json.loads(done.stdout.strip().splitlines()[-1])
+
+    assert out["backend"].startswith("cpu")
+    # 何を頼んだかは記録に残る（SPEC §5.5 のプロビナンス）
+    assert out["backend_setting"] == "cuda"
+    assert any("CPU で解きます" in w for w in out["warnings"]), out["warnings"]
+
+    # 代わりに使った CPU のソルバは、ふつうに CPU で解いたのとビット単位で同じ答えを出す
+    mesh = gfem.read_nastran(sample_bdf, length_unit="mm")
+    case = gfem.Case(mesh)
+    case.set_conductivity({1: 0.10, 2: 0.04, 3: 0.35})
+    case.add_electrode("E1", role="anode", current=2e-3, shell_pids=[101])
+    case.add_electrode("E2", role="cathode", current=2e-3, shell_pids=[201])
+    case.set_solver(backend="auto")
+    assert out["potential"] == case.solve().potential.tolist()
