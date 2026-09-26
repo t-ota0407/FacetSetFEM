@@ -16,6 +16,7 @@ use crate::element::ElementKind;
 use crate::error::{GfemError, Result, format_sample_list};
 use crate::mesh::tetview::TetView;
 use crate::mesh::{Mesh, NodeIndex};
+use rayon::prelude::*;
 
 /// 面キーの空き枠を表す番兵。
 pub const NO_NODE: NodeIndex = u32::MAX;
@@ -149,59 +150,27 @@ impl Surface {
 ///
 /// 3 個以上のソリッド要素に共有される面（非多様体）があればエラーにする。
 /// メッシュ生成側の破綻を示しており、そのまま解いても意味のある結果にならないため。
+///
+/// 面の列挙・並べ替え・走査の 3 段とも並列に行うが、どの段も逐次と同じ並びを作るので、
+/// 結果は逐次とビット単位で同じ（CLAUDE.md 設計原則 1）。1000 万節点（面 2.4 億件）で
+/// 7.8 秒かかっていて、その半分以上が逐次の面の列挙だった（SPEC §8 の「2026-09」）。
 pub fn extract_surface(mesh: &Mesh) -> Result<Surface> {
-    // (面キー, 要素通し番号, 局所面番号)
-    let n_faces: usize = mesh
-        .solids
-        .iter()
-        .map(|b| b.len() * b.kind().faces().len())
-        .sum();
-    let mut entries: Vec<(FaceKey, u32, u8)> = Vec::with_capacity(n_faces);
-    for e in mesh.iter_solids() {
-        for (lf, face) in e.kind.faces().iter().enumerate() {
-            let mut nodes = [0u32; 4];
-            for (k, &local) in face.iter().enumerate() {
-                nodes[k] = e.conn[local];
-            }
-            entries.push((face_key(&nodes[..face.len()]), e.index as u32, lf as u8));
-        }
-    }
+    let mut entries = solid_face_entries(mesh);
     sort_face_entries(&mut entries);
 
-    let mut faces: Vec<SurfaceFace> = Vec::new();
-    let mut keys: Vec<FaceKey> = Vec::new();
+    // 同じ面キーの並びが途中で切れないように区切って、区間ごとに並列に走査する。
+    // 区間の結果を区間の順につなぐので、逐次に走査したのと同じ並びになる
+    let parts: Vec<Scan> = group_ranges(&entries, rayon::current_num_threads() * 4)
+        .into_par_iter()
+        .map(|range| scan_surface(mesh, &entries[range]))
+        .collect();
+    let mut faces: Vec<SurfaceFace> = Vec::with_capacity(parts.iter().map(|p| p.faces.len()).sum());
+    let mut keys: Vec<FaceKey> = Vec::with_capacity(faces.capacity());
     let mut non_manifold: Vec<String> = Vec::new();
-
-    let mut i = 0;
-    while i < entries.len() {
-        let mut j = i + 1;
-        while j < entries.len() && entries[j].0 == entries[i].0 {
-            j += 1;
-        }
-        let count = j - i;
-        if count == 1 {
-            let (key, elem, local_face) = entries[i];
-            let e = mesh.solid(elem as usize);
-            let local = e.kind.faces()[local_face as usize];
-            let mut nodes = [NO_NODE; 4];
-            for (k, &l) in local.iter().enumerate() {
-                nodes[k] = e.conn[l];
-            }
-            faces.push(SurfaceFace {
-                nodes,
-                n_nodes: local.len() as u8,
-                element: elem,
-                local_face,
-            });
-            keys.push(key);
-        } else if count > 2 {
-            let ids: Vec<String> = entries[i..j]
-                .iter()
-                .map(|&(_, elem, _)| mesh.solid(elem as usize).id.to_string())
-                .collect();
-            non_manifold.push(format!("要素 EID={}", ids.join("/")));
-        }
-        i = j;
+    for part in parts {
+        faces.extend(part.faces);
+        keys.extend(part.keys);
+        non_manifold.extend(part.non_manifold);
     }
 
     if !non_manifold.is_empty() {
@@ -219,14 +188,119 @@ pub fn extract_surface(mesh: &Mesh) -> Result<Surface> {
     Ok(Surface { faces, keys })
 }
 
+/// `(面キー, 要素の通し番号, 局所面番号)`。
+type FaceEntry = (FaceKey, u32, u8);
+
+/// ソリッド要素の面をすべて列挙する。
+///
+/// 並びは要素の通し番号順、要素の中は局所面番号順（逐次に積んだのと同じ）。ブロックの中では
+/// 要素あたりの面の数が一定なので、面の通し番号から要素と局所面番号が決まり、並列に書ける。
+/// `par_extend` は長さの分かっている並列イテレータなら Vec の空き領域へ直接、順序どおりに
+/// 書き込む（先にゼロで埋めたり、スレッドごとの結果をつなぎ直したりしない）。
+fn solid_face_entries(mesh: &Mesh) -> Vec<FaceEntry> {
+    let total: usize = mesh
+        .solids
+        .iter()
+        .map(|b| b.len() * b.kind().faces().len())
+        .sum();
+    let mut entries: Vec<FaceEntry> = Vec::with_capacity(total);
+    let mut first_element = 0usize;
+    for block in &mesh.solids {
+        let faces = block.kind().faces();
+        let per_element = faces.len();
+        entries.par_extend((0..block.len() * per_element).into_par_iter().map(|k| {
+            let (i, lf) = (k / per_element, k % per_element);
+            let conn = block.conn_of(i);
+            let face = faces[lf];
+            let mut nodes = [0u32; 4];
+            for (m, &local) in face.iter().enumerate() {
+                nodes[m] = conn[local];
+            }
+            (
+                face_key(&nodes[..face.len()]),
+                (first_element + i) as u32,
+                lf as u8,
+            )
+        }));
+        first_element += block.len();
+    }
+    entries
+}
+
+/// 並べた列を、同じ面キーの並びが途中で切れないように `parts` 個ほどの区間に分ける。
+fn group_ranges(entries: &[FaceEntry], parts: usize) -> Vec<std::ops::Range<usize>> {
+    let n = entries.len();
+    let parts = parts.clamp(1, n.max(1));
+    let mut starts = vec![0usize];
+    for p in 1..parts {
+        // 等分点から、面キーの変わり目まで進める
+        let mut at = (n * p / parts).max(*starts.last().unwrap());
+        while at > 0 && at < n && entries[at].0 == entries[at - 1].0 {
+            at += 1;
+        }
+        if at > *starts.last().unwrap() && at < n {
+            starts.push(at);
+        }
+    }
+    starts.push(n);
+    starts.windows(2).map(|w| w[0]..w[1]).collect()
+}
+
+/// 1 区間の走査結果。
+struct Scan {
+    faces: Vec<SurfaceFace>,
+    keys: Vec<FaceKey>,
+    non_manifold: Vec<String>,
+}
+
+/// 並べた列の 1 区間から、出現回数 1 の面（外表面）と、3 回以上の面（非多様体）を拾う。
+fn scan_surface(mesh: &Mesh, entries: &[FaceEntry]) -> Scan {
+    let mut out = Scan {
+        faces: Vec::new(),
+        keys: Vec::new(),
+        non_manifold: Vec::new(),
+    };
+    let mut i = 0;
+    while i < entries.len() {
+        let mut j = i + 1;
+        while j < entries.len() && entries[j].0 == entries[i].0 {
+            j += 1;
+        }
+        let count = j - i;
+        if count == 1 {
+            let (key, elem, local_face) = entries[i];
+            let e = mesh.solid(elem as usize);
+            let local = e.kind.faces()[local_face as usize];
+            let mut nodes = [NO_NODE; 4];
+            for (k, &l) in local.iter().enumerate() {
+                nodes[k] = e.conn[l];
+            }
+            out.faces.push(SurfaceFace {
+                nodes,
+                n_nodes: local.len() as u8,
+                element: elem,
+                local_face,
+            });
+            out.keys.push(key);
+        } else if count > 2 {
+            let ids: Vec<String> = entries[i..j]
+                .iter()
+                .map(|&(_, elem, _)| mesh.solid(elem as usize).id.to_string())
+                .collect();
+            out.non_manifold.push(format!("要素 EID={}", ids.join("/")));
+        }
+        i = j;
+    }
+    out
+}
+
 /// `(面キー, 要素（四面体）の通し番号, 局所面番号)` の列を並べる。
 ///
 /// 並列に並べても結果は逐次と同じ（CLAUDE.md 設計原則 1）。要素番号と局所面番号の組は
 /// どの 2 つも異なるので、並べ終わった列は入力によって一意に決まり、不安定ソートでも
 /// 並び方がぶれない。外表面の抽出は大規模モデルの前処理でいちばん重い段階
 /// （1000 万節点で 2.4 億件）なので、ここを並列にする。
-fn sort_face_entries(entries: &mut [(FaceKey, u32, u8)]) {
-    use rayon::prelude::*;
+fn sort_face_entries(entries: &mut [FaceEntry]) {
     entries.par_sort_unstable();
 }
 
@@ -275,14 +349,16 @@ impl FaceAdjacency {
 /// 共有されるか外表面かのどちらかになる。
 pub fn build_face_adjacency(tets: &TetView) -> FaceAdjacency {
     let n = tets.len();
-    let mut entries: Vec<(FaceKey, u32, u8)> = Vec::with_capacity(n * 4);
-    for t in 0..n {
+    // 面の列挙は外表面の抽出と同じく、逐次と同じ並びのまま並列に書く
+    let faces = ElementKind::Tet4.faces();
+    let mut entries: Vec<FaceEntry> = Vec::with_capacity(n * 4);
+    entries.par_extend((0..n * 4).into_par_iter().map(|k| {
+        let (t, lf) = (k / 4, k % 4);
         let conn = tets.conn_of(t);
-        for (lf, face) in ElementKind::Tet4.faces().iter().enumerate() {
-            let nodes: [NodeIndex; 3] = [conn[face[0]], conn[face[1]], conn[face[2]]];
-            entries.push((face_key(&nodes), t as u32, lf as u8));
-        }
-    }
+        let face = faces[lf];
+        let nodes: [NodeIndex; 3] = [conn[face[0]], conn[face[1]], conn[face[2]]];
+        (face_key(&nodes), t as u32, lf as u8)
+    }));
     sort_face_entries(&mut entries);
 
     let mut adjacency = FaceAdjacency {
@@ -441,5 +517,132 @@ CTETRA,11,1,5,4,3,2
         assert_eq!(face_key(&[3, 1, 2]), face_key(&[1, 2, 3]));
         assert_eq!(face_key(&[3, 1, 2]), [1, 2, 3, NO_NODE]);
         assert_ne!(face_key(&[1, 2, 3]), face_key(&[1, 2, 3, 4]));
+    }
+
+    /// 以前の逐次の手順そのまま（列挙・並べ替え・走査をすべて逐次で行う）。
+    fn serial_surface(mesh: &Mesh) -> (Vec<SurfaceFace>, Vec<FaceKey>) {
+        let mut entries: Vec<FaceEntry> = Vec::new();
+        for e in mesh.iter_solids() {
+            for (lf, face) in e.kind.faces().iter().enumerate() {
+                let nodes: Vec<NodeIndex> = face.iter().map(|&l| e.conn[l]).collect();
+                entries.push((face_key(&nodes), e.index as u32, lf as u8));
+            }
+        }
+        entries.sort_unstable();
+        let scan = scan_surface(mesh, &entries);
+        (scan.faces, scan.keys)
+    }
+
+    /// 六面体・三角柱・四面体のブロックが並んだメッシュ（要素の通し番号がブロックをまたぐ）。
+    fn mixed_blocks() -> Mesh {
+        let mut deck = String::from("PSOLID,1,1\n");
+        // 3 × 2 × 2 の格子点
+        let node = |i: usize, j: usize, k: usize| 1 + i + 4 * (j + 3 * k);
+        for k in 0..3 {
+            for j in 0..3 {
+                for i in 0..4 {
+                    deck.push_str(&format!("GRID,{},,{i}.0,{j}.0,{k}.0\n", node(i, j, k)));
+                }
+            }
+        }
+        let mut eid = 1;
+        for k in 0..2 {
+            for j in 0..2 {
+                let c = |i: usize, dj: usize, dk: usize| node(i, j + dj, k + dk);
+                // x = 0〜1 は六面体
+                deck.push_str(&format!(
+                    "CHEXA,{eid},1,{},{},{},{},{},{},\n,{},{}\n",
+                    c(0, 0, 0),
+                    c(1, 0, 0),
+                    c(1, 1, 0),
+                    c(0, 1, 0),
+                    c(0, 0, 1),
+                    c(1, 0, 1),
+                    c(1, 1, 1),
+                    c(0, 1, 1)
+                ));
+                eid += 1;
+                // x = 1〜2 は三角柱 2 つ（軸は x 方向）
+                for tri in [[(0, 0), (1, 0), (1, 1)], [(0, 0), (1, 1), (0, 1)]] {
+                    let [a, b, d] = tri;
+                    deck.push_str(&format!(
+                        "CPENTA,{eid},1,{},{},{},{},{},{}\n",
+                        c(1, a.0, a.1),
+                        c(1, b.0, b.1),
+                        c(1, d.0, d.1),
+                        c(2, a.0, a.1),
+                        c(2, b.0, b.1),
+                        c(2, d.0, d.1)
+                    ));
+                    eid += 1;
+                }
+                // x = 2〜3 は四面体（Kuhn の 6 分割）
+                let corner = |q: usize| c(2 + (q & 1), (q >> 1) & 1, (q >> 2) & 1);
+                for t in [
+                    [0, 1, 3, 7],
+                    [0, 1, 7, 5],
+                    [0, 5, 7, 4],
+                    [0, 3, 2, 7],
+                    [0, 6, 4, 7],
+                    [0, 2, 6, 7],
+                ] {
+                    deck.push_str(&format!(
+                        "CTETRA,{eid},1,{},{},{},{}\n",
+                        corner(t[0]),
+                        corner(t[1]),
+                        corner(t[2]),
+                        corner(t[3])
+                    ));
+                    eid += 1;
+                }
+            }
+        }
+        read(&deck)
+    }
+
+    #[test]
+    fn parallel_extraction_matches_the_serial_procedure() {
+        // 面の列挙・並べ替え・走査を並列にしても、並びまで逐次と同じ（CLAUDE.md 設計原則 1）
+        let mixed = mixed_blocks();
+        assert_eq!(
+            mixed.solids.len(),
+            3,
+            "六面体・三角柱・四面体の 3 ブロックのはず"
+        );
+        assert_eq!(mixed.n_solid_elements(), 4 + 8 + 24);
+        for mesh in [crate::testing::kuhn_box([9, 7, 5], [1.0; 3]), mixed] {
+            let surface = extract_surface(&mesh).unwrap();
+            let (faces, keys) = serial_surface(&mesh);
+            assert!(!faces.is_empty());
+            assert_eq!(surface.faces, faces);
+            assert_eq!(surface.keys, keys);
+        }
+    }
+
+    #[test]
+    fn group_ranges_never_split_a_run_of_equal_keys() {
+        // 同じ面キーが 1〜3 回ずつ続く列。どの切り方でも、区間は隙間なく並び、
+        // 同じ面キーの並びを途中で切らない
+        let mut entries: Vec<FaceEntry> = Vec::new();
+        for k in 0..500u32 {
+            for r in 0..(1 + k % 3) {
+                entries.push(([k, k + 1, k + 2, NO_NODE], r, 0));
+            }
+        }
+        for parts in [1, 2, 3, 7, 64, 10_000] {
+            let ranges = group_ranges(&entries, parts);
+            assert_eq!(ranges.first().unwrap().start, 0);
+            assert_eq!(ranges.last().unwrap().end, entries.len());
+            for w in ranges.windows(2) {
+                assert_eq!(w[0].end, w[1].start);
+                assert!(w[0].start < w[0].end, "空の区間がある");
+                assert_ne!(
+                    entries[w[1].start].0,
+                    entries[w[1].start - 1].0,
+                    "{parts}: 並びを切った"
+                );
+            }
+        }
+        assert_eq!(group_ranges(&[], 8), vec![0..0]);
     }
 }
