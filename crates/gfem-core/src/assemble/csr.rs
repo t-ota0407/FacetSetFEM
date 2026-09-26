@@ -214,7 +214,7 @@ impl CsrMatrix {
     }
 }
 
-/// 行列のグラフの連結成分を数える（幅優先探索、O(nnz)）。
+/// 行列のグラフの連結成分を数える（並列な union-find、ほぼ O(nnz)）。
 ///
 /// SPEC §2.2 は「K の零空間は定数ベクトル span{1}」を前提に射影 CG を組む。
 /// これが成り立つのは**メッシュが連結なとき**だけで、非連結なら零空間の次元が
@@ -222,29 +222,70 @@ impl CsrMatrix {
 ///
 /// 戻り値は `(成分数, 節点ごとの成分番号)`。成分番号は「その成分に属する最小の節点番号」
 /// の順に 0, 1, 2, ... と振るので、入力が同じなら常に同じ番号になる。
+///
+/// 以前は逐次の探索で、1000 万節点で 0.9 秒かかっていた。いまは非ゼロ（辺）ごとに並列に
+/// 根どうしをつなぐ。**大きい根を必ず小さい根の下につなぐ**（親は常に自分より小さい）ので、
+/// つなぐ順序がどうであれ、各成分の根はその成分の最小の節点になる。成分の分け方は
+/// グラフだけで決まり、番号も根の順に振るので、結果は処理の順序に依らない。
 pub fn connected_components(matrix: &CsrMatrix) -> (usize, Vec<u32>) {
-    const UNVISITED: u32 = u32::MAX;
+    use rayon::prelude::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
     let n = matrix.n_rows();
-    let mut component = vec![UNVISITED; n];
-    let mut count = 0u32;
-    let mut stack: Vec<u32> = Vec::new();
-    for start in 0..n {
-        if component[start] != UNVISITED {
-            continue;
+    let parent: Vec<AtomicU32> = (0..n as u32).into_par_iter().map(AtomicU32::new).collect();
+
+    // 根を探す。途中で親を祖父に付け替えて経路を縮める（祖父は親より小さいので、
+    // 「親は自分より小さい」は崩れない）
+    let find = |mut x: u32| -> u32 {
+        loop {
+            let p = parent[x as usize].load(Ordering::Acquire);
+            if p == x {
+                return x;
+            }
+            let g = parent[p as usize].load(Ordering::Acquire);
+            if g != p {
+                let _ =
+                    parent[x as usize].compare_exchange(p, g, Ordering::AcqRel, Ordering::Acquire);
+            }
+            x = g;
         }
-        component[start] = count;
-        stack.push(start as u32);
-        while let Some(node) = stack.pop() {
-            let (cols, _) = matrix.row(node as usize);
-            for &c in cols {
-                if component[c as usize] == UNVISITED {
-                    component[c as usize] = count;
-                    stack.push(c);
+    };
+
+    (0..n).into_par_iter().with_min_len(1_024).for_each(|i| {
+        let (cols, _) = matrix.row(i);
+        for &j in cols {
+            if j as usize == i {
+                continue;
+            }
+            let (mut a, mut b) = (i as u32, j);
+            loop {
+                a = find(a);
+                b = find(b);
+                if a == b {
+                    break;
+                }
+                let (high, low) = if a > b { (a, b) } else { (b, a) };
+                // high がまだ根なら low の下につなぐ。誰かに先を越されたら探し直す
+                if parent[high as usize]
+                    .compare_exchange(high, low, Ordering::AcqRel, Ordering::Acquire)
+                    .is_ok()
+                {
+                    break;
                 }
             }
         }
-        count += 1;
+    });
+
+    let root: Vec<u32> = (0..n as u32).into_par_iter().map(find).collect();
+    // 成分番号は根（＝成分の最小の節点）の順
+    let mut id = vec![0u32; n];
+    let mut count = 0u32;
+    for (i, &r) in root.iter().enumerate() {
+        if r as usize == i {
+            id[i] = count;
+            count += 1;
+        }
     }
+    let component: Vec<u32> = root.par_iter().map(|&r| id[r as usize]).collect();
     (count as usize, component)
 }
 
@@ -287,6 +328,72 @@ mod tests {
         m.values_mut()
             .copy_from_slice(&[2.0, -1.0, -1.0, 2.0, -1.0, -1.0, 2.0]);
         m
+    }
+
+    /// 以前の逐次の探索（最小の未訪問節点から順に辿り、見つけた順に番号を振る）。
+    fn serial_components(m: &CsrMatrix) -> (usize, Vec<u32>) {
+        let n = m.n_rows();
+        let mut component = vec![u32::MAX; n];
+        let mut count = 0u32;
+        for start in 0..n {
+            if component[start] != u32::MAX {
+                continue;
+            }
+            component[start] = count;
+            let mut stack = vec![start];
+            while let Some(i) = stack.pop() {
+                for &j in m.row(i).0 {
+                    if component[j as usize] == u32::MAX {
+                        component[j as usize] = count;
+                        stack.push(j as usize);
+                    }
+                }
+            }
+            count += 1;
+        }
+        (count as usize, component)
+    }
+
+    #[test]
+    fn parallel_components_match_the_serial_search() {
+        // 節点番号が入り組んだ（互いに挟み合う）連結成分をいくつも持つ大きなグラフ。
+        // 並列に根をつないでも、成分の分け方と番号（最小の節点の順）が逐次と同じ
+        let n = 60_000usize;
+        let component_of = |i: usize| (i * 7919 % 13) as u32; // 13 個の成分に散らばる
+        let mut members: Vec<Vec<u32>> = vec![Vec::new(); 13];
+        for i in 0..n {
+            members[component_of(i) as usize].push(i as u32);
+        }
+        // 各成分を、少し先の仲間と結ぶ鎖と飛び石にする（対称な構造）
+        let mut rows: Vec<Vec<u32>> = vec![Vec::new(); n];
+        for list in &members {
+            for (k, &i) in list.iter().enumerate() {
+                for step in [1usize, 37] {
+                    if let Some(&j) = list.get(k + step) {
+                        rows[i as usize].push(j);
+                        rows[j as usize].push(i);
+                    }
+                }
+            }
+        }
+        let mut row_ptr = vec![0usize];
+        let mut col_idx = Vec::new();
+        for (i, mut row) in rows.into_iter().enumerate() {
+            row.push(i as u32);
+            row.sort_unstable();
+            row.dedup();
+            col_idx.extend(row);
+            row_ptr.push(col_idx.len());
+        }
+        let m = CsrMatrix::from_structure(n, row_ptr, col_idx);
+        let expected = serial_components(&m);
+        assert_eq!(expected.0, 13);
+        for _ in 0..3 {
+            assert_eq!(connected_components(&m), expected);
+        }
+        // 孤立した節点だけの行列（どの節点も自分だけの成分）
+        let lonely = CsrMatrix::from_structure(5, (0..=5).collect(), (0..5).collect());
+        assert_eq!(connected_components(&lonely), (5, vec![0, 1, 2, 3, 4]));
     }
 
     #[test]

@@ -19,7 +19,7 @@ use crate::mesh::Mesh;
 pub use adjacency::{NodeElements, assemble_stiffness_parallel, build_node_elements};
 pub use csr::{CsrMatrix, connected_components, require_connected};
 pub use load::{ElectrodeGeometry, assemble_load};
-pub use sparsity::build_sparsity;
+pub use sparsity::{build_sparsity, build_sparsity_with};
 pub use stiffness::assemble_stiffness;
 
 /// 解くべき線形システム `K φ = f`。
@@ -46,10 +46,11 @@ pub fn assemble(
     lookup: &FaceLookup,
     parallel: bool,
 ) -> Result<LinearSystem> {
-    let mut matrix = build_sparsity(mesh)?;
+    // 節点 → 要素の表は、非ゼロ構造と並列アセンブリの両方で使う（作るのは 1 回）
+    let adjacency = build_node_elements(mesh);
+    let mut matrix = build_sparsity_with(mesh, &adjacency)?;
     require_connected(&matrix)?;
     if parallel {
-        let adjacency = build_node_elements(mesh);
         assemble_stiffness_parallel(mesh, &case.conductivity, &adjacency, &mut matrix)?;
     } else {
         assemble_stiffness(mesh, &case.conductivity, &mut matrix)?;

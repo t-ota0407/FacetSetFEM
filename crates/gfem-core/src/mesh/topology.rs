@@ -16,6 +16,7 @@ use crate::element::ElementKind;
 use crate::error::{GfemError, Result, format_sample_list};
 use crate::mesh::tetview::TetView;
 use crate::mesh::{Mesh, NodeIndex};
+use crate::parallel::{BucketKey, bucket_sort, drop_in_background};
 use rayon::prelude::*;
 
 /// 面キーの空き枠を表す番兵。
@@ -154,7 +155,7 @@ impl Surface {
 /// 面の列挙・並べ替え・走査の 3 段とも並列に行うが、どの段も逐次と同じ並びを作るので、
 /// 結果は逐次とビット単位で同じ（CLAUDE.md 設計原則 1）。1000 万節点（面 2.4 億件）で
 /// 以前は 7.8 秒（逐次の面の列挙 4.0 秒 + 比較ソート 2.8 秒）、いまは 1.8 秒
-/// （並べ替えは `sorted_face_entries` の振り分け。SPEC §8 の「2026-09」）。
+/// （並べ替えは振り分けソート `parallel::bucket_sort`。SPEC §8 の「2026-09」）。
 pub fn extract_surface(mesh: &Mesh) -> Result<Surface> {
     // ブロックごとの面の通し番号の始まり。ブロックの中では要素あたりの面の数が一定なので、
     // 面の通し番号から要素と局所面番号が決まる
@@ -178,7 +179,7 @@ pub fn extract_surface(mesh: &Mesh) -> Result<Surface> {
         }
         (nodes, local.len(), (first_element + i) as u32, lf as u8)
     };
-    let entries = sorted_face_entries(
+    let entries = bucket_sort(
         first_face,
         mesh.nodes.len(),
         |k| {
@@ -229,138 +230,12 @@ pub fn extract_surface(mesh: &Mesh) -> Result<Surface> {
 /// `(面キー, 要素の通し番号, 局所面番号)`。
 type FaceEntry = (FaceKey, u32, u8);
 
-/// 面を `(面キー, 要素, 局所面番号)` の昇順に並べた列を作る（外表面と面の隣接で共通）。
-///
-/// `entry(k)` は k 番目（0 ≤ k < `n`）の面、`smallest(k)` はその面の最小の節点（面キーの先頭と
-/// 同じもの。面キーを作るより安いので、枚数を数えるときに使う）、`n_nodes` は節点数。
-/// 以前は全部を列挙してから比較ソートしていた（1000 万節点の 2.4 億件で 2.8 秒。
-/// SPEC §8 の「2026-09」）。いまは面キーの**最小の節点**で粗く振り分けてから（計数ソート）、
-/// 小さな組ごとに並べる:
-///
-/// 1. 面の通し番号を区間に分け、区間ごとに、組ごとの枚数を数える
-/// 2. 出力を「組の順、組の中は区間の順」に切り分け、区間ごとに自分の切れ端を受け取る
-/// 3. 区間ごとに、自分の切れ端へ面を書き込む（区間どうしで書く場所は重ならない）
-/// 4. 組ごとに並べる（1 組は数千件なのでキャッシュに載る）
-///
-/// 面キーは節点索引を昇順に詰めたものなので先頭が最小の節点で、組の順に並べれば全体も
-/// 面キーの順になる。`(面キー, 要素, 局所面番号)` はどれも異なるので、並べ終わった列は
-/// 入力だけで決まり、全体を比較ソートしたものと 1 件もずれない（CLAUDE.md 設計原則 1）。
-fn sorted_face_entries<S, F>(n: usize, n_nodes: usize, smallest: S, entry: F) -> Vec<FaceEntry>
-where
-    S: Fn(usize) -> NodeIndex + Sync,
-    F: Fn(usize) -> FaceEntry + Sync,
-{
-    bucket_sorted(n, n_nodes, FACES_PER_BUCKET, smallest, entry)
+/// 面の列は面キーの最小の節点（先頭）で振り分けて並べる（[`crate::parallel::bucket_sort`]）。
+impl BucketKey for FaceEntry {
+    fn bucket_key(&self) -> u32 {
+        self.0[0]
+    }
 }
-
-/// [`sorted_face_entries`] の本体。1 組あたりの枚数の目安 `faces_per_bucket` を外から
-/// 変えられるようにしてある（テストで組を極端に小さくして、振り分けの経路を確かめる）。
-fn bucket_sorted<S, F>(
-    n: usize,
-    n_nodes: usize,
-    faces_per_bucket: usize,
-    smallest: S,
-    entry: F,
-) -> Vec<FaceEntry>
-where
-    S: Fn(usize) -> NodeIndex + Sync,
-    F: Fn(usize) -> FaceEntry + Sync,
-{
-    if n == 0 {
-        return Vec::new();
-    }
-    // 1 組が数千件になるよう、節点索引を 2 の冪で粗くしたものを組にする
-    let target = (n / faces_per_bucket.max(1)).clamp(1, MAX_BUCKETS);
-    let mut shift = 0u32;
-    while (n_nodes >> shift) > target {
-        shift += 1;
-    }
-    let n_buckets = (n_nodes.saturating_sub(1) >> shift) + 1;
-    let bucket_of = |e: &FaceEntry| (e.0[0] as usize) >> shift;
-
-    let n_parts = (rayon::current_num_threads() * 4).clamp(1, n);
-    let part = |p: usize| (n * p / n_parts)..(n * (p + 1) / n_parts);
-
-    // 1. 区間ごとの、組ごとの枚数
-    let counts: Vec<Vec<u32>> = (0..n_parts)
-        .into_par_iter()
-        .map(|p| {
-            let mut count = vec![0u32; n_buckets];
-            for k in part(p) {
-                count[smallest(k) as usize >> shift] += 1;
-            }
-            count
-        })
-        .collect();
-
-    // 2. 出力を切り分ける。ゼロで確保するので、OS からゼロ済みのページが遅延で渡り、
-    //    実際に触るのは 3 の並列な書き込みのとき（ゼロ以外で埋めると逐次に 1 秒かかる）
-    let mut out: Vec<FaceEntry> = vec![([0; 4], 0, 0); n];
-    let mut pieces: Vec<Vec<&mut [FaceEntry]>> = (0..n_parts)
-        .map(|_| Vec::with_capacity(n_buckets))
-        .collect();
-    let mut buckets: Vec<usize> = Vec::with_capacity(n_buckets);
-    let mut rest: &mut [FaceEntry] = &mut out;
-    for b in 0..n_buckets {
-        let mut size = 0;
-        for (p, count) in counts.iter().enumerate() {
-            let (head, tail) = std::mem::take(&mut rest).split_at_mut(count[b] as usize);
-            pieces[p].push(head);
-            rest = tail;
-            size += count[b] as usize;
-        }
-        buckets.push(size);
-    }
-
-    // 3. 区間ごとに、自分の切れ端へ書き込む
-    pieces
-        .into_par_iter()
-        .enumerate()
-        .for_each(|(p, mut mine)| {
-            let mut cursor = vec![0usize; n_buckets];
-            for k in part(p) {
-                let e = entry(k);
-                let b = bucket_of(&e);
-                mine[b][cursor[b]] = e;
-                cursor[b] += 1;
-            }
-        });
-
-    // 4. 組ごとに並べる
-    let mut groups: Vec<&mut [FaceEntry]> = Vec::with_capacity(n_buckets);
-    let mut rest: &mut [FaceEntry] = &mut out;
-    for size in buckets {
-        let (head, tail) = std::mem::take(&mut rest).split_at_mut(size);
-        groups.push(head);
-        rest = tail;
-    }
-    groups.into_par_iter().for_each(|g| g.sort_unstable());
-    out
-}
-
-/// 大きな列の解放を別のスレッドに任せる。
-///
-/// 1000 万節点の面の列（2.4 億件、5.7 GB）は、解放するだけで 0.5 秒かかる（OS にページを
-/// 返す）。解放がいつ終わっても結果には関係しないので、呼び出し側を待たせない。
-/// 小さな列はスレッドを立てるほうが高くつくので、その場で解放する。スレッドを立てられ
-/// なかったときも、渡した列はその場で解放される。
-fn drop_in_background<T: Send + 'static>(v: Vec<T>) {
-    if v.capacity() * std::mem::size_of::<T>() < BACKGROUND_DROP_BYTES {
-        return;
-    }
-    let _ = std::thread::Builder::new()
-        .name("gfem-drop".into())
-        .spawn(move || drop(v));
-}
-
-/// これより大きな列の解放は別のスレッドに任せる（[`drop_in_background`]）。
-const BACKGROUND_DROP_BYTES: usize = 64 << 20;
-
-/// 振り分けの 1 組あたりの面の枚数の目安。組がキャッシュに載る大きさにする。
-const FACES_PER_BUCKET: usize = 4096;
-
-/// 振り分けの組の数の上限（区間ごとに組の数だけ数える欄を持つので、増やしすぎない）。
-const MAX_BUCKETS: usize = 1 << 16;
 
 /// 並べた列を、同じ面キーの並びが途中で切れないように `parts` 個ほどの区間に分ける。
 fn group_ranges(entries: &[FaceEntry], parts: usize) -> Vec<std::ops::Range<usize>> {
@@ -480,7 +355,7 @@ pub fn build_face_adjacency(tets: &TetView) -> FaceAdjacency {
         let face = faces[k % 4];
         [conn[face[0]], conn[face[1]], conn[face[2]]]
     };
-    let entries = sorted_face_entries(
+    let entries = bucket_sort(
         n * 4,
         tets.n_nodes(),
         |k| nodes(k).into_iter().min().expect("面には節点がある"),
@@ -773,11 +648,17 @@ CTETRA,11,1,5,4,3,2
         let n = 40_000;
         let mut expected: Vec<FaceEntry> = (0..n).map(entry).collect();
         expected.sort_unstable();
-        for faces_per_bucket in [1, 3, 64, FACES_PER_BUCKET, usize::MAX] {
-            let got = bucket_sorted(n, n_nodes, faces_per_bucket, |k| entry(k).0[0], entry);
+        for faces_per_bucket in [1, 3, 64, 4096, usize::MAX] {
+            let got = crate::parallel::bucket_sort_with(
+                n,
+                n_nodes,
+                faces_per_bucket,
+                |k| entry(k).0[0],
+                entry,
+            );
             assert!(got == expected, "組の目安 {faces_per_bucket} 件でずれた");
         }
-        assert!(bucket_sorted(0, n_nodes, 1, |k| entry(k).0[0], entry).is_empty());
+        assert!(bucket_sort(0, n_nodes, |k| entry(k).0[0], entry).is_empty());
     }
 
     #[test]

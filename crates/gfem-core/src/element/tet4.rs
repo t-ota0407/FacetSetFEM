@@ -76,6 +76,19 @@ pub fn tet4_stiffness(shape: &Tet4Shape, sigma: &Conductivity) -> [[f64; 4]; 4] 
     k
 }
 
+/// [`tet4_stiffness`] の `row` 行目だけ（並列アセンブリ用）。
+///
+/// 全体を作るときと同じ式を同じ順で計算するので、値は全体の同じ行とビット単位で同じ。
+pub fn tet4_stiffness_row(shape: &Tet4Shape, sigma: &Conductivity, row: usize) -> [f64; 4] {
+    let mut k = [0.0f64; 4];
+    let v = shape.volume;
+    for (j, kj) in k.iter_mut().enumerate() {
+        let sg = sigma.apply(shape.grad[j]);
+        *kj = v * dot(shape.grad[row], sg);
+    }
+    k
+}
+
 /// 要素内の電界 `E = −∇φ`（SPEC §5.1）。Tet4 では要素内で一定。
 pub fn tet4_electric_field(shape: &Tet4Shape, phi: &[f64; 4]) -> [f64; 3] {
     let mut e = [0.0f64; 3];
@@ -184,6 +197,32 @@ mod tests {
         assert!((e[0] + 2.0).abs() < 1e-13, "{e:?}");
         assert!((e[1] - 3.0).abs() < 1e-13, "{e:?}");
         assert!((e[2] + 0.5).abs() < 1e-13, "{e:?}");
+    }
+
+    #[test]
+    fn a_single_row_is_bitwise_the_row_of_the_full_matrix() {
+        // 並列アセンブリは 1 行ずつ作る。全体を作った行とビット単位で同じでなければならない
+        let p = [
+            [0.1, 0.0, 0.2],
+            [2.0, 0.3, 0.0],
+            [0.3, 1.7, 0.1],
+            [0.4, 0.6, 2.5],
+        ];
+        let s = tet4_shape(&p);
+        for sigma in [
+            Conductivity::isotropic(0.35).unwrap(),
+            Conductivity::isotropic(1.0 / 3.0).unwrap(),
+        ] {
+            let full = tet4_stiffness(&s, &sigma);
+            for (row, expected) in full.iter().enumerate() {
+                let got = tet4_stiffness_row(&s, &sigma, row);
+                assert_eq!(
+                    got.map(f64::to_bits),
+                    expected.map(f64::to_bits),
+                    "行 {row}"
+                );
+            }
+        }
     }
 
     #[test]

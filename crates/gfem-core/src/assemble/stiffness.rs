@@ -40,6 +40,33 @@ pub fn assemble_stiffness(
     Ok(())
 }
 
+/// 四面体の要素剛性の `row` 行目だけ（並列アセンブリ用。SPEC §2.3 Tet4 要素剛性）。
+///
+/// 並列アセンブリは行ごとに要素をたどるので、要素 1 つにつき要るのはその行だけ。
+/// 値は [`element_stiffness`] で全体を作ったときの同じ行とビット単位で同じ
+/// （同じ式を同じ順で計算する。`element::tet4` のテストで確かめている）。
+pub(crate) fn tet4_row(
+    mesh: &Mesh,
+    e: &ElementRef<'_>,
+    sigma: &Conductivity,
+    row: usize,
+) -> Result<[f64; 4]> {
+    let p = mesh.tet4_coords(e.conn);
+    let shape = tet4::tet4_shape(&p);
+    if shape.volume <= 0.0 {
+        return Err(degenerate_tet(e));
+    }
+    Ok(tet4::tet4_stiffness_row(&shape, sigma, row))
+}
+
+/// 体積がゼロ以下の四面体のエラー。
+fn degenerate_tet(e: &ElementRef<'_>) -> GfemError {
+    GfemError::model("体積がゼロの要素があります")
+        .with_card("CTETRA")
+        .with_entity(format!("要素 EID={}", e.id))
+        .with_hint("退化した四面体です。メッシュ生成側で修正してください")
+}
+
 /// 1 要素分の剛性行列を `local` に書く。
 ///
 /// 要素種ごとに違うのは形状関数と積分則だけなので、Hex8 / Penta6 は共通の
@@ -62,10 +89,7 @@ pub(crate) fn element_stiffness(
             let p = mesh.tet4_coords(e.conn);
             let shape = tet4::tet4_shape(&p);
             if shape.volume <= 0.0 {
-                return Err(GfemError::model("体積がゼロの要素があります")
-                    .with_card("CTETRA")
-                    .with_entity(format!("要素 EID={}", e.id))
-                    .with_hint("退化した四面体です。メッシュ生成側で修正してください"));
+                return Err(degenerate_tet(e));
             }
             let ke = tet4::tet4_stiffness(&shape, sigma);
             for row in local.iter_mut() {

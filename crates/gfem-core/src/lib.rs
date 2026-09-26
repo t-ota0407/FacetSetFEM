@@ -25,6 +25,7 @@ mod geom;
 pub mod io;
 pub mod material;
 pub mod mesh;
+mod parallel;
 pub mod post;
 pub mod provenance;
 pub mod solver;
