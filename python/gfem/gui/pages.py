@@ -38,6 +38,7 @@ from .state import (
     SHAPE_FIELD,
     TISSUE_HINTS,
     Session,
+    field_by_key,
 )
 
 if TYPE_CHECKING:
@@ -97,6 +98,10 @@ def describe_selection(info: dict) -> tuple[str, bool]:
     text += f"（指定 {info['nominal_area'] * 1e4:.2f} cm²、{mismatch:+.1%}）"
     return text, abs(mismatch) > AREA_MISMATCH_WARNING
 
+
+#: 結果ページのボタンの文言。形状表示と、その前に見ていた結果の表示を行き来する
+SHOW_SHAPE_LABEL = "形状表示に戻す"
+SHOW_RESULT_LABEL = "結果の表示に戻す"
 
 #: 3D ビューの表示モード（表示名, 内部名）
 VIEW_MODES = [
@@ -848,6 +853,9 @@ class ResultPage(QWidget):
         self._loading = False
         #: 稜線の既定を決めたときのモデル（開き直したときだけ入れ直す）
         self._mesh_key = None
+        #: 「形状表示に戻す」を押す前の見方（表示量・表示モード・流線）。
+        #: 覚えている間はボタンが「結果の表示に戻す」になる
+        self._saved_view: dict | None = None
 
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel("<b>表示</b>"))
@@ -863,12 +871,8 @@ class ResultPage(QWidget):
         form.addRow("カラーマップ", self.cmap)
         layout.addLayout(form)
 
-        self.shape_button = QPushButton("形状表示に戻す")
-        self.shape_button.setToolTip(
-            "色分けをやめ、全体表示にして流線も外します。結果は消えないので、\n"
-            "表示量を選び直せばいつでも見直せます。"
-        )
-        self.shape_button.clicked.connect(self.show_shape)
+        self.shape_button = QPushButton(SHOW_SHAPE_LABEL)
+        self.shape_button.clicked.connect(self.toggle_shape)
         layout.addWidget(self.shape_button)
 
         self.edges = QCheckBox("要素の稜線を表示")
@@ -933,9 +937,17 @@ class ResultPage(QWidget):
         self.slice_position.valueChanged.connect(self._refresh)
         self.iso_level.valueChanged.connect(self._refresh)
         self.n_seeds.valueChanged.connect(self._refresh)
+        # 形状表示の間に見方を自分で選び直したら、覚えていた見方は捨てる
+        # （もう別の見方に移っている）。稜線やカラーマップは見方に含めない
+        self.field.currentIndexChanged.connect(self._forget_saved_view)
+        self.mode.currentIndexChanged.connect(self._forget_saved_view)
+        self.streamlines.toggled.connect(self._forget_saved_view)
+        self._update_shape_button()
 
     def reload(self) -> None:
         session = self.window.session
+        if session.solution is None:
+            self._saved_view = None  # モデルを開き直して結果が無くなった
         self._loading = True
         self._apply_size_defaults()
         previous = self.field.currentData()
@@ -950,6 +962,7 @@ class ResultPage(QWidget):
             session.result_summary() if session.study is not None else ""
         )
         self._loading = False
+        self._update_shape_button()
 
     def _apply_size_defaults(self) -> None:
         """モデルを開き直したとき、規模に合わせて稜線の既定を決める。
@@ -978,25 +991,86 @@ class ResultPage(QWidget):
         形だけ見ていた状態から結果の表示へ自然に移る。すでに別の量を選んで
         いるときは、その選択を尊重して何もしない。
         """
-        if self.field.currentData() != SHAPE_FIELD:
-            return
-        index = self.field.findData(DEFAULT_RESULT_FIELD)
-        if index >= 0:
-            self.field.setCurrentIndex(index)
+        # 新しい結果が出た。形状表示の前に見ていたのは古い結果の見方なので捨てる
+        self._saved_view = None
+        if self.field.currentData() == SHAPE_FIELD:
+            index = self.field.findData(DEFAULT_RESULT_FIELD)
+            if index >= 0:
+                self.field.setCurrentIndex(index)
+        self._update_shape_button()
+
+    def _view(self) -> dict:
+        """いまの見方（形状表示との行き来で覚えて戻すもの）。"""
+        return {
+            "field": self.field.currentData(),
+            "mode": self.mode.currentData(),
+            "streamlines": self.streamlines.isChecked(),
+        }
+
+    def _is_plain_shape(self) -> bool:
+        """色分けなし・全体表示・流線なし（解く前の見た目）か。"""
+        return self._view() == {"field": SHAPE_FIELD, "mode": "volume", "streamlines": False}
+
+    def _apply_view(self, view: dict) -> None:
+        """見方をまとめて変え、描き直しは 1 回だけにする（1 つずつだと 3 回走る）。"""
+        self._loading = True
+        try:
+            index = self.field.findData(view["field"])
+            self.field.setCurrentIndex(index if index >= 0 else 0)
+            self.mode.setCurrentIndex(max(self.mode.findData(view["mode"]), 0))
+            self.streamlines.setChecked(view["streamlines"])
+        finally:
+            self._loading = False
+        self._update_shape_button()
+        self.window.refresh_view()
+
+    def toggle_shape(self) -> None:
+        """ボタン 1 つで、形状表示と、その前に見ていた結果の表示を行き来する。"""
+        if self._saved_view is not None:
+            self.show_saved_view()
+        else:
+            self.show_shape()
 
     def show_shape(self) -> None:
         """解く前の見た目（色分けなし・全体表示・流線なし）に戻す。
 
-        結果は捨てない（表示を切り替えるだけ）。カラーマップ・稜線・断面の位置などは
-        見方の好みなので触らない。3 つを 1 つずつ変えると描き直しが 3 回走るので、
-        まとめて変えてから 1 回だけ描く。
+        結果は捨てない（表示を切り替えるだけ）。**直前の見方（表示量・表示モード・流線）を
+        覚えておき**、ボタンの「結果の表示に戻す」でそのまま戻れるようにする。
+        カラーマップ・稜線・断面の位置などは見方の好みなので触らない。
         """
-        self._loading = True
-        self.field.setCurrentIndex(max(self.field.findData(SHAPE_FIELD), 0))
-        self.mode.setCurrentIndex(self.mode.findData("volume"))
-        self.streamlines.setChecked(False)
-        self._loading = False
-        self.window.refresh_view()
+        if not self._is_plain_shape():
+            self._saved_view = self._view()
+        self._apply_view({"field": SHAPE_FIELD, "mode": "volume", "streamlines": False})
+
+    def show_saved_view(self) -> None:
+        """「形状表示に戻す」を押す前の見方に戻す。解き直しは要らない。"""
+        view, self._saved_view = self._saved_view, None
+        if view is not None:
+            self._apply_view(view)
+
+    def _forget_saved_view(self, *_args) -> None:
+        if self._loading:
+            return
+        self._saved_view = None
+        self._update_shape_button()
+
+    def _update_shape_button(self) -> None:
+        if self._saved_view is not None:
+            field = field_by_key(self._saved_view["field"])
+            name = field.label if field is not None else self._saved_view["field"]
+            self.shape_button.setText(SHOW_RESULT_LABEL)
+            self.shape_button.setToolTip(
+                f"形状表示に戻す前の表示（{name}）に戻します。解き直しは要りません。"
+            )
+            self.shape_button.setEnabled(True)
+            return
+        self.shape_button.setText(SHOW_SHAPE_LABEL)
+        self.shape_button.setToolTip(
+            "色分けをやめ、全体表示にして流線も外します。結果は消えず、\n"
+            "もう一度押すとそれまでの表示に戻ります。"
+        )
+        # すでに解く前の見た目なら、押しても何も変わらない
+        self.shape_button.setEnabled(not self._is_plain_shape())
 
     def options(self) -> dict:
         return {

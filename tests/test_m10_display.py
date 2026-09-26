@@ -151,6 +151,91 @@ def test_the_shape_button_restores_the_view_but_keeps_the_result(window, qt_app,
     assert DEFAULT_RESULT_FIELD in window.plotter.scalar_bars.keys()
 
 
+def _solve(window, qt_app):
+    window.start_solve()
+    assert window.solver.wait(60_000)
+    qt_app.processEvents()
+
+
+def test_the_same_button_goes_back_to_the_result(window, qt_app, monkeypatch):
+    """ボタン 1 つで形状表示と結果の表示を行き来できること。解き直さない。"""
+    from gfem.gui.pages import SHOW_RESULT_LABEL, SHOW_SHAPE_LABEL
+
+    page = window.page_result
+    _solve(window, qt_app)
+    page.field.setCurrentIndex(page.field.findData("|E| [V/m]"))
+    page.mode.setCurrentIndex(page.mode.findData("slice"))
+    page.streamlines.setChecked(True)
+    solution = window.session.solution
+
+    page.shape_button.click()
+    assert page.shape_button.text() == SHOW_RESULT_LABEL
+    assert page.shape_button.isEnabled()
+
+    draws = []
+    original = window.refresh_view
+    monkeypatch.setattr(window, "refresh_view", lambda: (draws.append(1), original()))
+    solves = []
+    monkeypatch.setattr(window, "start_solve", lambda: solves.append(1))
+    page.shape_button.click()
+
+    # 形状表示の前の見方（表示量・表示モード・流線）がそのまま戻る
+    assert page.field.currentData() == "|E| [V/m]"
+    assert page.mode.currentData() == "slice"
+    assert page.streamlines.isChecked()
+    assert "|E| [V/m]" in window.plotter.scalar_bars.keys()
+    assert len(draws) == 1, "3 つの設定を戻しても描き直しは 1 回"
+    assert not solves and window.session.solution is solution, "解き直していない"
+    assert page.shape_button.text() == SHOW_SHAPE_LABEL
+
+
+def test_choosing_another_view_by_hand_forgets_the_saved_one(window, qt_app):
+    """形状表示の間に自分で表示量を選び直したら、覚えていた見方は捨てる。
+
+    もう別の見方に移っているのに「結果の表示に戻す」が残ると、押したときに
+    いま選んだ見方が上書きされてしまう。稜線の切り替えは見方に含めない。
+    """
+    from gfem.gui.pages import SHOW_RESULT_LABEL, SHOW_SHAPE_LABEL
+
+    page = window.page_result
+    _solve(window, qt_app)
+    page.shape_button.click()
+    edges = page.edges.isChecked()
+    page.edges.setChecked(not edges)
+    page.edges.setChecked(edges)  # MainWindow は共有なので元に戻しておく
+    assert page.shape_button.text() == SHOW_RESULT_LABEL, "稜線の切り替えでは忘れない"
+
+    page.field.setCurrentIndex(page.field.findData("phi [V]"))
+    assert page.shape_button.text() == SHOW_SHAPE_LABEL
+    page.shape_button.click()
+    page.shape_button.click()
+    assert page.field.currentData() == "phi [V]", "選び直した見方に戻る"
+
+
+def test_a_new_solve_forgets_the_view_of_the_old_result(window, qt_app):
+    """形状表示のまま解き直したら、新しい結果の |J| を出し、古い見方は忘れる。"""
+    from gfem.gui.pages import SHOW_SHAPE_LABEL
+
+    page = window.page_result
+    _solve(window, qt_app)
+    page.field.setCurrentIndex(page.field.findData("phi [V]"))
+    page.shape_button.click()
+    _solve(window, qt_app)
+    assert page.field.currentData() == DEFAULT_RESULT_FIELD
+    assert page.shape_button.text() == SHOW_SHAPE_LABEL
+
+
+def test_the_button_is_disabled_when_there_is_nothing_to_change(window):
+    """解く前の見た目のまま（戻す先も無い）なら、押しても何も変わらないので押せない。"""
+    page = window.page_result
+    assert page.field.currentData() == SHAPE_FIELD
+    page.mode.setCurrentIndex(page.mode.findData("volume"))
+    page.streamlines.setChecked(False)
+    assert not page.shape_button.isEnabled()
+    page.mode.setCurrentIndex(page.mode.findData("clip"))
+    assert page.shape_button.isEnabled()
+
+
 def test_edges_are_on_for_small_models_only(window, monkeypatch):
     """細かいメッシュで稜線を全部描くと、潰れて形がかえって見えなくなる。"""
     from gfem.gui import pages
