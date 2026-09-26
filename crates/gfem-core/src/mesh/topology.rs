@@ -153,10 +153,47 @@ impl Surface {
 ///
 /// 面の列挙・並べ替え・走査の 3 段とも並列に行うが、どの段も逐次と同じ並びを作るので、
 /// 結果は逐次とビット単位で同じ（CLAUDE.md 設計原則 1）。1000 万節点（面 2.4 億件）で
-/// 7.8 秒かかっていて、その半分以上が逐次の面の列挙だった（SPEC §8 の「2026-09」）。
+/// 以前は 7.8 秒（逐次の面の列挙 4.0 秒 + 比較ソート 2.8 秒）、いまは 1.8 秒
+/// （並べ替えは `sorted_face_entries` の振り分け。SPEC §8 の「2026-09」）。
 pub fn extract_surface(mesh: &Mesh) -> Result<Surface> {
-    let mut entries = solid_face_entries(mesh);
-    sort_face_entries(&mut entries);
+    // ブロックごとの面の通し番号の始まり。ブロックの中では要素あたりの面の数が一定なので、
+    // 面の通し番号から要素と局所面番号が決まる
+    let mut blocks = Vec::with_capacity(mesh.solids.len());
+    let (mut first_face, mut first_element) = (0usize, 0usize);
+    for block in &mesh.solids {
+        blocks.push((first_face, first_element, block, block.kind().faces()));
+        first_face += block.len() * block.kind().faces().len();
+        first_element += block.len();
+    }
+    // 面の通し番号 k → (面の節点, 節点数, 要素の通し番号, 局所面番号)
+    let face = |k: usize| {
+        let at = blocks.partition_point(|&(start, ..)| start <= k) - 1;
+        let (start, first_element, block, faces) = blocks[at];
+        let (i, lf) = ((k - start) / faces.len(), (k - start) % faces.len());
+        let conn = block.conn_of(i);
+        let local = faces[lf];
+        let mut nodes = [0u32; 4];
+        for (m, &l) in local.iter().enumerate() {
+            nodes[m] = conn[l];
+        }
+        (nodes, local.len(), (first_element + i) as u32, lf as u8)
+    };
+    let entries = sorted_face_entries(
+        first_face,
+        mesh.nodes.len(),
+        |k| {
+            let (nodes, len, ..) = face(k);
+            nodes[..len]
+                .iter()
+                .copied()
+                .min()
+                .expect("面には節点がある")
+        },
+        |k| {
+            let (nodes, len, element, lf) = face(k);
+            (face_key(&nodes[..len]), element, lf)
+        },
+    );
 
     // 同じ面キーの並びが途中で切れないように区切って、区間ごとに並列に走査する。
     // 区間の結果を区間の順につなぐので、逐次に走査したのと同じ並びになる
@@ -164,6 +201,7 @@ pub fn extract_surface(mesh: &Mesh) -> Result<Surface> {
         .into_par_iter()
         .map(|range| scan_surface(mesh, &entries[range]))
         .collect();
+    drop_in_background(entries);
     let mut faces: Vec<SurfaceFace> = Vec::with_capacity(parts.iter().map(|p| p.faces.len()).sum());
     let mut keys: Vec<FaceKey> = Vec::with_capacity(faces.capacity());
     let mut non_manifold: Vec<String> = Vec::new();
@@ -191,41 +229,138 @@ pub fn extract_surface(mesh: &Mesh) -> Result<Surface> {
 /// `(面キー, 要素の通し番号, 局所面番号)`。
 type FaceEntry = (FaceKey, u32, u8);
 
-/// ソリッド要素の面をすべて列挙する。
+/// 面を `(面キー, 要素, 局所面番号)` の昇順に並べた列を作る（外表面と面の隣接で共通）。
 ///
-/// 並びは要素の通し番号順、要素の中は局所面番号順（逐次に積んだのと同じ）。ブロックの中では
-/// 要素あたりの面の数が一定なので、面の通し番号から要素と局所面番号が決まり、並列に書ける。
-/// `par_extend` は長さの分かっている並列イテレータなら Vec の空き領域へ直接、順序どおりに
-/// 書き込む（先にゼロで埋めたり、スレッドごとの結果をつなぎ直したりしない）。
-fn solid_face_entries(mesh: &Mesh) -> Vec<FaceEntry> {
-    let total: usize = mesh
-        .solids
-        .iter()
-        .map(|b| b.len() * b.kind().faces().len())
-        .sum();
-    let mut entries: Vec<FaceEntry> = Vec::with_capacity(total);
-    let mut first_element = 0usize;
-    for block in &mesh.solids {
-        let faces = block.kind().faces();
-        let per_element = faces.len();
-        entries.par_extend((0..block.len() * per_element).into_par_iter().map(|k| {
-            let (i, lf) = (k / per_element, k % per_element);
-            let conn = block.conn_of(i);
-            let face = faces[lf];
-            let mut nodes = [0u32; 4];
-            for (m, &local) in face.iter().enumerate() {
-                nodes[m] = conn[local];
-            }
-            (
-                face_key(&nodes[..face.len()]),
-                (first_element + i) as u32,
-                lf as u8,
-            )
-        }));
-        first_element += block.len();
-    }
-    entries
+/// `entry(k)` は k 番目（0 ≤ k < `n`）の面、`smallest(k)` はその面の最小の節点（面キーの先頭と
+/// 同じもの。面キーを作るより安いので、枚数を数えるときに使う）、`n_nodes` は節点数。
+/// 以前は全部を列挙してから比較ソートしていた（1000 万節点の 2.4 億件で 2.8 秒。
+/// SPEC §8 の「2026-09」）。いまは面キーの**最小の節点**で粗く振り分けてから（計数ソート）、
+/// 小さな組ごとに並べる:
+///
+/// 1. 面の通し番号を区間に分け、区間ごとに、組ごとの枚数を数える
+/// 2. 出力を「組の順、組の中は区間の順」に切り分け、区間ごとに自分の切れ端を受け取る
+/// 3. 区間ごとに、自分の切れ端へ面を書き込む（区間どうしで書く場所は重ならない）
+/// 4. 組ごとに並べる（1 組は数千件なのでキャッシュに載る）
+///
+/// 面キーは節点索引を昇順に詰めたものなので先頭が最小の節点で、組の順に並べれば全体も
+/// 面キーの順になる。`(面キー, 要素, 局所面番号)` はどれも異なるので、並べ終わった列は
+/// 入力だけで決まり、全体を比較ソートしたものと 1 件もずれない（CLAUDE.md 設計原則 1）。
+fn sorted_face_entries<S, F>(n: usize, n_nodes: usize, smallest: S, entry: F) -> Vec<FaceEntry>
+where
+    S: Fn(usize) -> NodeIndex + Sync,
+    F: Fn(usize) -> FaceEntry + Sync,
+{
+    bucket_sorted(n, n_nodes, FACES_PER_BUCKET, smallest, entry)
 }
+
+/// [`sorted_face_entries`] の本体。1 組あたりの枚数の目安 `faces_per_bucket` を外から
+/// 変えられるようにしてある（テストで組を極端に小さくして、振り分けの経路を確かめる）。
+fn bucket_sorted<S, F>(
+    n: usize,
+    n_nodes: usize,
+    faces_per_bucket: usize,
+    smallest: S,
+    entry: F,
+) -> Vec<FaceEntry>
+where
+    S: Fn(usize) -> NodeIndex + Sync,
+    F: Fn(usize) -> FaceEntry + Sync,
+{
+    if n == 0 {
+        return Vec::new();
+    }
+    // 1 組が数千件になるよう、節点索引を 2 の冪で粗くしたものを組にする
+    let target = (n / faces_per_bucket.max(1)).clamp(1, MAX_BUCKETS);
+    let mut shift = 0u32;
+    while (n_nodes >> shift) > target {
+        shift += 1;
+    }
+    let n_buckets = (n_nodes.saturating_sub(1) >> shift) + 1;
+    let bucket_of = |e: &FaceEntry| (e.0[0] as usize) >> shift;
+
+    let n_parts = (rayon::current_num_threads() * 4).clamp(1, n);
+    let part = |p: usize| (n * p / n_parts)..(n * (p + 1) / n_parts);
+
+    // 1. 区間ごとの、組ごとの枚数
+    let counts: Vec<Vec<u32>> = (0..n_parts)
+        .into_par_iter()
+        .map(|p| {
+            let mut count = vec![0u32; n_buckets];
+            for k in part(p) {
+                count[smallest(k) as usize >> shift] += 1;
+            }
+            count
+        })
+        .collect();
+
+    // 2. 出力を切り分ける。ゼロで確保するので、OS からゼロ済みのページが遅延で渡り、
+    //    実際に触るのは 3 の並列な書き込みのとき（ゼロ以外で埋めると逐次に 1 秒かかる）
+    let mut out: Vec<FaceEntry> = vec![([0; 4], 0, 0); n];
+    let mut pieces: Vec<Vec<&mut [FaceEntry]>> = (0..n_parts)
+        .map(|_| Vec::with_capacity(n_buckets))
+        .collect();
+    let mut buckets: Vec<usize> = Vec::with_capacity(n_buckets);
+    let mut rest: &mut [FaceEntry] = &mut out;
+    for b in 0..n_buckets {
+        let mut size = 0;
+        for (p, count) in counts.iter().enumerate() {
+            let (head, tail) = std::mem::take(&mut rest).split_at_mut(count[b] as usize);
+            pieces[p].push(head);
+            rest = tail;
+            size += count[b] as usize;
+        }
+        buckets.push(size);
+    }
+
+    // 3. 区間ごとに、自分の切れ端へ書き込む
+    pieces
+        .into_par_iter()
+        .enumerate()
+        .for_each(|(p, mut mine)| {
+            let mut cursor = vec![0usize; n_buckets];
+            for k in part(p) {
+                let e = entry(k);
+                let b = bucket_of(&e);
+                mine[b][cursor[b]] = e;
+                cursor[b] += 1;
+            }
+        });
+
+    // 4. 組ごとに並べる
+    let mut groups: Vec<&mut [FaceEntry]> = Vec::with_capacity(n_buckets);
+    let mut rest: &mut [FaceEntry] = &mut out;
+    for size in buckets {
+        let (head, tail) = std::mem::take(&mut rest).split_at_mut(size);
+        groups.push(head);
+        rest = tail;
+    }
+    groups.into_par_iter().for_each(|g| g.sort_unstable());
+    out
+}
+
+/// 大きな列の解放を別のスレッドに任せる。
+///
+/// 1000 万節点の面の列（2.4 億件、5.7 GB）は、解放するだけで 0.5 秒かかる（OS にページを
+/// 返す）。解放がいつ終わっても結果には関係しないので、呼び出し側を待たせない。
+/// 小さな列はスレッドを立てるほうが高くつくので、その場で解放する。スレッドを立てられ
+/// なかったときも、渡した列はその場で解放される。
+fn drop_in_background<T: Send + 'static>(v: Vec<T>) {
+    if v.capacity() * std::mem::size_of::<T>() < BACKGROUND_DROP_BYTES {
+        return;
+    }
+    let _ = std::thread::Builder::new()
+        .name("gfem-drop".into())
+        .spawn(move || drop(v));
+}
+
+/// これより大きな列の解放は別のスレッドに任せる（[`drop_in_background`]）。
+const BACKGROUND_DROP_BYTES: usize = 64 << 20;
+
+/// 振り分けの 1 組あたりの面の枚数の目安。組がキャッシュに載る大きさにする。
+const FACES_PER_BUCKET: usize = 4096;
+
+/// 振り分けの組の数の上限（区間ごとに組の数だけ数える欄を持つので、増やしすぎない）。
+const MAX_BUCKETS: usize = 1 << 16;
 
 /// 並べた列を、同じ面キーの並びが途中で切れないように `parts` 個ほどの区間に分ける。
 fn group_ranges(entries: &[FaceEntry], parts: usize) -> Vec<std::ops::Range<usize>> {
@@ -294,16 +429,6 @@ fn scan_surface(mesh: &Mesh, entries: &[FaceEntry]) -> Scan {
     out
 }
 
-/// `(面キー, 要素（四面体）の通し番号, 局所面番号)` の列を並べる。
-///
-/// 並列に並べても結果は逐次と同じ（CLAUDE.md 設計原則 1）。要素番号と局所面番号の組は
-/// どの 2 つも異なるので、並べ終わった列は入力によって一意に決まり、不安定ソートでも
-/// 並び方がぶれない。外表面の抽出は大規模モデルの前処理でいちばん重い段階
-/// （1000 万節点で 2.4 億件）なので、ここを並列にする。
-fn sort_face_entries(entries: &mut [FaceEntry]) {
-    entries.par_sort_unstable();
-}
-
 /// 隣接要素が無いことを表す番兵。
 pub const NO_NEIGHBOUR: u32 = u32::MAX;
 
@@ -349,17 +474,18 @@ impl FaceAdjacency {
 /// 共有されるか外表面かのどちらかになる。
 pub fn build_face_adjacency(tets: &TetView) -> FaceAdjacency {
     let n = tets.len();
-    // 面の列挙は外表面の抽出と同じく、逐次と同じ並びのまま並列に書く
     let faces = ElementKind::Tet4.faces();
-    let mut entries: Vec<FaceEntry> = Vec::with_capacity(n * 4);
-    entries.par_extend((0..n * 4).into_par_iter().map(|k| {
-        let (t, lf) = (k / 4, k % 4);
-        let conn = tets.conn_of(t);
-        let face = faces[lf];
-        let nodes: [NodeIndex; 3] = [conn[face[0]], conn[face[1]], conn[face[2]]];
-        (face_key(&nodes), t as u32, lf as u8)
-    }));
-    sort_face_entries(&mut entries);
+    let nodes = |k: usize| -> [NodeIndex; 3] {
+        let conn = tets.conn_of(k / 4);
+        let face = faces[k % 4];
+        [conn[face[0]], conn[face[1]], conn[face[2]]]
+    };
+    let entries = sorted_face_entries(
+        n * 4,
+        tets.n_nodes(),
+        |k| nodes(k).into_iter().min().expect("面には節点がある"),
+        |k| (face_key(&nodes(k)), (k / 4) as u32, (k % 4) as u8),
+    );
 
     let mut adjacency = FaceAdjacency {
         neighbours: vec![NO_NEIGHBOUR; n * 4],
@@ -383,6 +509,7 @@ pub fn build_face_adjacency(tets: &TetView) -> FaceAdjacency {
         }
         i = j;
     }
+    drop_in_background(entries);
     adjacency
 }
 
@@ -610,13 +737,79 @@ CTETRA,11,1,5,4,3,2
             "六面体・三角柱・四面体の 3 ブロックのはず"
         );
         assert_eq!(mixed.n_solid_elements(), 4 + 8 + 24);
-        for mesh in [crate::testing::kuhn_box([9, 7, 5], [1.0; 3]), mixed] {
+        // 30 × 20 × 10 の箱は面が 14 万枚で、振り分けの組が数十個になる
+        for mesh in [
+            crate::testing::kuhn_box([9, 7, 5], [1.0; 3]),
+            crate::testing::kuhn_box([30, 20, 10], [1.0; 3]),
+            mixed,
+        ] {
             let surface = extract_surface(&mesh).unwrap();
             let (faces, keys) = serial_surface(&mesh);
             assert!(!faces.is_empty());
             assert_eq!(surface.faces, faces);
             assert_eq!(surface.keys, keys);
         }
+    }
+
+    #[test]
+    fn bucket_sorting_gives_exactly_the_full_sort() {
+        // 振り分けてから組ごとに並べても、全体を比較ソートしたのと 1 件もずれない。
+        // 組を極端に小さくした場合（1 組 1 件の目安）から、組が 1 つの場合まで確かめる
+        let n_nodes = 5_000usize;
+        let entry = |k: usize| -> FaceEntry {
+            // 同じ面キーが 2 回ずつ現れる、節点の散らばった面（内部の面を模す）
+            let face = (k / 2) as u64;
+            let mut x = face
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            let mut nodes = [0u32; 3];
+            for node in &mut nodes {
+                x ^= x >> 29;
+                x = x.wrapping_mul(0xbf58476d1ce4e5b9);
+                *node = (x % n_nodes as u64) as u32;
+            }
+            (face_key(&nodes), (k % 977) as u32, (k % 4) as u8)
+        };
+        let n = 40_000;
+        let mut expected: Vec<FaceEntry> = (0..n).map(entry).collect();
+        expected.sort_unstable();
+        for faces_per_bucket in [1, 3, 64, FACES_PER_BUCKET, usize::MAX] {
+            let got = bucket_sorted(n, n_nodes, faces_per_bucket, |k| entry(k).0[0], entry);
+            assert!(got == expected, "組の目安 {faces_per_bucket} 件でずれた");
+        }
+        assert!(bucket_sorted(0, n_nodes, 1, |k| entry(k).0[0], entry).is_empty());
+    }
+
+    #[test]
+    fn face_adjacency_pairs_every_interior_face() {
+        // 面の隣接も同じ振り分けの並べ替えを使う。組が十数個になる大きさ（面 7.2 万枚）で、
+        // 内部の面がすべて正しく組になり、残りがちょうど外表面になる
+        let mesh = crate::testing::kuhn_box([20, 15, 10], [1.0; 3]);
+        let tets = TetView::build(&mesh).unwrap();
+        let adjacency = build_face_adjacency(&tets);
+        for t in 0..tets.len() {
+            for f in 0..4 {
+                if let Some((other, of)) = adjacency.neighbour(t, f) {
+                    // 相互に指し合い、同じ面キーを持つ
+                    assert_eq!(
+                        adjacency.neighbour(other as usize, of as usize),
+                        Some((t as u32, f as u8))
+                    );
+                    let key = |t: usize, f: usize| {
+                        let face = ElementKind::Tet4.faces()[f];
+                        let conn = tets.conn_of(t);
+                        face_key(&[conn[face[0]], conn[face[1]], conn[face[2]]])
+                    };
+                    assert_eq!(key(t, f), key(other as usize, of as usize));
+                }
+            }
+        }
+        // 外表面の面の数と、隣接の無い面の数が一致する
+        let open = (0..tets.len())
+            .flat_map(|t| (0..4).map(move |f| (t, f)))
+            .filter(|&(t, f)| adjacency.neighbour(t, f).is_none())
+            .count();
+        assert_eq!(open, extract_surface(&mesh).unwrap().len());
     }
 
     #[test]

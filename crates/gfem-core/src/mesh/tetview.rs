@@ -55,6 +55,8 @@ pub struct TetView {
     offsets: Vec<u32>,
     /// 元のメッシュが Tet4 だけで、分割が恒等だったか
     identity: bool,
+    /// 元のメッシュの節点数（接続の節点索引はこれ未満）
+    n_nodes: usize,
 }
 
 impl TetView {
@@ -94,6 +96,7 @@ impl TetView {
             parent,
             offsets,
             identity,
+            n_nodes: mesh.nodes.len(),
         })
     }
 
@@ -105,6 +108,11 @@ impl TetView {
     /// 四面体が 1 つも無いか。
     pub fn is_empty(&self) -> bool {
         self.parent.is_empty()
+    }
+
+    /// 元のメッシュの節点数（接続の節点索引はこれ未満）。
+    pub fn n_nodes(&self) -> usize {
+        self.n_nodes
     }
 
     /// 元のメッシュが Tet4 だけで、分割が恒等だったか。
