@@ -64,7 +64,7 @@ class ConvergencePlot(QWidget):
         if len(values) < 2:
             painter.setPen(QColor(120, 120, 120))
             painter.drawText(
-                self.rect(), Qt.AlignmentFlag.AlignCenter, "収束曲線（solve を実行すると表示されます）"
+                self.rect(), Qt.AlignmentFlag.AlignCenter, "収束曲線（求解すると表示されます）"
             )
             return
 

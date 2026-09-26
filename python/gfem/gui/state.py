@@ -1040,8 +1040,8 @@ class Session:
     def _require_solution(self) -> Solution:
         if self.solution is None:
             raise GfemError(
-                "[設定エラー] まだ solve を実行していません"
-                "\n  対処: 「実行 → solve」で計算してから書き出してください"
+                "[設定エラー] まだ求解していません"
+                "\n  対処: 「実行 → 求解」（F5）で計算してから書き出してください"
             )
         return self.solution
 

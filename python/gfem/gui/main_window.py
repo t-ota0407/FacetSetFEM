@@ -260,7 +260,7 @@ class MainWindow(QMainWindow):
 
         run_menu = self.menuBar().addMenu("実行(&R)")
         self._add_action(run_menu, "整合性チェック", self.check_consistency, "Ctrl+K")
-        self._add_action(run_menu, "solve", self.start_solve, "F5")
+        self._add_action(run_menu, "求解", self.start_solve, "F5")
         self.action_cancel = self._add_action(run_menu, "中断", self.cancel_solve)
         self.action_cancel.setEnabled(False)
         run_menu.addSeparator()
@@ -388,7 +388,7 @@ class MainWindow(QMainWindow):
 
     def export_vtu_dialog(self) -> None:
         if self.session.solution is None:
-            QMessageBox.information(self, "VTU 書き出し", "先に solve を実行してください。")
+            QMessageBox.information(self, "VTU 書き出し", "先に求解してください（実行 → 求解、F5）。")
             return
         path, _ = QFileDialog.getSaveFileName(self, "VTU に書き出す", "result.vtu", "VTU (*.vtu)")
         if path:
@@ -432,7 +432,7 @@ class MainWindow(QMainWindow):
 
     def _export_dialog(self, title: str, default: str, filters: str, writer) -> None:
         if self.session.solution is None:
-            QMessageBox.information(self, title, "先に solve を実行してください。")
+            QMessageBox.information(self, title, "先に求解してください（実行 → 求解、F5）。")
             return
         path, _ = QFileDialog.getSaveFileName(self, title, default, filters)
         if not path:
@@ -819,7 +819,7 @@ class MainWindow(QMainWindow):
         self.convergence.clear()
         self.convergence.set_tolerance(self.session.study.solver.tolerance)
         self.bottom.setCurrentWidget(self.convergence)
-        self.log("solve を開始しました")
+        self.log("求解を開始しました")
         self.action_cancel.setEnabled(True)
 
         self.solver = SolverThread(case, study, self)
@@ -852,7 +852,7 @@ class MainWindow(QMainWindow):
         self.refresh_stats_table()
         self.bottom.setCurrentWidget(self.checks_view)
         self.log(
-            f"solve 完了: {solution.iterations} 反復, "
+            f"求解完了: {solution.iterations} 反復, "
             f"相対残差 {solution.residual:.3e}, R = {solution.impedance:.4g} Ω"
         )
         for w in solution.warnings:
@@ -863,8 +863,8 @@ class MainWindow(QMainWindow):
         self.refresh_view()
 
     def _on_solve_failed(self, message: str) -> None:
-        self.log(f"solve 失敗:\n{message}")
-        QMessageBox.warning(self, "solve", message)
+        self.log(f"求解失敗:\n{message}")
+        QMessageBox.warning(self, "求解", message)
 
     # --- 表示 ---------------------------------------------------------------
 
