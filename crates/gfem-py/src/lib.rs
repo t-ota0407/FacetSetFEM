@@ -59,6 +59,9 @@ type IsoSurfaceArrays<'py> = (
     Bound<'py, PyArray1<f64>>,
 );
 
+/// `Mesh.region_surface` の戻り値: (三角形, 元のソリッド要素)。
+type RegionSurface<'py> = (Bound<'py, PyArray2<u32>>, Bound<'py, PyArray1<u32>>);
+
 /// シェル要素の三角形分割を返すときの形。`(三角形, PID, 要素 ID)`。
 type ShellTriangles<'py> = (
     Bound<'py, PyArray2<u32>>,
@@ -417,6 +420,23 @@ impl PyMesh {
         let flat: Vec<u32> = tris.into_iter().flatten().collect();
         let rows = flat.len() / 3;
         flat.into_pyarray(py).reshape([rows, 3])
+    }
+
+    /// 指定した領域（PID）の要素の集まりの境界面 `(三角形 (n, 3), 元のソリッド要素 (n,))`。
+    ///
+    /// 体表面に出ていない領域をハイライトするために使う（SPEC §6.3）。体積メッシュを
+    /// 組み立てずに、Rust 側で領域の境界だけを取り出す。向きは領域の外向き。
+    fn region_surface<'py>(&self, py: Python<'py>, pid: u32) -> PyResult<RegionSurface<'py>> {
+        let surface = py
+            .detach(|| gfem_core::mesh::extract_region_surface(&self.inner, pid))
+            .map_err(to_py)?;
+        let (tris, owners) = surface.triangulate();
+        let flat: Vec<u32> = tris.into_iter().flatten().collect();
+        let rows = flat.len() / 3;
+        Ok((
+            flat.into_pyarray(py).reshape([rows, 3])?,
+            owners.into_pyarray(py),
+        ))
     }
 
     /// 外表面の三角形ごとの、元ソリッド要素の通し番号 `(n_tri,)`。

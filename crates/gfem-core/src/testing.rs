@@ -27,9 +27,27 @@ const KUHN: [[usize; 4]; 6] = [
 /// 原点から各方向に長さ `size` [m] の直方体。節点 ID は `i + (nx+1)(j + (ny+1) k) + 1`、
 /// 要素 ID は 1 から格子の順（x → y → z、各立方体の中は [`KUHN`] の順）。PID は 1。
 pub(crate) fn kuhn_box(n: [usize; 3], size: [f64; 3]) -> Mesh {
+    kuhn_box_with(n, size, |_| 1)
+}
+
+/// [`kuhn_box`] の、立方体ごとに PID を選べる版。`pid([i, j, k])` が立方体 (i, j, k) の PID。
+pub(crate) fn kuhn_box_with(
+    n: [usize; 3],
+    size: [f64; 3],
+    pid: impl Fn([usize; 3]) -> u32,
+) -> Mesh {
     let [nx, ny, nz] = n;
     let node = |i: usize, j: usize, k: usize| i + (nx + 1) * (j + (ny + 1) * k) + 1;
-    let mut deck = String::from("PSOLID,1,1\n");
+    let mut pids: Vec<u32> = (0..nz)
+        .flat_map(|k| (0..ny).flat_map(move |j| (0..nx).map(move |i| [i, j, k])))
+        .map(&pid)
+        .collect();
+    pids.sort_unstable();
+    pids.dedup();
+    let mut deck = String::new();
+    for p in pids {
+        deck.push_str(&format!("PSOLID,{p},{p}\n"));
+    }
     for k in 0..=nz {
         for j in 0..=ny {
             for i in 0..=nx {
@@ -48,9 +66,10 @@ pub(crate) fn kuhn_box(n: [usize; 3], size: [f64; 3]) -> Mesh {
         for j in 0..ny {
             for i in 0..nx {
                 let corner = |c: usize| node(i + (c & 1), j + ((c >> 1) & 1), k + ((c >> 2) & 1));
+                let p = pid([i, j, k]);
                 for t in KUHN {
                     deck.push_str(&format!(
-                        "CTETRA,{eid},1,{},{},{},{}\n",
+                        "CTETRA,{eid},{p},{},{},{},{}\n",
                         corner(t[0]),
                         corner(t[1]),
                         corner(t[2]),

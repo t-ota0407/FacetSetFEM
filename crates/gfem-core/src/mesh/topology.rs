@@ -15,7 +15,7 @@
 use crate::element::ElementKind;
 use crate::error::{GfemError, Result, format_sample_list};
 use crate::mesh::tetview::TetView;
-use crate::mesh::{Mesh, NodeIndex};
+use crate::mesh::{Mesh, NodeIndex, PropId};
 use crate::parallel::{BucketKey, bucket_sort, drop_in_background};
 use rayon::prelude::*;
 
@@ -196,6 +196,70 @@ pub fn extract_surface(mesh: &Mesh) -> Result<Surface> {
         },
     );
 
+    surface_from_sorted(mesh, entries)
+}
+
+/// 指定した領域（PSOLID の PID）の要素の集まりの境界面。
+///
+/// 外表面のうちその領域が持つ面と、ほかの領域との境目の面からなり、向きは領域の外向き。
+/// GUI で**体表面に出ていない領域**（頭部モデルの大半がそう）をハイライトするときに使う。
+/// 以前は体積メッシュ全体を VTK の形式にしてから（頭部クラスで 0.36 秒・468 MB）、その領域の
+/// 要素を切り出して VTK に外側の面を取らせていた（領域を選ぶたびに 0.2〜0.6 秒）。
+/// 外表面の抽出と同じく、面キーの出現回数が 1 の面を拾う（対象をその領域の要素に絞るだけ）。
+/// 領域に要素が無ければ空。
+pub fn extract_region_surface(mesh: &Mesh, pid: PropId) -> Result<Surface> {
+    // ブロックごとに、その領域の要素（ブロック内の番号、昇順）と、面の通し番号の始まり
+    let mut segments = Vec::with_capacity(mesh.solids.len());
+    let (mut first_face, mut first_element) = (0usize, 0usize);
+    for block in &mesh.solids {
+        let members: Vec<u32> = (0..block.len() as u32)
+            .into_par_iter()
+            .filter(|&i| block.pids()[i as usize] == pid)
+            .collect();
+        let faces = block.kind().faces();
+        let n_faces = members.len() * faces.len();
+        segments.push((first_face, first_element, block, faces, members));
+        first_face += n_faces;
+        first_element += block.len();
+    }
+    // 面の通し番号 k → (面の節点, 節点数, 要素の通し番号, 局所面番号)。外表面の抽出と同じく
+    // 振り分けソートで並べる（要素 216 万個・面 864 万枚で、比較ソートより速い）
+    let face = |k: usize| {
+        let at = segments.partition_point(|&(start, ..)| start <= k) - 1;
+        let (start, first_element, block, faces, members) = &segments[at];
+        let (m, lf) = ((k - start) / faces.len(), (k - start) % faces.len());
+        let i = members[m] as usize;
+        let conn = block.conn_of(i);
+        let local = faces[lf];
+        let mut nodes = [0u32; 4];
+        for (q, &l) in local.iter().enumerate() {
+            nodes[q] = conn[l];
+        }
+        (nodes, local.len(), (first_element + i) as u32, lf as u8)
+    };
+    let entries = bucket_sort(
+        first_face,
+        mesh.nodes.len(),
+        |k| {
+            let (nodes, len, ..) = face(k);
+            nodes[..len]
+                .iter()
+                .copied()
+                .min()
+                .expect("面には節点がある")
+        },
+        |k| {
+            let (nodes, len, element, lf) = face(k);
+            (face_key(&nodes[..len]), element, lf)
+        },
+    );
+    surface_from_sorted(mesh, entries)
+}
+
+/// 面キーの順に並べた面の列から、出現回数 1 の面（境界）を拾って [`Surface`] にする。
+///
+/// 3 回以上現れる面（非多様体）があればエラー。
+fn surface_from_sorted(mesh: &Mesh, entries: Vec<FaceEntry>) -> Result<Surface> {
     // 同じ面キーの並びが途中で切れないように区切って、区間ごとに並列に走査する。
     // 区間の結果を区間の順につなぐので、逐次に走査したのと同じ並びになる
     let parts: Vec<Scan> = group_ranges(&entries, rayon::current_num_threads() * 4)
@@ -691,6 +755,39 @@ CTETRA,11,1,5,4,3,2
             .filter(|&(t, f)| adjacency.neighbour(t, f).is_none())
             .count();
         assert_eq!(open, extract_surface(&mesh).unwrap().len());
+    }
+
+    #[test]
+    fn a_buried_region_is_bounded_by_its_interface() {
+        // 4 × 4 × 4 の箱の中央 2 × 2 × 2 だけが PID 2。その境界は 1 辺 2 の立方体の表面
+        let mesh = crate::testing::kuhn_box_with([4, 4, 4], [4.0; 3], |[i, j, k]| {
+            if (1..3).contains(&i) && (1..3).contains(&j) && (1..3).contains(&k) {
+                2
+            } else {
+                1
+            }
+        });
+        let inner = extract_region_surface(&mesh, 2).unwrap();
+        assert!((inner.total_area(&mesh) - 24.0).abs() < 1e-12);
+        // 境界の面はどれも PID 2 の要素のもので、向きは領域の外向き（中心から離れる向き）
+        for face in inner.faces() {
+            assert_eq!(mesh.solid(face.element as usize).pid, 2);
+            let p: Vec<[f64; 3]> = face.nodes().iter().map(|&n| mesh.nodes.coord(n)).collect();
+            let normal =
+                crate::geom::cross(crate::geom::sub(p[1], p[0]), crate::geom::sub(p[2], p[0]));
+            let centre = crate::geom::sub(p[0], [2.0; 3]);
+            assert!(crate::geom::dot(normal, centre) > 0.0, "内向きの面がある");
+        }
+        // 外側の領域の境界は、箱の外表面と中の空洞の面の両方
+        let outer = extract_region_surface(&mesh, 1).unwrap();
+        assert!((outer.total_area(&mesh) - (6.0 * 16.0 + 24.0)).abs() < 1e-12);
+        // 外側の領域の境界から空洞の面（＝内側の領域の境界）を除けば、箱の外表面そのもの
+        assert_eq!(
+            outer.len() - inner.len(),
+            extract_surface(&mesh).unwrap().len()
+        );
+        // 無い PID は空
+        assert!(extract_region_surface(&mesh, 99).unwrap().is_empty());
     }
 
     #[test]

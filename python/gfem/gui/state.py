@@ -142,6 +142,8 @@ class Session:
         self._grid: pv.UnstructuredGrid | None = None
         #: 表示用の外表面（SPEC §6.3）。メッシュを開き直すまで使い回す
         self._surface: pv.PolyData | None = None
+        #: 領域ごとの境界面（ハイライト用）。形だけなので、解き直しても使い回す
+        self._region_boundaries: dict[int, pv.PolyData] = {}
         # Undo / Redo（SPEC §8 M7）。
         # 解析条件は Study 1 つに閉じていて、メッシュも結果も含まないので、
         # 操作ごとに丸ごと複製して積むだけで済む。差分を持つ設計は
@@ -392,6 +394,7 @@ class Session:
         self._arrays = {}
         self._grid = None
         self._surface = None
+        self._region_boundaries = {}
 
     # --- 表示用データ -------------------------------------------------------
 
@@ -444,9 +447,38 @@ class Session:
         return grid
 
     def region_grid(self, pid: int) -> pv.UnstructuredGrid:
-        """指定した領域だけを取り出したメッシュ（ハイライト表示用）。"""
+        """指定した領域だけを取り出した体積メッシュ（`grid()` を組み立てる）。
+
+        ハイライト表示には使わない（[`region_boundary`] を使う）。PyVista の全機能で
+        領域を調べたいとき用の、小規模モデル向けの経路（SPEC §6.3 のエスケープハッチ）。
+        """
         grid = self.grid()
         return grid.extract_cells(np.flatnonzero(grid.cell_data["PID"] == pid))
+
+    def region_boundary(self, pid: int) -> pv.PolyData:
+        """指定した領域の境界面（体表面に出ていない領域のハイライト用。SPEC §6.3）。
+
+        **体積メッシュは組み立てない。** 境界は Rust 側で領域の要素から直接取り出す。
+        以前は体積メッシュ全体を作ってから（頭部クラスで 0.36 秒・468 MB）、領域を
+        切り出して VTK に外側の面を取らせていた（選ぶたびに 0.2〜0.6 秒）。
+        形だけなので、領域ごとに 1 度作ってメッシュを開き直すまで使い回す。
+        """
+        if pid in self._region_boundaries:
+            return self._region_boundaries[pid]
+        mesh = self._require_mesh()
+        triangles, owners = mesh.region_surface(pid)
+        poly = self._polydata(mesh.points(), triangles, {"PID": mesh.solid_pid_array()[owners]})
+        if poly.n_cells:
+            # 陰影のために法線を付ける（外表面と同じ理由。三角形は領域の外向きに並んでいる）
+            poly = poly.compute_normals(
+                cell_normals=True,
+                point_normals=True,
+                split_vertices=False,
+                consistent_normals=False,
+                auto_orient_normals=False,
+            )
+        self._region_boundaries[pid] = poly
+        return poly
 
     def shell_polydata(self, pids: list[int] | None = None) -> pv.PolyData:
         """シェル要素（電極候補面）のポリゴン。`pids` を指定するとその PID だけ。"""

@@ -983,10 +983,8 @@ class MainWindow(QMainWindow):
             scope.step("選んだ領域を取り出しています")
             region = self.session.region_polydata(highlight_pid)
             if region.n_cells == 0:
-                # 体表面に出ていない領域。体積メッシュから切り出す（0.5 秒）
-                region = self.session.region_grid(highlight_pid).extract_surface(
-                    algorithm="dataset_surface"
-                )
+                # 体表面に出ていない領域。境界面を Rust 側で取り出す（体積メッシュは作らない）
+                region = self.session.region_boundary(highlight_pid)
         buried = region is not None and region.n_cells > 0 and mode == "volume" and (
             self.session.region_polydata(highlight_pid).n_cells == 0
         )
