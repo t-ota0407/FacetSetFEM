@@ -53,6 +53,26 @@ impl CsrMatrix {
         }
     }
 
+    /// 行ポインタ・列番号・値から作る（値を複製しない）。行内の列番号は昇順であること。
+    pub fn from_parts(
+        n_rows: usize,
+        n_cols: usize,
+        row_ptr: Vec<usize>,
+        col_idx: Vec<u32>,
+        values: Vec<f64>,
+    ) -> Self {
+        debug_assert_eq!(row_ptr.len(), n_rows + 1);
+        debug_assert_eq!(row_ptr[n_rows], col_idx.len());
+        debug_assert_eq!(col_idx.len(), values.len());
+        Self {
+            n: n_rows,
+            n_cols,
+            row_ptr,
+            col_idx,
+            values,
+        }
+    }
+
     /// 行数（＝節点数）。
     pub fn n_rows(&self) -> usize {
         self.n
@@ -110,7 +130,11 @@ impl CsrMatrix {
 
     /// 対角成分。
     pub fn diagonal(&self) -> Vec<f64> {
+        use rayon::prelude::*;
+        // 行ごとに独立なので並列でよい（AMG の各レベルで何度も呼ぶ。1000 万行で逐次 0.3 秒）
         (0..self.n)
+            .into_par_iter()
+            .with_min_len(4_096)
             .map(|i| {
                 self.position(i, i as u32)
                     .map(|k| self.values[k])

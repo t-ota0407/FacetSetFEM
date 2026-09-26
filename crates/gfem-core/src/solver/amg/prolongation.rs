@@ -32,9 +32,13 @@ use crate::solver::amg::rowwise;
 /// ```
 ///
 /// 少し保守的（＝ω がやや小さめ）になるが、再現性と引き換えにする価値がある。
+///
+/// 行ごとに独立なので並列に求める。最大値はどの順に取っても同じ値になり、対角が正でない
+/// 行は「最初の 1 行」を探すので、報告する行も逐次と同じ。
 pub fn spectral_bound(a: &CsrMatrix) -> Result<f64> {
-    let mut bound = 0.0f64;
-    for i in 0..a.n_rows() {
+    use rayon::prelude::*;
+    // 行 i の (Σ_j |A_ij|, A_ii)
+    let row = |i: usize| -> (f64, f64) {
         let (cols, vals) = a.row(i);
         let mut abs_sum = 0.0;
         let mut diag = 0.0;
@@ -44,17 +48,30 @@ pub fn spectral_bound(a: &CsrMatrix) -> Result<f64> {
                 diag = v;
             }
         }
-        if diag <= 0.0 || !diag.is_finite() {
-            return Err(GfemError::internal(format!(
-                "AMG: 行 {i} の対角成分が正ではありません（{diag}）"
-            ))
-            .with_hint(
-                "退化要素か導電率がゼロ以下の領域が残っている可能性があります。\
-                 preconditioner: jacobi なら同じ診断がより早く出ます",
-            ));
-        }
-        bound = bound.max(abs_sum / diag);
+        (abs_sum, diag)
+    };
+    let bad = |diag: f64| diag <= 0.0 || !diag.is_finite();
+    let rows = || {
+        (0..a.n_rows())
+            .into_par_iter()
+            .with_min_len(rowwise::ROWS_PER_TASK)
+    };
+    if let Some(i) = rows().find_first(|&i| bad(row(i).1)) {
+        let diag = row(i).1;
+        return Err(GfemError::internal(format!(
+            "AMG: 行 {i} の対角成分が正ではありません（{diag}）"
+        ))
+        .with_hint(
+            "退化要素か導電率がゼロ以下の領域が残っている可能性があります。\
+             preconditioner: jacobi なら同じ診断がより早く出ます",
+        ));
     }
+    let bound = rows()
+        .map(|i| {
+            let (abs_sum, diag) = row(i);
+            abs_sum / diag
+        })
+        .reduce(|| 0.0f64, f64::max);
     // 完全に対角な行列（非対角ゼロ）では 1 になる。0 は返さない
     Ok(bound.max(1.0))
 }
@@ -154,24 +171,24 @@ fn lumped_diagonal(a: &CsrMatrix, i: usize, strong: &[u32], b: &[f64]) -> Option
 /// これを試行補間に掛ける（`P = S P₀`）ことで、`P` の列が滑らかになり
 /// 補間誤差が下がる。平滑化凝集の名前の由来。
 pub fn jacobi_smoother_matrix(af: &CsrMatrix, omega: f64) -> CsrMatrix {
-    let diag = af.diagonal();
-    let mut s = af.clone();
+    into_jacobi_smoother(af.clone(), omega)
+}
+
+/// [`jacobi_smoother_matrix`] の、`A_f` をその場で書き換える版（複製しない）。
+///
+/// 階層の構築では `A_f` をこのあと使わないので、こちらを使う（1000 万節点の最細レベルで
+/// 1 GB を超える複製が省ける）。値の計算は同じなので、結果もビット単位で同じ。
+pub fn into_jacobi_smoother(mut s: CsrMatrix, omega: f64) -> CsrMatrix {
+    let diag = s.diagonal();
     let (row_ptr, col_idx, values) = s.parts_mut();
     // 構造は A_f と同じで、値だけ書き換える。行ごとに独立なので並列でよい
-    let cols = rowwise::split_rows_ref(col_idx, row_ptr);
-    let mut rows: Vec<(&[u32], &mut [f64])> = cols
-        .into_iter()
-        .zip(rowwise::split_rows(values, row_ptr))
-        .collect();
-    rowwise::for_each_row(&mut rows, |i, row| {
-        let (cols, vals) = row;
+    rowwise::update_values(row_ptr, col_idx, values, |i, cols, vals| {
         let scale = omega / diag[i];
-        for (v, &c) in vals.iter_mut().zip(cols.iter()) {
+        for (v, &c) in vals.iter_mut().zip(cols) {
             let x = -scale * *v;
             *v = if c as usize == i { 1.0 + x } else { x };
         }
     });
-    drop(rows);
     s
 }
 

@@ -16,17 +16,16 @@
 //! 記号パス（非ゼロ数を数える）→ 数値パス（値を入れる）。
 
 use crate::assemble::csr::CsrMatrix;
-
-/// 行を rayon に配りはじめる行数。これより小さいとタスク投入のほうが高くつく。
-const PARALLEL_MIN_ROWS: usize = 4_096;
+use crate::solver::amg::rowwise;
 
 /// 1 行ぶんの作業領域（sparse accumulator）。
 ///
-/// `mark` は「この列を今の行で既に触ったか」を世代番号で覚える。
-/// 行ごとに配列全体をクリアすると O(列数) かかるが、世代番号なら O(1) で済む。
+/// 列ごとに「この列を今の行で既に触ったか」を世代番号で覚える。行ごとに配列全体を
+/// クリアすると O(列数) かかるが、世代番号なら O(1) で済む。世代番号と値は 1 つの配列に
+/// 並べて持つ（別々の配列だと 1 回の足し込みで離れた 2 か所を触ることになる）。
 struct Accumulator {
-    value: Vec<f64>,
-    mark: Vec<u64>,
+    /// 列ごとの `(世代番号, 値)`
+    slots: Vec<(u64, f64)>,
     generation: u64,
     touched: Vec<u32>,
 }
@@ -34,8 +33,7 @@ struct Accumulator {
 impl Accumulator {
     fn new(n_cols: usize) -> Self {
         Self {
-            value: vec![0.0; n_cols],
-            mark: vec![0; n_cols],
+            slots: vec![(0, 0.0); n_cols],
             generation: 0,
             touched: Vec::new(),
         }
@@ -50,14 +48,19 @@ impl Accumulator {
     /// `value[col] += v`。初めて触る列なら記録する。
     #[inline]
     fn add(&mut self, col: u32, v: f64) {
-        let c = col as usize;
-        if self.mark[c] != self.generation {
-            self.mark[c] = self.generation;
-            self.value[c] = v;
+        let slot = &mut self.slots[col as usize];
+        if slot.0 != self.generation {
+            *slot = (self.generation, v);
             self.touched.push(col);
         } else {
-            self.value[c] += v;
+            slot.1 += v;
         }
+    }
+
+    /// 列 `col` の値（今の行で触った列に限る）。
+    #[inline]
+    fn value(&self, col: u32) -> f64 {
+        self.slots[col as usize].1
     }
 
     /// 触った列を昇順に並べる。
@@ -69,55 +72,47 @@ impl Accumulator {
 
 /// `C = A B`。`A` は m×k、`B` は k×n。
 ///
-/// 行内の列番号は昇順、加算順序はモジュール冒頭の規則に従う。
+/// 行内の列番号は昇順、加算順序はモジュール冒頭の規則に従う。行は [`rowwise`] の塊ごとに
+/// 並列に処理し、作業配列はタスクごとに 1 つ作って塊の間で使い回す。
 pub fn spmm(a: &CsrMatrix, b: &CsrMatrix) -> CsrMatrix {
     debug_assert_eq!(a.n_cols(), b.n_rows());
     let (m, n) = (a.n_rows(), b.n_cols());
 
     // --- 記号パス: 行ごとの非ゼロ数 -------------------------------------
     let mut counts = vec![0usize; m];
-    apply_rows(m, n, &mut counts, |acc, i, out| {
-        acc.start_row();
-        for_each_product(a, b, i, |col, _| acc.add(col, 0.0));
-        *out = acc.touched.len();
-    });
-
-    let mut row_ptr = vec![0usize; m + 1];
-    for i in 0..m {
-        row_ptr[i + 1] = row_ptr[i] + counts[i];
-    }
+    rowwise::for_each_row_init(
+        &mut counts,
+        || Accumulator::new(n),
+        |acc, i, out| {
+            acc.start_row();
+            for_each_product(a, b, i, |col, _| acc.add(col, 0.0));
+            *out = acc.touched.len();
+        },
+    );
+    let row_ptr = rowwise::row_pointers(&counts);
     let nnz = row_ptr[m];
 
     // --- 数値パス -------------------------------------------------------
+    // ゼロで確保するので、ページは書き込むときに（並列に）初めて触る
     let mut col_idx = vec![0u32; nnz];
     let mut values = vec![0.0f64; nnz];
-    {
-        let mut rows: Vec<(&mut [u32], &mut [f64])> = Vec::with_capacity(m);
-        let (mut cols_rest, mut vals_rest) = (&mut col_idx[..], &mut values[..]);
-        for i in 0..m {
-            let take = row_ptr[i + 1] - row_ptr[i];
-            let (ch, ct) = cols_rest.split_at_mut(take);
-            let (vh, vt) = vals_rest.split_at_mut(take);
-            rows.push((ch, vh));
-            cols_rest = ct;
-            vals_rest = vt;
-        }
-        apply_rows(m, n, &mut rows, |acc, i, out| {
+    rowwise::fill_rows_init(
+        &row_ptr,
+        &mut col_idx,
+        &mut values,
+        || Accumulator::new(n),
+        |acc, i, cols, vals| {
             acc.start_row();
             for_each_product(a, b, i, |col, v| acc.add(col, v));
-            let (cols, vals) = out;
             for (slot, &c) in cols.iter_mut().zip(acc.sorted()) {
                 *slot = c;
             }
             for (slot, &c) in vals.iter_mut().zip(cols.iter()) {
-                *slot = acc.value[c as usize];
+                *slot = acc.value(c);
             }
-        });
-    }
-
-    let mut c = CsrMatrix::from_structure_rect(m, n, row_ptr, col_idx);
-    c.values_mut().copy_from_slice(&values);
-    c
+        },
+    );
+    CsrMatrix::from_parts(m, n, row_ptr, col_idx, values)
 }
 
 /// 行 `i` の全ての積の項 `(列, 値)` を、モジュール冒頭で決めた順序で渡す。
@@ -130,39 +125,6 @@ fn for_each_product(a: &CsrMatrix, b: &CsrMatrix, i: usize, mut f: impl FnMut(u3
             f(c, aij * bjc);
         }
     }
-}
-
-/// 行ごとの処理を、逐次か rayon の並列で走らせる。
-///
-/// **どちらで走らせても結果はビット単位で同じ**——行同士は独立で、
-/// 行内の加算順序は担当スレッドに依存しないため。
-fn apply_rows<T: Send>(
-    m: usize,
-    n_cols: usize,
-    out: &mut [T],
-    body: impl Fn(&mut Accumulator, usize, &mut T) + Sync + Send,
-) {
-    if m < PARALLEL_MIN_ROWS {
-        let mut acc = Accumulator::new(n_cols);
-        for (i, slot) in out.iter_mut().enumerate() {
-            body(&mut acc, i, slot);
-        }
-        return;
-    }
-    use rayon::prelude::*;
-    // 作業配列は列数ぶんの大きさがあるので、いくつ作られるかを見積もれないと
-    // メモリが読めない。行をスレッド数ちょうどの塊に切り、塊 1 つにつき 1 個だけ作る
-    let threads = rayon::current_num_threads().max(1);
-    let block = m.div_ceil(threads).max(1);
-    out.par_chunks_mut(block)
-        .enumerate()
-        .for_each(|(b, chunk)| {
-            let mut acc = Accumulator::new(n_cols);
-            let base = b * block;
-            for (k, slot) in chunk.iter_mut().enumerate() {
-                body(&mut acc, base + k, slot);
-            }
-        });
 }
 
 #[cfg(test)]
@@ -224,30 +186,27 @@ mod tests {
     #[test]
     fn parallel_and_serial_agree_bitwise() {
         // CLAUDE.md 設計原則 1: 行を並列に配っても 1 ビットも変わらない。
-        // PARALLEL_MIN_ROWS をまたぐ大きさで、同じ行列を「小さく切って」比べる
-        let n = PARALLEL_MIN_ROWS * 2;
+        // 並列に切り替わる大きさ（rowwise::PARALLEL_MIN_ROWS）を超える行列で、
+        // 1 行ずつ逐次に作ったものと CSR 全体を突き合わせる
+        let n = rowwise::PARALLEL_MIN_ROWS * 3 + 17;
         let a = banded(n, 5);
         let big = spmm(&a, &a);
 
-        // 逐次経路と並列経路を直接突き合わせる（行の担当が変わっても値は同じはず）
-        let row_value = |acc: &mut Accumulator, i: usize| -> Vec<f64> {
+        let mut row_ptr = vec![0usize];
+        let mut col_idx: Vec<u32> = Vec::new();
+        let mut values: Vec<f64> = Vec::new();
+        let mut acc = Accumulator::new(n);
+        for i in 0..n {
             acc.start_row();
             for_each_product(&a, &a, i, |c, v| acc.add(c, v));
             let cols = acc.sorted().to_vec();
-            cols.iter().map(|&c| acc.value[c as usize]).collect()
-        };
-        let mut serial = vec![Vec::new(); n];
-        {
-            let mut acc = Accumulator::new(n);
-            for (i, slot) in serial.iter_mut().enumerate() {
-                *slot = row_value(&mut acc, i);
-            }
+            values.extend(cols.iter().map(|&c| acc.value(c)));
+            col_idx.extend(cols);
+            row_ptr.push(col_idx.len());
         }
-        let mut parallel = vec![Vec::new(); n];
-        apply_rows(n, n, &mut parallel, |acc, i, slot| {
-            *slot = row_value(acc, i)
-        });
-        assert_eq!(serial, parallel);
+        assert_eq!(big.row_ptr(), &row_ptr[..]);
+        assert_eq!(big.col_idx(), &col_idx[..]);
+        assert_eq!(big.values(), &values[..]);
 
         // 積そのものも安定していること
         for _ in 0..3 {

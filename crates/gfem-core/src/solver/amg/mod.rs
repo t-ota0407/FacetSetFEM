@@ -213,7 +213,8 @@ pub fn setup<'a>(a: &'a CsrMatrix, options: &AmgOptions) -> Result<Hierarchy<'a>
 
         let af = prolongation::filtered(&current, &strength, &nullspace)?;
         let omega_p = 4.0 / (3.0 * prolongation::spectral_bound(&af)?);
-        let smoother = prolongation::jacobi_smoother_matrix(&af, omega_p);
+        // A_f はこのあと使わないので、複製せずにその場で平滑化行列へ書き換える
+        let smoother = prolongation::into_jacobi_smoother(af, omega_p);
         let (p0, coarse_null) = prolongation::tentative(&agg, &nullspace)?;
         let p = spmm::spmm(&smoother, &p0);
         let r = p.transpose();
