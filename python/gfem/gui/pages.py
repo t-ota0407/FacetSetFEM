@@ -42,6 +42,7 @@ from .state import (
     field_by_key,
     stale_result_message,
 )
+from .widgets import MixedValueSpinBox
 
 if TYPE_CHECKING:
     from .main_window import MainWindow
@@ -55,6 +56,9 @@ COLORMAPS = ["viridis", "plasma", "coolwarm", "turbo", "gray"]
 #: これを超えると線が潰れて灰色の塊になり、形が**かえって見えなくなる**。
 #: 実測で頭部モデルの外表面は 87,812 面。手動で入れることは妨げない
 EDGE_LIMIT = 30_000
+
+#: 複数の領域を選んだとき、見出しに PID を並べる上限（それ以上は「ほか n」）
+MAX_LISTED_PIDS = 12
 
 #: クリックで置く電極の形（表示名, 内部名）。既定は従来どおり円
 PATCH_SHAPES = [
@@ -139,14 +143,16 @@ class RegionPage(QWidget):
     def __init__(self, window: MainWindow) -> None:
         super().__init__()
         self.window = window
-        self.pid: int | None = None
+        #: 編集している領域。ツリーで複数選ぶと 2 つ以上になり、σ をまとめて入れられる
+        self.pids: list[int] = []
 
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel("<b>領域</b>"))
         form = QFormLayout()
         self.pid_label = QLabel("-")
+        self.pid_label.setWordWrap(True)
         self.name_edit = QLineEdit()
-        self.sigma_spin = QDoubleSpinBox()
+        self.sigma_spin = MixedValueSpinBox()
         self.sigma_spin.setDecimals(6)
         self.sigma_spin.setRange(0.0, 1000.0)
         self.sigma_spin.setSingleStep(0.01)
@@ -155,6 +161,10 @@ class RegionPage(QWidget):
         form.addRow("名前", self.name_edit)
         form.addRow("導電率 σ", self.sigma_spin)
         layout.addLayout(form)
+        hint = QLabel("ツリーで Ctrl / Shift + クリックすると、複数の領域に σ をまとめて入れられます。")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #666;")
+        layout.addWidget(hint)
 
         hints = QGroupBox("組織物性の目安 [S/m]")
         hints_layout = QVBoxLayout(hints)
@@ -170,28 +180,64 @@ class RegionPage(QWidget):
         self.name_edit.editingFinished.connect(self._commit)
         self.sigma_spin.valueChanged.connect(self._commit)
 
-    def bind(self, pid: int) -> None:
-        self.pid = None  # コミットを抑えてから値を入れる
+    @property
+    def pid(self) -> int | None:
+        """1 つだけ選んでいるときの PID（複数・未選択なら None）。"""
+        return self.pids[0] if len(self.pids) == 1 else None
+
+    def bind(self, pids: int | list[int]) -> None:
+        """編集する領域を決める。複数なら σ をまとめて入れる。
+
+        - σ がそろっていればその値を、ばらばらなら「値がそろっていません」を出す。
+          入れた値は選んだ全部に入る
+        - **名前は複数選択の間は変えられない。** 名前は領域を見分けるためのもので、
+          まとめて同じにすると区別がつかなくなる（組織の目安のボタンは例外。同じ組織を
+          まとめて選ぶ使い方なので、名前もそろえてよい）
+        """
+        pids = [pids] if isinstance(pids, int) else list(pids)
+        self.pids = []  # コミットを抑えてから値を入れる
         session = self.window.session
-        self.pid_label.setText(str(pid))
-        self.name_edit.setText(session.region_name(pid))
-        self.sigma_spin.setValue(session.conductivity_of(pid))
-        self.pid = pid
+        many = len(pids) > 1
+        if many:
+            shown = ", ".join(str(p) for p in pids[:MAX_LISTED_PIDS])
+            more = f" ほか {len(pids) - MAX_LISTED_PIDS}" if len(pids) > MAX_LISTED_PIDS else ""
+            self.pid_label.setText(f"{len(pids)} 領域を選択中（{shown}{more}）")
+        else:
+            self.pid_label.setText(str(pids[0]) if pids else "-")
+        self.name_edit.setEnabled(not many)
+        self.name_edit.setPlaceholderText("（複数選択中は変えられません）" if many else "")
+        self.name_edit.setText("" if many or not pids else session.region_name(pids[0]))
+        sigmas = {session.conductivity_of(p) for p in pids}
+        if len(sigmas) == 1:
+            self.sigma_spin.set_value(sigmas.pop())
+        elif sigmas:
+            self.sigma_spin.set_mixed()
+        self.pids = pids
 
     def _apply_hint(self, name: str, value: float) -> None:
-        if self.pid is None:
+        if not self.pids:
             return
-        self.name_edit.setText(name)
-        self.sigma_spin.setValue(value)
-        self._commit()
+        # 欄を書き直すのはボタンのときだけ（打っている途中に書き直すと文字が消える）
+        self.sigma_spin.set_value(value)
+        if self.pid is not None:
+            self.name_edit.setText(name)
+        self._set(value, name)
 
     def _commit(self) -> None:
-        if self.pid is None:
+        if not self.pids:
             return
-        self.window.checkpoint(f"領域 {self.pid} の設定を変更")
-        self.window.session.set_conductivity(
-            self.pid, self.sigma_spin.value(), self.name_edit.text()
-        )
+        value = self.sigma_spin.value()
+        if value < self.sigma_spin.floor:
+            return  # 「値がそろっていません」のまま。何も入れない
+        # 複数選択では名前を変えない（欄は空で押せない）
+        self._set(value, self.name_edit.text() if self.pid is not None else None)
+
+    def _set(self, sigma: float, name: str | None) -> None:
+        """選んだ全部に σ（と名前）を入れる。まとめて 1 手で戻せる。"""
+        label = ", ".join(str(p) for p in self.pids)
+        self.window.checkpoint(f"領域 {label} の設定を変更")
+        for pid in self.pids:
+            self.window.session.set_conductivity(pid, sigma, name)
         self.window.refresh_tree()
 
 

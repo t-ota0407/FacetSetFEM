@@ -18,9 +18,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QItemSelectionModel, Qt
 from PySide6.QtGui import QAction, QBrush, QColor
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QFileDialog,
     QLabel,
     QMainWindow,
@@ -178,7 +179,9 @@ class MainWindow(QMainWindow):
         self.tree = QTreeWidget()
         self.tree.setHeaderLabels(["モデル"])
         self.tree.setMinimumWidth(240)
-        self.tree.currentItemChanged.connect(self._on_tree_selection)
+        # 領域は Ctrl / Shift + クリックで複数選べる（σ をまとめて入れる）
+        self.tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.tree.itemSelectionChanged.connect(self._on_tree_selection_changed)
 
         self.plotter = QtInteractor(self)
         # **ライトを明示的に置く。** pyvistaqt の描画器は光源を 1 つも持たず
@@ -902,8 +905,47 @@ class MainWindow(QMainWindow):
 
     def refresh_tree(self) -> None:
         # 編集はほぼすべてここを通るので、結果が古くなったかもここで見直す
+        selected = self._selected_keys()
+        current = self.tree.currentItem()
+        current_key = None if current is None else self._item_key(current)
         self._build_tree()
+        self._restore_selection(selected, current_key)
         self.refresh_result_status()
+
+    @staticmethod
+    def _item_key(item) -> tuple:
+        return (item.data(0, ROLE_KIND), item.data(0, ROLE_KEY))
+
+    def _selected_keys(self) -> list[tuple]:
+        return [self._item_key(i) for i in self.tree.selectedItems()]
+
+    def _restore_selection(self, keys: list[tuple], current_key: tuple | None) -> None:
+        """作り直したツリーで、同じ項目を選び直す（ページは選び直さない）。
+
+        ツリーは編集のたびに作り直すので、そのままだと選択が消える。複数の領域を
+        選んで σ を入れた直後に選択が消えると、続けて直せない。
+        """
+        if not keys:
+            return
+        wanted = set(keys)
+        self.tree.blockSignals(True)
+        try:
+            for item in self._tree_items():
+                key = self._item_key(item)
+                if key == current_key:
+                    self.tree.setCurrentItem(item, 0, QItemSelectionModel.SelectionFlag.NoUpdate)
+                if key in wanted:
+                    item.setSelected(True)
+        finally:
+            self.tree.blockSignals(False)
+
+    def _tree_items(self):
+        """ツリーの項目を上から順に全部（入れ子も含む）。"""
+        stack = [self.tree.topLevelItem(i) for i in reversed(range(self.tree.topLevelItemCount()))]
+        while stack:
+            item = stack.pop()
+            yield item
+            stack.extend(item.child(i) for i in reversed(range(item.childCount())))
 
     def _build_tree(self) -> None:
         self.tree.clear()
@@ -977,8 +1019,39 @@ class MainWindow(QMainWindow):
                 f"（{'、'.join(changes)}）"
             )
 
-    def _on_tree_selection(self, current, previous) -> None:
-        del previous
+    def _on_tree_selection_changed(self) -> None:
+        """ツリーの選択が変わった。領域だけは複数選べる。
+
+        **種類を混ぜて選ばせない。** 領域と電極を一緒に選んでも、まとめてできる操作が
+        無い。クリックした項目（current）と同じ種類だけを残す。
+        """
+        items = self.tree.selectedItems()
+        if not items:
+            return
+        current = self.tree.currentItem()
+        if current is None or current not in items:
+            current = items[-1]
+        kind = current.data(0, ROLE_KIND)
+        if kind == "region":
+            keep = [i for i in items if i.data(0, ROLE_KIND) == "region"]
+        else:
+            keep = [current]
+        if len(keep) != len(items):
+            self.tree.blockSignals(True)
+            try:
+                for item in items:
+                    item.setSelected(item in keep)
+            finally:
+                self.tree.blockSignals(False)
+        if kind == "region" and len(keep) > 1:
+            pids = sorted(i.data(0, ROLE_KEY) for i in keep)  # 選んだ順ではなく PID 順
+            self.page_region.bind(pids)
+            self.pages.setCurrentWidget(self.page_region)
+            self.refresh_view(highlight_pid=pids)
+            return
+        self._on_tree_selection(current)
+
+    def _on_tree_selection(self, current) -> None:
         if current is None:
             return
         kind = current.data(0, ROLE_KIND)
@@ -1005,9 +1078,11 @@ class MainWindow(QMainWindow):
         self.refresh_view()
 
     def refresh_view(
-        self, highlight_pid: int | None = None, highlight_electrode: str | None = None
+        self,
+        highlight_pid: int | list[int] | None = None,
+        highlight_electrode: str | None = None,
     ) -> None:
-        """3D ビューを描き直す。
+        """3D ビューを描き直す。`highlight_pid` は 1 つでも複数（ツリーの複数選択）でもよい。
 
         VTK は他スレッドから触れないのでメインスレッドで行う。代わりに段階ごとに
         `scope.step()` で表示を進める（SPEC §6.4）。
@@ -1057,16 +1132,21 @@ class MainWindow(QMainWindow):
 
         # 選んだ領域を先に用意する。**体表面に出ていない領域**（頭部モデルの
         # 大半がそう）は、外側を半透明にしないと見えないため
-        region = None
-        if highlight_pid is not None:
+        pids = [] if highlight_pid is None else (
+            [highlight_pid] if isinstance(highlight_pid, int) else list(highlight_pid)
+        )
+        regions = []
+        buried = False
+        if pids:
             scope.step("選んだ領域を取り出しています")
-            region = self.session.region_polydata(highlight_pid)
+        for pid in pids:
+            region = self.session.region_polydata(pid)
             if region.n_cells == 0:
                 # 体表面に出ていない領域。境界面を Rust 側で取り出す（体積メッシュは作らない）
-                region = self.session.region_boundary(highlight_pid)
-        buried = region is not None and region.n_cells > 0 and mode == "volume" and (
-            self.session.region_polydata(highlight_pid).n_cells == 0
-        )
+                region = self.session.region_boundary(pid)
+                buried = buried or (region.n_cells > 0 and mode == "volume")
+            if region.n_cells:
+                regions.append(region)
 
         scope.step("表示を作成しています")
         edges = options["edges"]
@@ -1115,7 +1195,7 @@ class MainWindow(QMainWindow):
             except Exception as exc:  # noqa: BLE001
                 self.log(f"ストリームラインを引けませんでした: {exc}")
 
-        if region is not None and region.n_cells:
+        for region in regions:
             self.plotter.add_mesh(
                 region, color=REGION_COLOR, show_edges=False, pickable=False
             )

@@ -11,9 +11,16 @@ from PySide6.QtCore import QPointF, Qt
 from PySide6.QtGui import QColor, QFontMetrics, QPainter, QPen
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
-__all__ = ["ConvergencePlot", "UnitSelector"]
+__all__ = ["ConvergencePlot", "MixedValueSpinBox", "UnitSelector"]
 
-from PySide6.QtWidgets import QComboBox, QDialog, QDialogButtonBox, QLabel, QVBoxLayout
+from PySide6.QtWidgets import (
+    QComboBox,
+    QDialog,
+    QDialogButtonBox,
+    QDoubleSpinBox,
+    QLabel,
+    QVBoxLayout,
+)
 
 from .. import describe_extent, length_units, metres_per_unit
 
@@ -106,6 +113,82 @@ class ConvergencePlot(QWidget):
             QPointF(left, self.height() - 4),
             f"反復 {len(self._history) - 1}　相対残差 {self._history[-1]:.3e}",
         )
+
+
+class MixedValueSpinBox(QDoubleSpinBox):
+    """「値がそろっていない」を表せる数値欄（複数の領域をまとめて編集するとき）。
+
+    `set_mixed()` の間は下限の 1 つ下を番兵にして `MIXED_TEXT` を出す（Qt の
+    specialValueText の仕組み）。数値を打つか上矢印を押すとふつうの値に戻り、
+    `valueChanged` で入った値を選んだ全部に入れてもらう。
+
+    - **打っている途中で範囲を変えない。** 範囲を変えると Qt が欄を書き直し、打ちかけの
+      文字が消える。番兵の下限は、編集が終わったとき（`editingFinished`）に戻す
+    - **番兵の値を外へ漏らさない。** 上矢印は番兵からではなく下限から数える
+      （番兵から数えると下限を割った値が出る）。下矢印では何もしない
+    - 番兵の値そのもので `valueChanged` は出さない。受け手は `value() < floor` を無視すればよい
+    """
+
+    MIXED_TEXT = "（値がそろっていません）"
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._floor = 0.0
+        self._mixed = False
+        # 受け手より先に呼ばれるよう、最初につなぐ
+        self.valueChanged.connect(self._on_value_changed)
+        self.editingFinished.connect(self._restore_range)
+
+    @property
+    def floor(self) -> float:
+        """ふつうの値の下限（番兵はこれより下）。"""
+        return self._floor
+
+    def setRange(self, lo: float, hi: float) -> None:  # noqa: N802 - Qt の名前に合わせる
+        self._floor = lo
+        super().setRange(lo - 1.0 if self._mixed else lo, hi)
+
+    @property
+    def is_mixed(self) -> bool:
+        return self._mixed
+
+    def set_mixed(self) -> None:
+        """値がそろっていないことを出す（`valueChanged` は出さない）。"""
+        self.blockSignals(True)
+        self._mixed = True
+        super().setRange(self._floor - 1.0, self.maximum())
+        self.setSpecialValueText(self.MIXED_TEXT)
+        self.setValue(self._floor - 1.0)
+        self.blockSignals(False)
+
+    def set_value(self, value: float) -> None:
+        """ふつうの値を出す（`valueChanged` は出さない）。"""
+        self.blockSignals(True)
+        self._mixed = False
+        self._restore_range()
+        self.setValue(value)
+        self.blockSignals(False)
+
+    def _on_value_changed(self, value: float) -> None:
+        if self._mixed and value >= self._floor:
+            self._mixed = False  # 数値が打たれた。範囲は打ち終わってから戻す
+
+    def _restore_range(self) -> None:
+        if self._mixed or self.minimum() >= self._floor:
+            return
+        self.setSpecialValueText("")
+        super().setRange(self._floor, self.maximum())
+
+    def stepBy(self, steps: int) -> None:  # noqa: N802 - Qt の名前に合わせる
+        if self._mixed:
+            if steps <= 0:
+                return  # 下限より下は無い。そろっていないまま
+            self.blockSignals(True)
+            self._mixed = False
+            self._restore_range()
+            self.setValue(self._floor)
+            self.blockSignals(False)
+        super().stepBy(steps)
 
 
 class UnitSelector(QDialog):
