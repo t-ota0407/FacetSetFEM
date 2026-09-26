@@ -22,6 +22,7 @@ use gfem_core::case::{
     SurfaceIndex, SurfacePatch,
 };
 use gfem_core::mesh::streamline::{TraceDirection, TraceOptions};
+use gfem_core::mesh::{Plane, TriangleMesh};
 use gfem_core::post::RegionStats;
 use gfem_core::provenance::{Provenance, SourceTree};
 use gfem_core::{Analysis, LengthUnit, VtuOptions};
@@ -379,6 +380,32 @@ impl PyMesh {
     ) -> PyResult<Bound<'py, PyArray1<u32>>> {
         let (_, owners) = self.surface()?.triangulate();
         Ok(owners.into_pyarray(py))
+    }
+
+    /// 平面で体積メッシュを切った断面（SPEC §6.3）。
+    ///
+    /// `origin` は平面上の 1 点 [m]、`normal` は法線（長さは問わない）。戻り値は
+    /// `{"points": (n, 3), "triangles": (m, 3), "elements": (m,), "edges": (n, 2), "t": (n,)}`。
+    /// 要素値は `elements`（三角形ごとの元ソリッド要素の通し番号）で引き、節点値 `v` は
+    /// `v[a] + t * (v[b] - v[a])`（`a, b = edges[i]`）で頂点に補間する。
+    ///
+    /// 体積メッシュを VTK に渡して切るより桁違いに軽い（切り口の三角形しか作らない）。
+    fn slice(&self, py: Python<'_>, origin: [f64; 3], normal: [f64; 3]) -> PyResult<Py<PyDict>> {
+        let plane = Plane::new(origin, normal).map_err(to_py)?;
+        let tets = self.tets()?;
+        let section = py.detach(|| gfem_core::mesh::slice(&self.inner, tets, &plane));
+        section_dict(py, section)
+    }
+
+    /// 平面の**法線の向きの側を切り落とした**クリップの見た目（SPEC §6.3）。
+    ///
+    /// 外表面のうち残す側と、切り口を合わせた三角形。戻り値の形は [`Self::slice`] と同じ。
+    fn clip(&self, py: Python<'_>, origin: [f64; 3], normal: [f64; 3]) -> PyResult<Py<PyDict>> {
+        let plane = Plane::new(origin, normal).map_err(to_py)?;
+        let tets = self.tets()?;
+        let surface = self.surface()?;
+        let section = py.detach(|| gfem_core::mesh::clip(&self.inner, tets, surface, &plane));
+        section_dict(py, section)
     }
 
     /// 外表面に顔を出している PID と、その面積・面数（面積の大きい順）。
@@ -1504,6 +1531,22 @@ fn parse_reference(reference: &str) -> PyResult<ReferencePotential> {
             "未知の基準電位です: \"{other}\"（zero_mean / cathode_mean / node:<ID>）"
         ))),
     }
+}
+
+/// 断面・クリップを Python へ返す形にする（[`PyMesh::slice`] の説明を参照）。
+fn section_dict(py: Python<'_>, section: TriangleMesh) -> PyResult<Py<PyDict>> {
+    let (n, m) = (section.n_points(), section.n_triangles());
+    let d = PyDict::new(py);
+    d.set_item("points", section.points.into_pyarray(py).reshape([n, 3])?)?;
+    d.set_item(
+        "triangles",
+        section.triangles.into_pyarray(py).reshape([m, 3])?,
+    )?;
+    d.set_item("elements", section.source_elements.into_pyarray(py))?;
+    let edges: Vec<u32> = section.point_edges.into_iter().flatten().collect();
+    d.set_item("edges", edges.into_pyarray(py).reshape([n, 2])?)?;
+    d.set_item("t", section.point_t.into_pyarray(py))?;
+    Ok(d.unbind())
 }
 
 /// `cell` が空なら `build` で作って入れ、中身を返す（`OnceLock::get_or_try_init` の代わり）。

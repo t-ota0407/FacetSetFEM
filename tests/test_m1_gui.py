@@ -353,9 +353,12 @@ def test_solve_runs_in_a_worker_thread_and_updates_the_ui(window, qt_app):
 
 def test_view_and_screenshot(window, tmp_path):
     window.refresh_view()
-    index = window.page_result.mode.findData("slice")
-    window.page_result.mode.setCurrentIndex(index)
-    window.refresh_view()
+    for mode in ("clip", "slice"):
+        index = window.page_result.mode.findData(mode)
+        window.page_result.mode.setCurrentIndex(index)
+        window.refresh_view()
+    # 断面・クリップの切り口は Rust 側で作る。体積メッシュは組み立てない（SPEC §6.3）
+    assert window.session._grid is None
     png = tmp_path / "view.png"
     window.screenshot(png)
     assert png.exists() and png.stat().st_size > 0

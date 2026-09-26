@@ -11,6 +11,7 @@
 pub mod idmap;
 pub mod isosurface;
 pub mod pick;
+pub mod section;
 pub mod spatial;
 pub mod streamline;
 pub mod tetview;
@@ -23,6 +24,7 @@ use std::path::PathBuf;
 pub use idmap::IdMap;
 pub use isosurface::{TriangleMesh, iso_surface};
 pub use pick::SurfacePicker;
+pub use section::{Plane, clip, slice};
 pub use spatial::CellGrid;
 pub use streamline::{Navigator, Streamline, TraceDirection, TraceOptions};
 pub use tetview::TetView;

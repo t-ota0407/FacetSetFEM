@@ -947,26 +947,16 @@ class MainWindow(QMainWindow):
         scalars = options["field"]
         mode = options["mode"]
 
+        # **体積メッシュではなく外表面を描く**（SPEC §6.3）。
+        # 頭部モデルで 2.7 秒 → 0.09 秒。しかも法線が付くので形が読める。
+        # 断面・クリップ・等値面が空だったときの代わりの表示もこれで足りる
+        surface = self.session.display_surface(scalars)
+        target = surface
         if mode in ("slice", "clip"):
-            # 体積メッシュが要るのは断面とクリップだけ
+            # 切り口は Rust 側で作る。体積メッシュは組み立てない（SPEC §6.3）
             scope.step("断面を切り出しています")
-            grid = self.session.grid()
-            target = grid
-        else:
-            # **体積メッシュではなく外表面を描く**（SPEC §6.3）。
-            # 頭部モデルで 2.7 秒 → 0.09 秒。しかも法線が付くので形が読める。
-            # 等値面は Rust 側で切り出すので、空だったときの代わりの表示もこれで足りる
-            target = self.session.display_surface(scalars)
-            grid = target
-        if mode == "slice":
-            target = grid.slice(
-                normal=options["slice_normal"], origin=self._slice_origin(grid, options)
-            )
-        elif mode == "clip":
-            target = grid.clip(
-                normal=options["slice_normal"],
-                origin=self._slice_origin(grid, options),
-                invert=True,
+            target = self.session.section(
+                mode, options["slice_normal"], options["slice_position"], scalars
             )
         elif mode == "isosurface":
             field = field_by_key(scalars)
@@ -980,7 +970,7 @@ class MainWindow(QMainWindow):
                 scalars = quantity
                 self.statusBar().showMessage(f"等値面 {quantity} = {level:.4g}")
         if target.n_cells == 0:
-            target = grid
+            target = surface
             scalars = options["field"]
 
         if scalars == SHAPE_FIELD or scalars not in target.array_names:
@@ -1064,17 +1054,3 @@ class MainWindow(QMainWindow):
         self.plotter.render()
         # clear() でピッキングも外れるので、選択中なら掛け直す
         self._arm_picking()
-
-    @staticmethod
-    def _slice_origin(grid, options):
-        bounds = grid.bounds
-        axis = {"x": 0, "y": 1, "z": 2}[options["slice_normal"]]
-        lo = bounds[2 * axis]
-        hi = bounds[2 * axis + 1]
-        centre = [
-            0.5 * (bounds[0] + bounds[1]),
-            0.5 * (bounds[2] + bounds[3]),
-            0.5 * (bounds[4] + bounds[5]),
-        ]
-        centre[axis] = lo + (hi - lo) * options["slice_position"]
-        return tuple(centre)

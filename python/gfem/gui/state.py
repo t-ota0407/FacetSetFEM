@@ -650,6 +650,54 @@ class Session:
             poly.point_data[field] = values
         return poly
 
+    def section_plane(self, axis: str, position: float) -> tuple[list[float], list[float]]:
+        """断面・クリップの平面 `(点, 法線)`。
+
+        `axis` は法線の向き（`"x"` / `"y"` / `"z"`）、`position` はその軸方向の
+        モデルの範囲に対する割合（0〜1）。点はバウンディングボックスの中心を通る。
+        """
+        lo, hi = self.model_box()
+        k = {"x": 0, "y": 1, "z": 2}[axis]
+        origin = 0.5 * (lo + hi)
+        origin[k] = lo[k] + (hi[k] - lo[k]) * position
+        normal = [0.0, 0.0, 0.0]
+        normal[k] = 1.0
+        return origin.tolist(), normal
+
+    def section(self, kind: str, axis: str, position: float, field: str | None) -> pv.PolyData:
+        """断面（`kind="slice"`）かクリップ（`"clip"`）に表示量を貼ったもの（SPEC §6.3）。
+
+        **切り口は Rust 側で作り、体積メッシュ（`grid()`）は組み立てない。** VTK に
+        体積メッシュを渡して切ると、頭部クラスのモデルでそれだけで 468 MB、スライダーを
+        1 目盛り動かすたびに 1〜2 秒かかった。クリップは軸の正の側を切り落とす。
+
+        要素値（|J| など）は三角形の元要素の値、節点値は切り口の辺の上で補間した値を貼る。
+        """
+        mesh = self._require_mesh()
+        origin, normal = self.section_plane(axis, position)
+        data = (mesh.slice if kind == "slice" else mesh.clip)(origin, normal)
+        elements = data["elements"]
+        poly = self._polydata(data["points"], data["triangles"], {"PID": mesh.solid_pid_array()[elements]})
+        if poly.n_cells == 0:
+            return poly
+        spec = field_by_key(field) if field else None
+        values = self.result_array(field) if spec is not None else None
+        if values is not None:
+            if spec.is_element_value:
+                poly.cell_data[field] = values[elements]
+            else:
+                a, b = data["edges"][:, 0], data["edges"][:, 1]
+                poly.point_data[field] = values[a] + data["t"] * (values[b] - values[a])
+        # 陰影のために法線を付ける（外表面と同じ理由。SPEC §6.3）。三角形の向きは
+        # Rust 側でそろえてある（外表面は外向き、切り口は切り落とした側）
+        return poly.compute_normals(
+            cell_normals=True,
+            point_normals=True,
+            split_vertices=False,
+            consistent_normals=False,
+            auto_orient_normals=False,
+        )
+
     def field_range(self, field: str | None) -> tuple[float, float] | None:
         """表示量の値域（**モデル全体**）。
 
