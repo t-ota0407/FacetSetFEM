@@ -125,6 +125,32 @@ def test_solving_switches_the_view_to_current_density(window, qt_app):
     assert DEFAULT_RESULT_FIELD in window.plotter.scalar_bars.keys()
 
 
+def test_the_shape_button_restores_the_view_but_keeps_the_result(window, qt_app, monkeypatch):
+    """「形状表示に戻す」は見た目だけを戻し、結果は残すこと。描き直しは 1 回だけ。"""
+    page = window.page_result
+    window.start_solve()
+    assert window.solver.wait(60_000)
+    qt_app.processEvents()
+    page.mode.setCurrentIndex(page.mode.findData("slice"))
+    page.streamlines.setChecked(True)
+    assert DEFAULT_RESULT_FIELD in window.plotter.scalar_bars.keys()
+
+    draws = []
+    original = window.refresh_view
+    monkeypatch.setattr(window, "refresh_view", lambda: (draws.append(1), original()))
+    page.shape_button.click()
+
+    assert page.field.currentData() == SHAPE_FIELD
+    assert page.mode.currentData() == "volume"
+    assert not page.streamlines.isChecked()
+    assert len(draws) == 1, "3 つの設定を変えても描き直しは 1 回"
+    assert not window.plotter.scalar_bars.keys()
+    assert window.session.solution is not None, "結果は消さない"
+    # 選び直せば、解き直さずにそのまま見られる
+    page.field.setCurrentIndex(page.field.findData(DEFAULT_RESULT_FIELD))
+    assert DEFAULT_RESULT_FIELD in window.plotter.scalar_bars.keys()
+
+
 def test_edges_are_on_for_small_models_only(window, monkeypatch):
     """細かいメッシュで稜線を全部描くと、潰れて形がかえって見えなくなる。"""
     from gfem.gui import pages

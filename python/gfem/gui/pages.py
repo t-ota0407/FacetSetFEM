@@ -644,6 +644,14 @@ class ResultPage(QWidget):
         form.addRow("カラーマップ", self.cmap)
         layout.addLayout(form)
 
+        self.shape_button = QPushButton("形状表示に戻す")
+        self.shape_button.setToolTip(
+            "色分けをやめ、全体表示にして流線も外します。結果は消えないので、\n"
+            "表示量を選び直せばいつでも見直せます。"
+        )
+        self.shape_button.clicked.connect(self.show_shape)
+        layout.addWidget(self.shape_button)
+
         self.edges = QCheckBox("要素の稜線を表示")
         self.nodes = QCheckBox("節点を表示")
         self.nodes.setToolTip(
@@ -756,6 +764,20 @@ class ResultPage(QWidget):
         index = self.field.findData(DEFAULT_RESULT_FIELD)
         if index >= 0:
             self.field.setCurrentIndex(index)
+
+    def show_shape(self) -> None:
+        """解く前の見た目（色分けなし・全体表示・流線なし）に戻す。
+
+        結果は捨てない（表示を切り替えるだけ）。カラーマップ・稜線・断面の位置などは
+        見方の好みなので触らない。3 つを 1 つずつ変えると描き直しが 3 回走るので、
+        まとめて変えてから 1 回だけ描く。
+        """
+        self._loading = True
+        self.field.setCurrentIndex(max(self.field.findData(SHAPE_FIELD), 0))
+        self.mode.setCurrentIndex(self.mode.findData("volume"))
+        self.streamlines.setChecked(False)
+        self._loading = False
+        self.window.refresh_view()
 
     def options(self) -> dict:
         return {
