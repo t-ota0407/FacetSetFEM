@@ -19,9 +19,10 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction
+from PySide6.QtGui import QAction, QBrush, QColor
 from PySide6.QtWidgets import (
     QFileDialog,
+    QLabel,
     QMainWindow,
     QMessageBox,
     QPlainTextEdit,
@@ -43,8 +44,10 @@ from .solver_thread import SolverThread
 from .state import (
     SHAPE_FIELD,
     REGION_STATS_COLUMNS,
+    STALE_COLOR,
     Session,
     field_by_key,
+    stale_result_message,
 )
 from .widgets import ConvergencePlot, UnitSelector
 
@@ -232,6 +235,12 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.bottom)
         self.setCentralWidget(central)
         self.statusBar().showMessage("モデルを開いてください")
+        # 結果が古い条件のものなら、ステータスバーの右端に出し続ける（一時メッセージに消されない）
+        self.stale_status = QLabel("")
+        self.stale_status.setStyleSheet(f"color: {STALE_COLOR}; font-weight: bold;")
+        self.stale_status.setVisible(False)
+        self.statusBar().addPermanentWidget(self.stale_status)
+        self._result_item = None
 
     def _build_menus(self) -> None:
         file_menu = self.menuBar().addMenu("ファイル(&F)")
@@ -405,6 +414,7 @@ class MainWindow(QMainWindow):
             self.show_error(exc)
             return
         self.log(f"VTU を書き出しました: {path}")
+        self._warn_if_stale()
 
     def export_region_stats_dialog(self) -> None:
         self._export_dialog(
@@ -443,6 +453,7 @@ class MainWindow(QMainWindow):
             self.show_error(exc)
             return
         self.log(f"書き出しました: {path}")
+        self._warn_if_stale()
 
     def screenshot_dialog(self) -> None:
         path, _ = QFileDialog.getSaveFileName(self, "スクリーンショット", "view.png", "PNG (*.png)")
@@ -890,7 +901,13 @@ class MainWindow(QMainWindow):
         self.stats_table.resizeColumnsToContents()
 
     def refresh_tree(self) -> None:
+        # 編集はほぼすべてここを通るので、結果が古くなったかもここで見直す
+        self._build_tree()
+        self.refresh_result_status()
+
+    def _build_tree(self) -> None:
         self.tree.clear()
+        self._result_item = None
         study = self.session.study
         if study is None:
             return
@@ -930,6 +947,35 @@ class MainWindow(QMainWindow):
         result_item = QTreeWidgetItem(["結果"])
         result_item.setData(0, ROLE_KIND, "result")
         self.tree.addTopLevelItem(result_item)
+        self._result_item = result_item
+
+    def refresh_result_status(self) -> None:
+        """結果を出したときから条件が変わっていたら、古い結果だと知らせる。
+
+        結果は消さない（解き直すまで見比べられる）。代わりに、結果ページの帯・
+        ステータスバー・ツリーの「結果」の 3 か所に、何が変わったかを出す。
+        条件を戻せば（Undo を含む）知らせも消える。
+        """
+        changes = self.session.changes_since_solve()
+        text = stale_result_message(changes)
+        self.page_result.show_staleness(changes)
+        self.stale_status.setText("⚠ 結果は古い条件のものです（F5 で解き直し）" if changes else "")
+        self.stale_status.setToolTip(text)
+        self.stale_status.setVisible(bool(changes))
+        item = self._result_item
+        if item is not None:
+            item.setText(0, "結果（条件が変わっています）" if changes else "結果")
+            item.setToolTip(0, text)
+            item.setForeground(0, QBrush(QColor(STALE_COLOR)) if changes else QBrush())
+
+    def _warn_if_stale(self) -> None:
+        """古い結果を書き出したら、そうだとログに残す（書き出したもの自体は正しい）。"""
+        changes = self.session.changes_since_solve()
+        if changes:
+            self.log(
+                "  [注意] 書き出したのは求解したときの条件の結果です。いまの条件とは違います"
+                f"（{'、'.join(changes)}）"
+            )
 
     def _on_tree_selection(self, current, previous) -> None:
         del previous

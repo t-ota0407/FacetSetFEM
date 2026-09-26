@@ -36,9 +36,11 @@ from .state import (
     DEFAULT_RESULT_FIELD,
     NODAL_VALUE_WARNING,
     SHAPE_FIELD,
+    STALE_COLOR,
     TISSUE_HINTS,
     Session,
     field_by_key,
+    stale_result_message,
 )
 
 if TYPE_CHECKING:
@@ -842,6 +844,8 @@ class SolverPage(QWidget):
         study.solver.preconditioner = self.preconditioner.currentText()
         study.solver.backend = self.backend.currentText()
         study.output.reference_potential = self.reference.currentText()
+        # ツリーは作り直さないので、結果が古くなったかをここで見直す
+        self.window.refresh_result_status()
 
 
 class ResultPage(QWidget):
@@ -859,6 +863,15 @@ class ResultPage(QWidget):
 
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel("<b>表示</b>"))
+        # 結果を出したときから条件が変わっていたら、ページの先頭で知らせる
+        self.stale_label = QLabel("")
+        self.stale_label.setWordWrap(True)
+        self.stale_label.setStyleSheet(
+            f"color: {STALE_COLOR}; background: #fff3e6; border: 1px solid {STALE_COLOR};"
+            " padding: 6px;"
+        )
+        self.stale_label.setVisible(False)
+        layout.addWidget(self.stale_label)
         form = QFormLayout()
         self.field = QComboBox()
         self.mode = QComboBox()
@@ -998,6 +1011,11 @@ class ResultPage(QWidget):
             if index >= 0:
                 self.field.setCurrentIndex(index)
         self._update_shape_button()
+
+    def show_staleness(self, changes: list[str]) -> None:
+        """結果が古い条件のものなら帯を出す（`MainWindow.refresh_result_status` から）。"""
+        self.stale_label.setText(f"⚠ {stale_result_message(changes)}" if changes else "")
+        self.stale_label.setVisible(bool(changes))
 
     def _view(self) -> dict:
         """いまの見方（形状表示との行き来で覚えて戻すもの）。"""

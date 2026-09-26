@@ -135,6 +135,57 @@ TISSUE_HINTS: dict[str, float] = {name: t.sigma for name, t in TISSUES.items()}
 UNDO_DEPTH = 100
 
 
+#: 結果が古い条件のものだと知らせるときの色（結果ページの帯・ステータスバー・ツリー）
+STALE_COLOR = "#b34700"
+
+
+def stale_result_message(changes: list[str]) -> str:
+    """結果が古いことの説明。`changes` は `Session.changes_since_solve()` の戻り値。"""
+    if not changes:
+        return ""
+    return (
+        "この結果は求解したときの条件のものです。その後に変わった条件: "
+        f"{'、'.join(changes)}。いまの条件の結果を見るには F5（実行 → 求解）で解き直してください。"
+    )
+
+
+def _electrode_changes(old: list[ElectrodeSpec], new: list[ElectrodeSpec]) -> list[str]:
+    """電極の変更を「電極 E1 の総電流」「電極 E3 を追加」のような言葉で並べる。
+
+    数が同じなら並び順で対応づける。GUI の改名はその場で名前だけを書き換えるので、
+    名前で対応づけると改名が「削除と追加」に見えてしまう。数が違えば名前で対応づける。
+    """
+    def parts(a: ElectrodeSpec, b: ElectrodeSpec) -> list[str]:
+        what = []
+        if a.role != b.role:
+            what.append("役割")
+        if a.current != b.current:
+            what.append("総電流")
+        if a.to_dict()["faces"] != b.to_dict()["faces"]:
+            what.append("面")
+        if a.distribution != b.distribution:
+            what.append("荷重の配り方")
+        return what
+
+    out: list[str] = []
+    if len(old) == len(new):
+        for a, b in zip(old, new):
+            what = parts(a, b)
+            if a.name != b.name:
+                what.insert(0, f"名前（{a.name} → {b.name}）")
+            if what:
+                out.append(f"電極 {b.name} の{'・'.join(what)}")
+        return out
+    before = {e.name: e for e in old}
+    after = {e.name: e for e in new}
+    out += [f"電極 {n} を削除" for n in before if n not in after]
+    out += [f"電極 {n} を追加" for n in after if n not in before]
+    for name in after:
+        if name in before and (what := parts(before[name], after[name])):
+            out.append(f"電極 {name} の{'・'.join(what)}")
+    return out
+
+
 class Session:
     """開いているモデルと解析条件、直近の結果。"""
 
@@ -394,6 +445,43 @@ class Session:
         self._arrays = {}
         self._grid = None  # 表示用データに結果を貼り直す
         self._surface = None
+
+    def changes_since_solve(self) -> list[str]:
+        """結果を出したときから変わった解析条件（人が読める短い言葉で）。空なら結果は最新。
+
+        解いたときの条件の写し（`solved_study`）といまの条件を比べる。比べるのは
+        **答えが変わるものだけ**:
+
+        - 導電率、電極（役割・総電流・面・荷重の配り方・名前）
+        - 収束判定と最大反復回数（答えの精度が変わる）
+        - 電位の基準（φ の値がずれる。E と J は変わらない）
+
+        バックエンドと前処理は比べない。バックエンドを変えても答えはビット単位で同じで、
+        前処理を変えても収束判定の範囲でしか変わらない（SPEC §4.4 / §4.5）。領域の名前と
+        書き出し先も答えを変えない。比べるので、Undo で解いたときの条件に戻せば
+        「最新」に戻る。
+        """
+        old, new = self.solved_study, self.study
+        if self.solution is None or old is None or new is None:
+            return []
+        changes: list[str] = []
+
+        old_sigma = {m.pid: m.sigma for m in old.materials}
+        new_sigma = {m.pid: m.sigma for m in new.materials}
+        pids = sorted(p for p in old_sigma.keys() | new_sigma.keys()
+                      if old_sigma.get(p) != new_sigma.get(p))
+        if pids:
+            changes.append(f"σ（PID {', '.join(str(p) for p in pids)}）")
+
+        changes.extend(_electrode_changes(old.electrodes, new.electrodes))
+
+        if old.solver.tolerance != new.solver.tolerance:
+            changes.append("収束判定")
+        if old.solver.max_iterations != new.solver.max_iterations:
+            changes.append("最大反復回数")
+        if old.output.reference_potential != new.output.reference_potential:
+            changes.append("電位の基準")
+        return changes
 
     def _forget_results(self) -> None:
         """結果と、結果から作った表示用データを捨てる（モデルを開き直したとき）。"""
