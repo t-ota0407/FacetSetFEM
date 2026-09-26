@@ -54,19 +54,11 @@ fn read(deck: &str) -> Mesh {
 /// 立方体の側面の重心は上面の重心から 0.707 m 離れているので、
 /// 半径 0.5 m なら上面 1 枚だけが選ばれる。
 fn top_patch() -> SurfacePatch {
-    SurfacePatch {
-        center: [0.5, 0.5, 1.0],
-        radius: 0.5,
-        pid: None,
-    }
+    SurfacePatch::circle([0.5, 0.5, 1.0], 0.5, None)
 }
 
 fn bottom_patch() -> SurfacePatch {
-    SurfacePatch {
-        center: [0.5, 0.5, 0.0],
-        radius: 0.5,
-        pid: None,
-    }
+    SurfacePatch::circle([0.5, 0.5, 0.0], 0.5, None)
 }
 
 fn case_with(anode: Electrode, cathode: Electrode) -> Case {
@@ -153,11 +145,11 @@ fn an_empty_patch_says_why() {
     let surface = extract_surface(&mesh).unwrap();
     let lookup = FaceLookup::new(&mesh, &surface);
     let case = case_with(
-        Electrode::anode("E1", 2.0e-3).with_patches([SurfacePatch {
-            center: [0.5, 0.5, 1.0],
-            radius: 0.5,
-            pid: Some(999),
-        }]),
+        Electrode::anode("E1", 2.0e-3).with_patches([SurfacePatch::circle(
+            [0.5, 0.5, 1.0],
+            0.5,
+            Some(999),
+        )]),
         Electrode::cathode("E2", 2.0e-3).with_patches([bottom_patch()]),
     );
     let err = gfem_core::case::resolve_faces(&lookup, &case.electrodes[0])
@@ -202,11 +194,7 @@ fn a_face_removed_by_hand_drops_out_of_the_patch() {
     let top = top_face_ref(&mesh);
 
     // 立方体全体を覆うパッチから、上面だけ外す
-    let whole = SurfacePatch {
-        center: [0.5, 0.5, 0.5],
-        radius: 10.0,
-        pid: None,
-    };
+    let whole = SurfacePatch::circle([0.5, 0.5, 0.5], 10.0, None);
     let all = Electrode::anode("E1", 2.0e-3).with_patches([whole.clone()]);
     let minus_top = Electrode::anode("E1", 2.0e-3)
         .with_patches([whole])

@@ -23,7 +23,7 @@ use std::path::PathBuf;
 
 pub use idmap::IdMap;
 pub use isosurface::{TriangleMesh, iso_surface};
-pub use pick::SurfacePicker;
+pub use pick::{PatchFrame, RectShape, SurfacePicker};
 pub use section::{Plane, clip, slice};
 pub use spatial::CellGrid;
 pub use streamline::{Navigator, Streamline, TraceDirection, TraceOptions};

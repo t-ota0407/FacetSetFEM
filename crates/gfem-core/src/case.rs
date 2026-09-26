@@ -9,7 +9,8 @@
 
 use crate::error::{ErrorKind, GfemError, Result, format_sample_list};
 use crate::material::Conductivity;
-use crate::mesh::pick::SurfacePicker;
+pub use crate::mesh::pick::RectShape;
+use crate::mesh::pick::{PatchFrame, SurfacePicker};
 use crate::mesh::topology::{FaceKey, Surface, face_key};
 use crate::mesh::{ElemId, Mesh, NodeId, NodeIndex, PropId};
 use crate::solver::amg::AmgOptions;
@@ -57,23 +58,102 @@ impl ElectrodeRole {
 /// 配られるのが普通で、その場合シェル PID では電極を 1 つも置けない。外表面は
 /// ソリッドの面から抽出できているので、そこから直接選ぶ。
 ///
-/// GUI では 3D ビュー上のクリックが `center` を、スピンボックスが `radius` を決める。
-/// **保存するのは面の一覧ではなく、この中心と半径**。同じメッシュなら同じ面が選ばれ、
-/// ケースファイルを読んでも人が意味を追えるため（面番号の羅列は追えない）。
+/// GUI では 3D ビュー上のクリックが `center` を、パネルの入力が形（円の半径、または
+/// 矩形の寸法と向き）を決める。**保存するのは面の一覧ではなく、この中心と形**。
+/// 同じメッシュなら同じ面が選ばれ、ケースファイルを読んでも人が意味を追えるため
+/// （面番号の羅列は追えない）。
 #[derive(Debug, Clone, PartialEq)]
 pub struct SurfacePatch {
     /// 中心 [m]。3D ビューでクリックした点
     pub center: [f64; 3],
-    /// 半径 [m]。中心からこの距離までの面を、体表面伝いに広げて選ぶ
-    pub radius: f64,
+    /// 形
+    pub shape: PatchShape,
     /// この PID のソリッドが持つ面だけに限る（`None` なら制限しない）
     ///
     /// 首の切断面のように「外表面だが体表面ではない」面を避けるために使う。
     pub pid: Option<PropId>,
 }
 
+/// パッチの形（SPEC §11.1）。
+#[derive(Debug, Clone, PartialEq)]
+pub enum PatchShape {
+    /// 円。中心から 3 次元の距離 `radius` [m] までの面を、体表面伝いに広げて選ぶ
+    Circle {
+        /// 半径 [m]
+        radius: f64,
+    },
+    /// 矩形（角丸可）。面の重心を接平面に投影して選ぶ
+    Rect(RectShape),
+}
+
 impl SurfacePatch {
-    /// 中心と半径が使える値か確かめる。
+    /// 円のパッチ。
+    pub fn circle(center: [f64; 3], radius: f64, pid: Option<PropId>) -> Self {
+        Self {
+            center,
+            shape: PatchShape::Circle { radius },
+            pid,
+        }
+    }
+
+    /// 矩形のパッチ。
+    pub fn rect(center: [f64; 3], rect: RectShape, pid: Option<PropId>) -> Self {
+        Self {
+            center,
+            shape: PatchShape::Rect(rect),
+            pid,
+        }
+    }
+
+    /// 指定どおりの面積 [m²]。
+    ///
+    /// 実際に選ばれる面は面 1 枚単位なので、この値とは縁のぶんだけずれる。GUI はこの差を
+    /// 見せて、メッシュが電極に対して粗すぎないかを判断させる（SPEC §11.1）。
+    pub fn nominal_area(&self) -> f64 {
+        match &self.shape {
+            PatchShape::Circle { radius } => std::f64::consts::PI * radius * radius,
+            PatchShape::Rect(rect) => rect.area(),
+        }
+    }
+
+    /// エラーメッセージ用の形の説明（例: 「半径 0.025 m」「矩形 0.02 m × 0.02 m」）。
+    pub fn describe_shape(&self) -> String {
+        match &self.shape {
+            PatchShape::Circle { radius } => format!("半径 {radius} m"),
+            PatchShape::Rect(r) => {
+                let mut s = format!("矩形 {} m × {} m", r.width, r.height);
+                if r.corner_radius > 0.0 {
+                    s += &format!("・角の半径 {} m", r.corner_radius);
+                }
+                s += &format!("・向き {:?} から {}°", r.axis, r.angle);
+                s
+            }
+        }
+    }
+
+    /// 体表面の面を選ぶ（面の通し番号の昇順）。電極面の解決と GUI のクリックが共に通る。
+    pub fn select(&self, picker: &SurfacePicker) -> Result<Vec<u32>> {
+        self.check()?;
+        match &self.shape {
+            PatchShape::Circle { radius } => Ok(picker.select(self.center, *radius, self.pid)),
+            PatchShape::Rect(rect) => picker.select_rect(self.center, rect, self.pid),
+        }
+    }
+
+    /// 接平面の座標系と輪郭（表示用）。クリック点の近くに面が無ければ `None`。
+    pub fn outline(&self, picker: &SurfacePicker) -> Result<Option<(PatchFrame, Vec<[f64; 3]>)>> {
+        self.check()?;
+        Ok(match &self.shape {
+            PatchShape::Circle { radius } => picker
+                .circle_frame(self.center, *radius, self.pid)
+                .map(|f| (f, f.circle_outline(*radius))),
+            PatchShape::Rect(rect) => picker
+                .rect_frame(self.center, rect, self.pid)?
+                .map(|f| (f, f.rect_outline(rect))),
+        })
+    }
+
+    /// 中心と形が使える値か確かめる。
     ///
     /// 電極面を解決するとき（[`resolve_faces`]）と、GUI のクリックで面を選ぶとき
     /// （Python の `Mesh.pick_patch`）の両方がここを通る。
@@ -82,12 +162,17 @@ impl SurfacePatch {
     /// （実測: `vtkHardwarePicker`）、通すと距離の比較が全て false になって先頭の面が
     /// 選ばれ、見当違いの場所に電極ができる（SPEC §11.1）。
     pub fn check(&self) -> Result<()> {
-        if !self.radius.is_finite() || self.radius < 0.0 {
-            return Err(GfemError::new(
-                ErrorKind::Case,
-                format!("パッチの半径が不正です: {} m", self.radius),
-            )
-            .with_hint("半径は 0 以上の有限値で指定してください（単位は m）"));
+        match &self.shape {
+            PatchShape::Circle { radius } => {
+                if !radius.is_finite() || *radius < 0.0 {
+                    return Err(GfemError::new(
+                        ErrorKind::Case,
+                        format!("パッチの半径が不正です: {radius} m"),
+                    )
+                    .with_hint("半径は 0 以上の有限値で指定してください（単位は m）"));
+                }
+            }
+            PatchShape::Rect(rect) => rect.check()?,
         }
         if self.center.iter().any(|v| !v.is_finite()) {
             return Err(GfemError::new(
@@ -679,21 +764,18 @@ pub fn resolve_faces(lookup: &FaceLookup, electrode: &Electrode) -> Result<Vec<E
 
     // --- 体表面のパッチ（SPEC §11.1）---
     for (k, patch) in electrode.patches.iter().enumerate() {
-        patch
-            .check()
+        let selected = patch
+            .select(lookup.picker())
             .map_err(|e| e.with_entity(format!("電極 {} のパッチ {}", electrode.name, k + 1)))?;
-        let selected = lookup
-            .picker()
-            .select(patch.center, patch.radius, patch.pid);
         if selected.is_empty() {
             return Err(GfemError::new(
                 ErrorKind::Case,
                 format!(
-                    "電極 {} のパッチ {} が体表面の面を 1 枚も選べませんでした（中心 {:?} m, 半径 {} m{}）",
+                    "電極 {} のパッチ {} が体表面の面を 1 枚も選べませんでした（中心 {:?} m, {}{}）",
                     electrode.name,
                     k + 1,
                     patch.center,
-                    patch.radius,
+                    patch.describe_shape(),
                     match patch.pid {
                         Some(p) => format!(", PID={p}"),
                         None => String::new(),

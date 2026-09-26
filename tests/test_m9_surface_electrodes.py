@@ -182,7 +182,7 @@ def test_clicking_the_view_adds_a_patch(window):
     """3D ビューのクリック（＝コールバック）で電極面が増えること。"""
     page = window.page_electrode
     page.bind("E1")
-    page.radius_spin.setValue(12.0)  # mm
+    page.diameter_spin.setValue(24.0)  # mm（直径）
     page.patch_pid.setCurrentIndex(0)  # 制限しない
 
     page._on_picked(np.array([0.030, 0.020, 0.020]))
@@ -343,7 +343,7 @@ def test_a_real_mouse_click_selects_faces(window, qt_app):
     """
     page = window.page_electrode
     page.bind("E1")
-    page.radius_spin.setValue(8.0)
+    page.diameter_spin.setValue(16.0)
     window.show()
     qt_app.processEvents()
     page.pick_button.setChecked(True)
@@ -387,7 +387,9 @@ def painting_window(window, qt_app):
     """クリック選択モードに入り、3D ビューが描かれた状態のウィンドウ。"""
     page = window.page_electrode
     page.bind("E1")
-    page.radius_spin.setValue(8.0)
+    page.shape_combo.setCurrentIndex(page.shape_combo.findData("circle"))
+    page.diameter_spin.setValue(16.0)
+    page.brush_spin.setValue(8.0)
     # 他のテストが断面表示のまま終えていることがある。
     # 体表面をクリックしたいので「全体」に戻してから始める
     window.page_result.mode.setCurrentIndex(window.page_result.mode.findData("volume"))
@@ -432,7 +434,7 @@ def test_dragging_with_alt_erases_faces(painting_window, qt_app):
     _drag(window, qt_app, [(w // 2, h // 2)])
     before = window.session.electrode_faces("E1")["n_faces"]
 
-    window.page_electrode.radius_spin.setValue(0.5)  # 細い筆で縁だけ削る
+    window.page_electrode.brush_spin.setValue(0.5)  # 細い筆で縁だけ削る
     _drag(window, qt_app, [(w // 2, h // 2), (w // 2 + 4, h // 2)], alt=True)
     assert window.session.electrode("E1").removed_faces, "Alt+ドラッグで外れていない"
     assert window.session.electrode_faces("E1")["n_faces"] < before

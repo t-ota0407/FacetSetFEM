@@ -32,10 +32,12 @@ from PySide6.QtWidgets import (
 from .. import GfemError, backend_choices, describe_gpus, preconditioner_choices
 from .busy import REVEAL_DELAY_MS
 from .state import (
+    AREA_MISMATCH_WARNING,
     DEFAULT_RESULT_FIELD,
     NODAL_VALUE_WARNING,
     SHAPE_FIELD,
     TISSUE_HINTS,
+    Session,
 )
 
 if TYPE_CHECKING:
@@ -50,6 +52,51 @@ COLORMAPS = ["viridis", "plasma", "coolwarm", "turbo", "gray"]
 #: これを超えると線が潰れて灰色の塊になり、形が**かえって見えなくなる**。
 #: 実測で頭部モデルの外表面は 87,812 面。手動で入れることは妨げない
 EDGE_LIMIT = 30_000
+
+#: クリックで置く電極の形（表示名, 内部名）。既定は従来どおり円
+PATCH_SHAPES = [
+    ("円", "circle"),
+    ("矩形（角丸可）", "rect"),
+]
+
+#: 指定面積と実際の面積がずれているときの説明（SPEC §11.1）
+AREA_MISMATCH_HINT = (
+    f"選ばれた面の面積が指定面積から {AREA_MISMATCH_WARNING:.0%} 以上ずれています。"
+    "面は 1 枚単位で入るか外れるかなので、電極に対してメッシュが粗いか、"
+    "曲面で接平面への投影がずれています。電流密度は実際の面積で計算されます。"
+    "正確にするには、電極の周りのメッシュを細かくするか、メッシュ作成ソフトで"
+    "電極の形のシェル要素を作ってシェル PID で指定してください。"
+)
+
+
+def _mm_spin(value: float, lo: float, hi: float, step: float) -> QDoubleSpinBox:
+    """mm 単位の長さの入力欄。"""
+    spin = QDoubleSpinBox()
+    spin.setDecimals(1)
+    spin.setRange(lo, hi)
+    spin.setValue(value)
+    spin.setSingleStep(step)
+    spin.setSuffix(" mm")
+    return spin
+
+
+def format_area(area: float) -> str:
+    """面積を mm² と cm² の併記で書く（電極パッドの寸法は cm² で語られるため）。"""
+    return f"{area * 1e6:.1f} mm²（{area * 1e4:.2f} cm²）"
+
+
+def describe_selection(info: dict) -> tuple[str, bool]:
+    """`pick_patch` の結果を「118 面 3.98 cm²（指定 4.00 cm²、−0.5 %）」の形で書く。
+
+    2 つ目の戻り値は、指定面積とのずれが警告のしきい値を超えているか。
+    """
+    text = f"{info['n_faces']} 面 {info['area'] * 1e4:.2f} cm²"
+    mismatch = Session.area_mismatch(info)
+    if mismatch is None:
+        return text, False
+    text += f"（指定 {info['nominal_area'] * 1e4:.2f} cm²、{mismatch:+.1%}）"
+    return text, abs(mismatch) > AREA_MISMATCH_WARNING
+
 
 #: 3D ビューの表示モード（表示名, 内部名）
 VIEW_MODES = [
@@ -186,25 +233,68 @@ class ElectrodePage(QWidget):
         )
         patch_layout.addWidget(self.pick_button)
 
+        # --- 電極の形（クリックで置くもの。SPEC §11.1）---
+        # 寸法は電極の仕様書に載っている言い方で入れる（円は直径、矩形は幅 × 高さ）
+        shape_form = QFormLayout()
+        self.shape_combo = QComboBox()
+        for label, key in PATCH_SHAPES:
+            self.shape_combo.addItem(label, key)
+        self.diameter_spin = _mm_spin(50.0, 0.1, 1000.0, 5.0)
+        self.width_spin = _mm_spin(20.0, 0.1, 1000.0, 1.0)
+        self.height_spin = _mm_spin(20.0, 0.1, 1000.0, 1.0)
+        self.corner_spin = _mm_spin(0.0, 0.0, 500.0, 0.5)
+        self.corner_spin.setToolTip(
+            "角の半径。0 なら尖った角です。尖った角には電流が集中して |J| の最大値が\n"
+            "実物より大きく出るので、角が丸い電極なら実物に合わせてください。"
+        )
+        self.angle_spin = QDoubleSpinBox()
+        self.angle_spin.setDecimals(1)
+        self.angle_spin.setRange(-180.0, 180.0)
+        self.angle_spin.setSingleStep(15.0)
+        self.angle_spin.setWrapping(True)
+        self.angle_spin.setSuffix("°")
+        self.angle_spin.setToolTip(
+            "0° で幅の辺が画面の横にそろいます（クリックしたときの視点で決まります）。\n"
+            "正の値で、外から見て反時計回りに回します。"
+        )
+        size_row = QHBoxLayout()
+        size_row.addWidget(self.width_spin)
+        size_row.addWidget(QLabel("×"))
+        size_row.addWidget(self.height_spin)
+        self.size_row = QWidget()
+        self.size_row.setLayout(size_row)
+        size_row.setContentsMargins(0, 0, 0, 0)
+        self.nominal_label = QLabel("")
+        shape_form.addRow("形", self.shape_combo)
+        shape_form.addRow("直径", self.diameter_spin)
+        shape_form.addRow("幅 × 高さ", self.size_row)
+        shape_form.addRow("角の半径", self.corner_spin)
+        shape_form.addRow("向き", self.angle_spin)
+        shape_form.addRow("指定面積", self.nominal_label)
+        self.shape_form = shape_form
+        patch_layout.addLayout(shape_form)
+
         patch_form = QFormLayout()
-        self.radius_spin = QDoubleSpinBox()
-        self.radius_spin.setDecimals(1)
-        self.radius_spin.setRange(0.1, 500.0)
-        self.radius_spin.setValue(25.0)
-        self.radius_spin.setSingleStep(5.0)
-        self.radius_spin.setSuffix(" mm")
+        self.brush_spin = _mm_spin(5.0, 0.1, 500.0, 1.0)
+        self.brush_spin.setToolTip(
+            "Shift / Alt + ドラッグで塗る・消すとき、削除モードでクリックしたときの筆の大きさ。\n"
+            "小さくすると 1 枚ずつ扱えます。"
+        )
         self.patch_pid = QComboBox()
         self.patch_pid.setToolTip(
             "外表面に出ている領域の一覧（面積の大きい順）。\n"
             "首の切断面など「外表面だが体表面ではない」面を避けるために、\n"
             "ふつうは皮膚の PID に絞り込みます。"
         )
-        patch_form.addRow("ブラシの半径", self.radius_spin)
+        patch_form.addRow("筆の半径", self.brush_spin)
         patch_form.addRow("領域を限る", self.patch_pid)
         patch_layout.addLayout(patch_form)
 
         self.patch_list = QListWidget()
-        self.patch_list.setMaximumHeight(90)
+        # 1 枚を 2 行で出す（形と場所 / 面数・面積・指定面積とのずれ）。1 行だと
+        # 肝心のずれが横スクロールの先に隠れる
+        self.patch_list.setMaximumHeight(120)
+        self.patch_list.setWordWrap(True)
         mode_row = QHBoxLayout()
         self.add_mode = QPushButton("追加")
         self.erase_mode = QPushButton("削除")
@@ -229,6 +319,13 @@ class ElectrodePage(QWidget):
         patch_layout.addWidget(self.hand_edits)
 
         button_row = QHBoxLayout()
+        self.reshape_patch_button = QPushButton("選んだパッチに形を反映")
+        self.reshape_patch_button.setToolTip(
+            "一覧で選んだパッチの形・寸法・向きを、いまの入力に置き換えます（中心はそのまま）。\n"
+            "一覧でパッチを選ぶと、そのパッチの形が入力欄に読み込まれます。"
+        )
+        self.reshape_patch_button.clicked.connect(self._reshape_patch)
+        button_row.addWidget(self.reshape_patch_button)
         self.remove_patch_button = QPushButton("選んだパッチを外す")
         self.remove_patch_button.clicked.connect(self._remove_patch)
         button_row.addWidget(self.remove_patch_button)
@@ -251,6 +348,18 @@ class ElectrodePage(QWidget):
         self.current_spin.valueChanged.connect(self._commit)
         self.pid_list.itemChanged.connect(self._commit)
         self.pick_button.toggled.connect(self._toggle_picking)
+        self.shape_combo.currentIndexChanged.connect(self._on_shape_changed)
+        for spin in (
+            self.diameter_spin,
+            self.width_spin,
+            self.height_spin,
+            self.corner_spin,
+            self.angle_spin,
+            self.brush_spin,
+        ):
+            spin.valueChanged.connect(self._on_shape_changed)
+        self.patch_list.currentRowChanged.connect(self._load_patch_shape)
+        self._on_shape_changed()
 
     def bind(self, name: str) -> None:
         # 体表面の索引づくり（外表面 87,812 面で 1.9 秒）が初回だけここで走る。
@@ -310,17 +419,23 @@ class ElectrodePage(QWidget):
         spec = self.window.session.electrode(self.name) if self.name else None
         if spec is None:
             return
+        session = self.window.session
         for i, patch in enumerate(spec.patches):
+            warn = False
             try:
-                info = self.window.session.pick_patch(patch.center, patch.radius, patch.pid)
-                detail = f"{info['n_faces']} 面 {info['area'] * 1e4:.1f} cm²"
+                info = session.patch_info(patch)
+                detail, warn = describe_selection(info)
             except Exception as exc:  # noqa: BLE001 - 表示だけなので握って理由を出す
                 detail = str(exc).splitlines()[0]
             centre = "(" + ", ".join(f"{v * 1e3:.0f}" for v in patch.center) + ") mm"
             limit = f" PID {patch.pid}" if patch.pid is not None else ""
-            self.patch_list.addItem(
-                f"{i + 1}. {centre} 半径 {patch.radius * 1e3:.0f} mm{limit}　{detail}"
+            item = QListWidgetItem(
+                f"{'⚠ ' if warn else ''}{i + 1}. {patch.describe()}　{centre}{limit}\n    {detail}"
             )
+            if warn:
+                item.setToolTip(AREA_MISMATCH_HINT)
+            self.patch_list.addItem(item)
+        self.reshape_patch_button.setEnabled(False)
 
     def _reload_hand_edits(self) -> None:
         """手で足した面・外した面の枚数を出す。"""
@@ -358,7 +473,102 @@ class ElectrodePage(QWidget):
             self.pick_button.setText("クリックで選ぶ")
 
     def _brush(self) -> tuple[float, int | None]:
-        return self.radius_spin.value() * 1e-3, self.patch_pid.currentData()
+        """筆の半径 [m] と絞り込む PID（塗る・消すとき）。"""
+        return self.brush_spin.value() * 1e-3, self.patch_pid.currentData()
+
+    def _stamp_shape(self, axis=None) -> dict:
+        """クリックで置く電極の形（`Session.pick_patch` のキーワード引数。m と度）。
+
+        矩形の `axis` を省略すると、いまの画面の横方向を使う（「画面に対してまっすぐ」）。
+        """
+        if self.shape_combo.currentData() != "rect":
+            return {"radius": 0.5e-3 * self.diameter_spin.value()}
+        return {
+            "shape": "rect",
+            "width": 1e-3 * self.width_spin.value(),
+            "height": 1e-3 * self.height_spin.value(),
+            "corner_radius": 1e-3 * self.corner_spin.value(),
+            "axis": list(axis) if axis is not None else self.window.screen_right(),
+            "angle": self.angle_spin.value(),
+        }
+
+    def _on_shape_changed(self, *_args) -> None:
+        """形の入力が変わった。見せる欄・角の半径の上限・指定面積を合わせる。"""
+        rect = self.shape_combo.currentData() == "rect"
+        self.shape_form.setRowVisible(self.diameter_spin, not rect)
+        for widget in (self.size_row, self.corner_spin, self.angle_spin):
+            self.shape_form.setRowVisible(widget, rect)
+        # 角の半径は短い辺の半分まで（それ以上は形にならない）
+        self.corner_spin.setMaximum(
+            0.5 * min(self.width_spin.value(), self.height_spin.value())
+        )
+        try:
+            # 面積は向きに依らない。軸はダミーでよい（カメラを見に行かない）
+            area = Session.nominal_area(**self._stamp_shape(axis=[1.0, 0.0, 0.0]))
+            self.nominal_label.setText(format_area(area))
+        except GfemError as exc:
+            self.nominal_label.setText(str(exc).splitlines()[0])
+        self._hover_at = None  # 予告を作り直させる
+
+    def _load_patch_shape(self, row: int) -> None:
+        """一覧で選んだパッチの形を入力欄に読み込む（「形を反映」で直せるように）。"""
+        spec = self.window.session.electrode(self.name) if self.name else None
+        valid = spec is not None and 0 <= row < len(spec.patches)
+        self.reshape_patch_button.setEnabled(valid)
+        if not valid:
+            return
+        patch = spec.patches[row]
+        widgets = (
+            self.shape_combo,
+            self.diameter_spin,
+            self.width_spin,
+            self.height_spin,
+            self.corner_spin,
+            self.angle_spin,
+        )
+        for w in widgets:
+            w.blockSignals(True)
+        try:
+            self.shape_combo.setCurrentIndex(self.shape_combo.findData(patch.shape))
+            if patch.is_rect:
+                self.width_spin.setValue(patch.width * 1e3)
+                self.height_spin.setValue(patch.height * 1e3)
+                self.corner_spin.setMaximum(0.5e3 * min(patch.width, patch.height))
+                self.corner_spin.setValue(patch.corner_radius * 1e3)
+                self.angle_spin.setValue(patch.angle)
+            else:
+                self.diameter_spin.setValue(2e3 * patch.radius)
+        finally:
+            for w in widgets:
+                w.blockSignals(False)
+        self._on_shape_changed()
+
+    def _reshape_patch(self) -> None:
+        """一覧で選んだパッチの形を、いまの入力に置き換える（中心と PID はそのまま）。"""
+        row = self.patch_list.currentRow()
+        spec = self.window.session.electrode(self.name) if self.name else None
+        if spec is None or not 0 <= row < len(spec.patches):
+            return
+        old = spec.patches[row]
+        # 矩形のまま直すなら、置いたときの向きの軸を保つ（角度はその軸から測る）
+        shape = self._stamp_shape(axis=old.axis if old.is_rect else None)
+        with self.window.busy("電極面を選び直しています", wait_ms=REVEAL_DELAY_MS) as scope:
+            try:
+                info = self.window.session.pick_patch(old.center, pid=old.pid, **shape)
+            except Exception as exc:  # noqa: BLE001
+                self.window.show_error(exc)
+                return
+            self.window.checkpoint(f"電極 {self.name} のパッチ {row + 1} の形を変更")
+            self.window.session.reshape_patch(self.name, row, **shape)
+            self._log_selection(f"電極 {self.name} のパッチ {row + 1} の形を変更", info)
+            self._after_patch_change(scope)
+        self.patch_list.setCurrentRow(row)
+
+    def _log_selection(self, what: str, info: dict) -> None:
+        detail, warn = describe_selection(info)
+        self.window.log(f"{what}: {detail}")
+        if warn:
+            self.window.log(f"  [警告] {AREA_MISMATCH_HINT}")
 
     def _on_picked(self, point, erase: bool | None = None) -> None:
         """3D ビューが操作された。電極の面を書き換える。
@@ -382,7 +592,7 @@ class ElectrodePage(QWidget):
 
         radius, pid = self._brush()
         if erase is None and not self.erase_mode.isChecked():
-            self._place_patch(point, radius, pid)
+            self._place_patch(point, pid)
             return
 
         erase = True if erase is None else erase
@@ -398,21 +608,20 @@ class ElectrodePage(QWidget):
             return  # 何も変わっていない。描き直す必要もない
         self._after_patch_change()
 
-    def _place_patch(self, point, radius: float, pid: int | None) -> None:
-        """クリックした場所にパッチを 1 枚置く。"""
+    def _place_patch(self, point, pid: int | None) -> None:
+        """クリックした場所に、いまの形のパッチを 1 枚置く。"""
         session = self.window.session
+        # 向き（画面の横方向）はクリックした瞬間の視点で決める
+        shape = self._stamp_shape()
         with self.window.busy("電極面を選んでいます", wait_ms=REVEAL_DELAY_MS) as scope:
             try:
-                preview = session.pick_patch(point, radius, pid)
+                preview = session.pick_patch(point, pid=pid, **shape)
             except Exception as exc:  # noqa: BLE001
                 self.window.show_error(exc)
                 return
             self.window.checkpoint(f"電極 {self.name} にパッチを追加")
-            session.add_patch(self.name, point, radius, pid)
-            self.window.log(
-                f"電極 {self.name} にパッチを追加: "
-                f"{preview['n_faces']} 面, 面積 {preview['area'] * 1e4:.2f} cm²"
-            )
+            session.add_patch(self.name, point, pid=pid, **shape)
+            self._log_selection(f"電極 {self.name} にパッチを追加", preview)
             self._after_patch_change(scope)
 
     def _on_hover(self, point) -> None:
@@ -422,22 +631,32 @@ class ElectrodePage(QWidget):
             self._hover_at = None
             return
         # 動くたびに作り直すと重いので、同じ面の上にいる間は作り直さない
+        session = self.window.session
         radius, pid = self._brush()
+        erase = self.erase_mode.isChecked()
         try:
-            info = self.window.session.pick_patch(point, 0.0, pid)
+            info = session.pick_patch(point, 0.0, pid)
             seed = tuple(info["face_refs"][0]) if info["n_faces"] else None
         except Exception:  # noqa: BLE001 - 予告表示なので黙って諦める
             return
-        if seed is not None and seed == self._hover_at:
+        key = None if seed is None else (seed, erase)
+        if key is not None and key == self._hover_at:
             return
-        self._hover_at = seed
+        self._hover_at = key
+        # 追加モードのクリックは電極の形を置く。削除モードのクリックは筆で消す
         try:
-            preview = self.window.session.pick_patch(point, radius, pid)
+            if erase:
+                preview, outline = session.pick_patch(point, radius, pid), None
+            else:
+                preview = session.pick_patch(point, pid=pid, **self._stamp_shape())
+                outline = session.outline_polydata(preview)
         except Exception:  # noqa: BLE001
+            self.window.clear_paint_preview()
             return
         self.window.show_paint_preview(
-            self.window.session.triangles_to_polydata(preview["triangles"]),
-            erase=self.erase_mode.isChecked(),
+            session.triangles_to_polydata(preview["triangles"]),
+            erase=erase,
+            outline=outline,
         )
 
     def _clear_hand_edits(self) -> None:

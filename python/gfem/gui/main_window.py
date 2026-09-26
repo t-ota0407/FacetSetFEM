@@ -472,6 +472,18 @@ class MainWindow(QMainWindow):
     ELECTRODE_ACTOR = "electrode-highlight"
     #: 塗る前の予告表示に付ける名前
     PREVIEW_ACTOR = "paint-preview"
+    #: 置く前の電極の輪郭に付ける名前
+    OUTLINE_ACTOR = "patch-outline"
+
+    def screen_right(self) -> list[float]:
+        """いまの視点での画面の横方向（世界座標の単位ベクトル）。
+
+        矩形の電極を「画面に対してまっすぐ」置くために、幅の辺の向きとして使う
+        （SPEC §11.1）。ケースファイルにはこのベクトルそのものが残るので、
+        カメラを動かしても置いた電極の向きは変わらない。
+        """
+        camera = self.plotter.renderer.GetActiveCamera()
+        return Session.screen_right(camera.GetDirectionOfProjection(), camera.GetViewUp())
 
     def refresh_electrode_highlight(self, name: str | None) -> None:
         """電極の強調表示だけを描き直す。
@@ -670,8 +682,12 @@ class MainWindow(QMainWindow):
 
     # --- 塗る前の予告表示 ---------------------------------------------------
 
-    def show_paint_preview(self, polydata, erase: bool) -> None:
-        """これから塗られる（消される）範囲を薄く出す。"""
+    def show_paint_preview(self, polydata, erase: bool, outline=None) -> None:
+        """これから塗られる（消される）範囲を薄く出す。
+
+        `outline` を渡すと、置こうとしている電極の形の輪郭（閉じた折れ線。
+        `Session.outline_polydata`）も重ねる。面は 1 枚単位で入るか外れるかなので、面だけでは本来の形が読めない。
+        """
         if polydata is None or not polydata.n_cells:
             self.clear_paint_preview()
             return
@@ -683,11 +699,28 @@ class MainWindow(QMainWindow):
             reset_camera=False,
             pickable=False,
         )
+        if outline is not None and outline.n_points:
+            self.plotter.add_mesh(
+                outline,
+                color="#b34700",
+                line_width=3,
+                name=self.OUTLINE_ACTOR,
+                reset_camera=False,
+                pickable=False,
+            )
+        else:
+            self.plotter.remove_actor(self.OUTLINE_ACTOR, render=False)
         self.plotter.render()
 
     def clear_paint_preview(self) -> None:
-        if self.plotter.actors.get(self.PREVIEW_ACTOR) is not None:
-            self.plotter.remove_actor(self.PREVIEW_ACTOR, render=False)
+        shown = [
+            name
+            for name in (self.PREVIEW_ACTOR, self.OUTLINE_ACTOR)
+            if self.plotter.actors.get(name) is not None
+        ]
+        for name in shown:
+            self.plotter.remove_actor(name, render=False)
+        if shown:
             self.plotter.render()
 
     # --- 元に戻す / やり直す（SPEC §8 M7）-----------------------------------

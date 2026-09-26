@@ -16,6 +16,7 @@ import numpy as np
 import pyvista as pv
 
 from .. import Case, GfemError, Mesh, Solution, Study, read_nastran
+from .._gfem import check_patch
 from ..study import ElectrodeSpec, Material, SurfacePatch
 from ..tissues import TISSUES
 
@@ -117,6 +118,13 @@ REGION_STATS_COLUMNS = [
 NODAL_VALUE_WARNING = (
     "節点値は体積重み平均で平滑化されています。最大値の評価には要素値を使ってください。"
 )
+
+#: 選ばれた面の面積が指定面積からこれ以上ずれたら警告する（相対値。SPEC §11.1）。
+#:
+#: 面は 1 枚単位で入るか外れるかなので、縁のぶんだけ必ずずれる。2 cm 角の電極を
+#: 一辺 2.6 mm の皮膚の面（頭部モデル）に置くと数 % に収まる。これを超えるなら、
+#: 電極に対してメッシュが粗すぎるか、曲面で接平面への投影が効いている
+AREA_MISMATCH_WARNING = 0.10
 
 #: 組織物性の目安 [S/m]。GUI の入力補助に使う（出典を明記できるようになるまでは目安扱い）
 TISSUE_HINTS: dict[str, float] = {name: t.sigma for name, t in TISSUES.items()}
@@ -550,23 +558,85 @@ class Session:
         """`pick_patch` などが返した三角形を、そのまま描ける形にする。"""
         return self._polydata(self._require_mesh().points(), np.asarray(triangles), {})
 
-    def pick_patch(self, center, radius: float, pid: int | None = None) -> dict:
-        """体表面の 1 点を中心に、半径の中でつながっている面を選ぶ。"""
+    def pick_patch(self, center, radius: float | None = None, pid: int | None = None, **shape) -> dict:
+        """体表面の 1 点を中心に、形の中でつながっている面を選ぶ。
+
+        形は円（`radius`）か、`shape="rect"` と `width` / `height` / `corner_radius` /
+        `axis` / `angle` の矩形（`Mesh.pick_patch` と同じ。長さは m、角度は度）。
+        """
+        if radius is not None:
+            shape["radius"] = float(radius)
         return self._require_mesh().pick_patch(
-            [float(v) for v in center], float(radius), None if pid is None else int(pid)
+            [float(v) for v in center], pid=None if pid is None else int(pid), **shape
         )
 
-    def add_patch(self, name: str, center, radius: float, pid: int | None = None) -> SurfacePatch:
-        """電極にパッチを 1 枚足す。"""
+    def patch_info(self, patch: SurfacePatch) -> dict:
+        """置いてあるパッチが選ぶ面（面数・面積・指定面積・輪郭）。"""
+        return self.pick_patch(patch.center, pid=patch.pid, **patch.shape_dict())
+
+    @staticmethod
+    def nominal_area(**shape) -> float:
+        """形の指定どおりの面積 [m²]（メッシュに依らない）。式は Rust 側だけに置く。"""
+        return float(check_patch({"center": [0.0, 0.0, 0.0], **shape})["nominal_area"])
+
+    @staticmethod
+    def screen_right(direction, view_up) -> list[float]:
+        """カメラの向きと上方向から、画面の横方向（右向きの単位ベクトル）を出す。"""
+        right = np.cross(np.asarray(direction, dtype=float), np.asarray(view_up, dtype=float))
+        return [float(v) for v in right / np.linalg.norm(right)]
+
+    @staticmethod
+    def outline_polydata(info: dict) -> pv.PolyData | None:
+        """`pick_patch` が返した輪郭を、描ける閉じた折れ線にする。
+
+        輪郭は接平面の上にあるので、そのままだと凹んだ体表面に埋もれる。
+        形の大きさの 2 % だけ法線の向きに浮かせる（見た目のためだけ）。
+        """
+        outline, normal = info.get("outline"), info.get("normal")
+        if outline is None or normal is None or len(outline) < 2:
+            return None
+        points = np.asarray(outline, dtype=float)
+        size = float(np.ptp(points, axis=0).max())
+        points = points + np.asarray(normal, dtype=float) * (0.02 * size)
+        n = len(points)
+        # 点だけで PolyData を作ると点ごとに頂点セルが付き、角に粒が描かれる。線だけにする
+        return pv.PolyData(points, lines=np.concatenate([[n + 1], np.arange(n), [0]]))
+
+    @staticmethod
+    def area_mismatch(info: dict) -> float | None:
+        """`pick_patch` の結果の、指定面積に対する実際の面積のずれ（相対値）。"""
+        nominal = info.get("nominal_area") or 0.0
+        if nominal <= 0.0:
+            return None  # 半径 0 の円（1 枚だけ選ぶ筆）など
+        return info["area"] / nominal - 1.0
+
+    def add_patch(
+        self, name: str, center, radius: float | None = None, pid: int | None = None, **shape
+    ) -> SurfacePatch:
+        """電極にパッチを 1 枚足す。形の指定は `pick_patch` と同じ。"""
         spec = self.electrode(name)
         if spec is None:
             raise GfemError(f"[設定エラー] 電極 {name} がありません")
-        patch = SurfacePatch(
-            center=tuple(float(v) for v in center),
-            radius=float(radius),
-            pid=None if pid is None else int(pid),
-        )
+        if radius is not None:
+            shape["radius"] = float(radius)
+        data = {"center": [float(v) for v in center], **shape}
+        if pid is not None:
+            data["pid"] = int(pid)
+        patch = SurfacePatch.from_dict(check_patch(data))
         spec.patches.append(patch)
+        return patch
+
+    def reshape_patch(self, name: str, index: int, **shape) -> SurfacePatch:
+        """置いてあるパッチの形だけを変える（中心と PID はそのまま）。"""
+        spec = self.electrode(name)
+        if spec is None or not 0 <= index < len(spec.patches):
+            raise GfemError(f"[設定エラー] 電極 {name} にパッチ {index + 1} がありません")
+        old = spec.patches[index]
+        data = {"center": list(old.center), **shape}
+        if old.pid is not None:
+            data["pid"] = old.pid
+        patch = SurfacePatch.from_dict(check_patch(data))
+        spec.patches[index] = patch
         return patch
 
     def remove_patch(self, name: str, index: int) -> None:

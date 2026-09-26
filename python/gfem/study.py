@@ -32,6 +32,7 @@ from ._gfem import (
     Mesh,
     Solution,
     backend_choices,
+    check_patch,
     parse_backend,
     parse_preconditioner,
     preconditioner_choices,
@@ -87,27 +88,90 @@ class SurfacePatch:
 
     **シェル要素を持たないモデルのための指定方法。** 人体モデルはソリッド要素だけで
     配られるのが普通で、その場合シェル PID では電極を 1 つも置けない。
-    GUI では 3D ビューのクリックが `center` を、スピンボックスが `radius` を決める。
+    GUI では 3D ビューのクリックが `center` を、パネルの入力が形を決める。
 
-    保存するのは選ばれた面の一覧ではなく**中心と半径**。同じメッシュなら同じ面が
+    形は円（`radius`）か、角を丸められる矩形（`shape="rect"` と `width` / `height` /
+    `corner_radius` / `axis` / `angle`）。矩形の `axis` は幅の辺の向きで、体表面の
+    接平面に投影して使う。`angle` はそこから法線まわりに回す角度（度。外から見て
+    反時計回りが正）。GUI はクリックしたときの画面の横方向を `axis` に入れる。
+
+    保存するのは選ばれた面の一覧ではなく**中心と形**。同じメッシュなら同じ面が
     選ばれるうえ、ケースファイルを読んだ人が意味を追える（面番号の羅列は追えない）。
+    形の解釈と値の検査は Rust 側（`check_patch`）だけが持つ。
     """
 
     #: 中心 [m]（クリックした点）
     center: tuple[float, float, float]
-    #: 半径 [m]
-    radius: float
+    #: 円の半径 [m]（矩形なら None）
+    radius: float | None = None
     #: この PID のソリッドが持つ面だけに限る（None なら制限しない）
     pid: int | None = None
+    #: "circle"（円）か "rect"（矩形）
+    shape: str = "circle"
+    #: 矩形の幅 [m]（`axis` の向きの辺）
+    width: float | None = None
+    #: 矩形の高さ [m]
+    height: float | None = None
+    #: 矩形の角の半径 [m]。0 なら尖った角
+    corner_radius: float = 0.0
+    #: 矩形の幅の辺の向き（世界座標。長さは問わない）
+    axis: tuple[float, float, float] | None = None
+    #: `axis` から法線まわりに回す角度 [度]
+    angle: float = 0.0
+
+    @property
+    def is_rect(self) -> bool:
+        return self.shape == "rect"
+
+    def shape_dict(self) -> dict[str, Any]:
+        """形だけの指定（中心と PID を除く）。`Mesh.pick_patch` のキーワード引数になる。"""
+        if not self.is_rect:
+            return {"radius": float(self.radius)}
+        d: dict[str, Any] = {
+            "shape": "rect",
+            "width": float(self.width),
+            "height": float(self.height),
+        }
+        if self.corner_radius:
+            d["corner_radius"] = float(self.corner_radius)
+        d["axis"] = [float(v) for v in self.axis]
+        if self.angle:
+            d["angle"] = float(self.angle)
+        return d
 
     def to_dict(self) -> dict[str, Any]:
-        d: dict[str, Any] = {
-            "center": [float(v) for v in self.center],
-            "radius": float(self.radius),
-        }
+        d: dict[str, Any] = {"center": [float(v) for v in self.center]}
+        d.update(self.shape_dict())
         if self.pid is not None:
             d["pid"] = int(self.pid)
         return d
+
+    def describe(self) -> str:
+        """一覧に出す短い説明（例: 「矩形 20×20 mm 角R2 30°」「円 直径 50 mm」）。"""
+        if not self.is_rect:
+            return f"円 直径 {2e3 * self.radius:.3g} mm"
+        text = f"矩形 {self.width * 1e3:.3g}×{self.height * 1e3:.3g} mm"
+        if self.corner_radius:
+            text += f" 角R{self.corner_radius * 1e3:.3g}"
+        if self.angle:
+            text += f" {self.angle:.3g}°"
+        return text
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> SurfacePatch:
+        """`check_patch` が正規化した辞書から作る。"""
+        axis = data.get("axis")
+        return cls(
+            center=tuple(float(v) for v in data["center"]),
+            radius=None if data.get("radius") is None else float(data["radius"]),
+            pid=None if data.get("pid") is None else int(data["pid"]),
+            shape=str(data.get("shape", "circle")),
+            width=None if data.get("width") is None else float(data["width"]),
+            height=None if data.get("height") is None else float(data["height"]),
+            corner_radius=float(data.get("corner_radius") or 0.0),
+            axis=None if axis is None else tuple(float(v) for v in axis),
+            angle=float(data.get("angle") or 0.0),
+        )
 
 
 @dataclass
@@ -519,38 +583,28 @@ def _face_refs_from(data: Any, where_: str) -> list[tuple[int, int]]:
 
 
 def _patch_from(data: Any, where_: str) -> SurfacePatch:
-    """体表面パッチ 1 枚を読む。"""
+    """体表面パッチ 1 枚を読む。
+
+    形の解釈と値の検査は Rust 側（`check_patch`）に任せ、ここは場所を添えるだけ。
+    円と矩形のキーや範囲を Python にも書くと、2 か所がずれる（SPEC §6.5）。
+    """
     if not isinstance(data, dict):
         raise _error(
             "パッチがマッピングではありません",
             where_,
-            "center: [x, y, z] と radius: r（m）を書いてください",
+            "center: [x, y, z] と radius: r（m）、矩形なら shape: rect と width / height / axis"
+            " を書いてください（SPEC §3.3）",
         )
-    center = _require(data, "center", where_, "中心を [x, y, z]（m）で書いてください")
-    radius = _require(data, "radius", where_, "半径を m で書いてください（例: 0.025）")
     try:
-        center = tuple(float(v) for v in center)
-        radius = float(radius)
-    except (TypeError, ValueError) as exc:
+        normalized = check_patch(data)
+    except GfemError as exc:
+        # コアのエラーは「[設定エラー] 何が\n  対処: どうすれば」。場所を間に差し込む
+        text = str(exc).removeprefix("[設定エラー] ")
+        what, _, hint = text.partition("\n  対処: ")
         raise _error(
-            f"center / radius を数値として読めません: {exc}",
-            where_,
-            "center は 3 個の実数、radius は実数（どちらも m）で書いてください",
-        ) from exc
-    if len(center) != 3:
-        raise _error(
-            f"center の要素数が {len(center)} 個です",
-            where_,
-            "center は [x, y, z] の 3 個で書いてください（単位は m）",
-        )
-    if not radius >= 0.0:
-        raise _error(
-            f"半径が負です: {radius}",
-            where_,
-            "半径は 0 以上で書いてください（単位は m）",
-        )
-    pid = data.get("pid")
-    return SurfacePatch(center=center, radius=radius, pid=None if pid is None else int(pid))
+            what.strip(), where_, hint.strip() or "SPEC §3.3 のパッチの書き方を参照してください"
+        ) from None
+    return SurfacePatch.from_dict(normalized)
 
 
 def _solver_from(data: Any, where_: str) -> SolverSpec:

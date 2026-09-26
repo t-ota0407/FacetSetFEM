@@ -18,8 +18,8 @@
 mod cuda;
 
 use gfem_core::case::{
-    Backend, Electrode, ElectrodeRole, FaceLookup, FaceRef, Preconditioner, ReferencePotential,
-    SurfaceIndex, SurfacePatch,
+    Backend, Electrode, ElectrodeRole, FaceLookup, FaceRef, PatchShape, Preconditioner, RectShape,
+    ReferencePotential, SurfaceIndex, SurfacePatch,
 };
 use gfem_core::mesh::streamline::{TraceDirection, TraceOptions};
 use gfem_core::mesh::{Plane, TriangleMesh};
@@ -505,35 +505,58 @@ impl PyMesh {
         Ok(list.unbind())
     }
 
-    /// 体表面の 1 点を中心に、半径の中でつながっている面を選ぶ（SPEC §11.1）。
+    /// 体表面の 1 点を中心に、形の中でつながっている面を選ぶ（SPEC §11.1）。
     ///
-    /// GUI の 3D ビューでクリックした点をそのまま渡す。戻り値は
-    /// `{"n_faces", "area", "triangles", "center", "radius", "pid"}` で、
-    /// `triangles` は選ばれた面を三角形に割った `(n, 3)` の節点索引（強調表示用）。
+    /// GUI の 3D ビューでクリックした点をそのまま渡す。形は円（`radius`）か、
+    /// `shape="rect"` と `width` / `height` / `corner_radius` / `axis` / `angle` の矩形。
+    /// 指定の仕方はケースファイルのパッチと同じ（同じ関数で解釈する）。
+    ///
+    /// 戻り値は `{"n_faces", "area", "nominal_area", "triangles", "face_refs",
+    /// "outline", "normal", "center", "pid", "shape", ...形の寸法}`。
+    /// `triangles` は選ばれた面を三角形に割った `(n, 3)` の節点索引（強調表示用）、
+    /// `outline` は形の輪郭の `(m, 3)` の座標（接平面上。表示用）、`nominal_area` は
+    /// 指定どおりの面積。実際に選ばれた面積 `area` との差がメッシュの粗さの目安になる。
     ///
     /// **球に入っているかだけでは選ばない。** クリックした面から稜線でつながって
     /// いる面だけを辿るので、首の切断面や耳の裏へ飛び移らない。
-    #[pyo3(signature = (center, radius, pid = None))]
+    #[pyo3(signature = (center, radius = None, pid = None, **shape))]
     fn pick_patch(
         &self,
         py: Python<'_>,
-        center: [f64; 3],
-        radius: f64,
+        center: Bound<'_, PyAny>,
+        radius: Option<f64>,
         pid: Option<u32>,
+        shape: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyDict>> {
-        // 半径と中心（ピックに失敗した NaN を含む）の検証は、電極面の解決と同じ関数で行う
-        SurfacePatch {
-            center,
-            radius,
-            pid,
+        let spec = PyDict::new(py);
+        if let Some(shape) = shape {
+            spec.update(shape.as_mapping())?;
         }
-        .check()
-        .map_err(to_py)?;
-        let faces = self.picker()?.select(center, radius, pid);
+        spec.set_item("center", center)?;
+        if let Some(r) = radius {
+            spec.set_item("radius", r)?;
+        }
+        if let Some(p) = pid {
+            spec.set_item("pid", p)?;
+        }
+        // 形と中心（ピックに失敗した NaN を含む）の検証は、電極面の解決と同じ関数で行う
+        let patch = parse_patch_at(spec.as_any(), "パッチ")?;
+        let picker = self.picker()?;
+        let faces = patch.select(picker).map_err(to_py)?;
         let d = self.describe_faces(py, &faces)?;
-        d.set_item("center", center.to_vec())?;
-        d.set_item("radius", radius)?;
-        d.set_item("pid", pid)?;
+        describe_patch(&d, &patch)?;
+        match patch.outline(picker).map_err(to_py)? {
+            Some((frame, points)) => {
+                let rows = points.len();
+                let flat: Vec<f64> = points.into_iter().flatten().collect();
+                d.set_item("outline", flat.into_pyarray(py).reshape([rows, 3])?)?;
+                d.set_item("normal", frame.normal.to_vec())?;
+            }
+            None => {
+                d.set_item("outline", py.None())?;
+                d.set_item("normal", py.None())?;
+            }
+        }
         Ok(d.unbind())
     }
 
@@ -1546,46 +1569,158 @@ fn build_electrode(
 /// エラーは「どの電極の何番目のパッチが」「何が足りないか」まで出す
 /// （CLAUDE.md 設計原則 6）。
 fn parse_patch(obj: &Bound<'_, PyAny>, electrode: &str, index: usize) -> PyResult<SurfacePatch> {
-    let where_ = format!("電極 {electrode} のパッチ {index}");
-    let get = |key: &str| -> PyResult<Option<Bound<'_, PyAny>>> {
-        match obj.get_item(key) {
-            Ok(v) => Ok(if v.is_none() { None } else { Some(v) }),
-            Err(_) => Ok(None),
+    parse_patch_at(obj, &format!("電極 {electrode} のパッチ {index}"))
+}
+
+/// パッチの辞書で使えるキー。
+const PATCH_KEYS: [&str; 9] = [
+    "center",
+    "shape",
+    "radius",
+    "width",
+    "height",
+    "corner_radius",
+    "axis",
+    "angle",
+    "pid",
+];
+
+/// パッチの辞書を解釈する（ケースファイル・`Case.add_electrode`・`Mesh.pick_patch` の共通）。
+///
+/// 形は `shape` で選ぶ（省略すると円）。長さは m、角度は度。値の範囲（半径が負でない、
+/// 角の半径が短い辺の半分まで、など）はコアの [`SurfacePatch::check`] が見る。
+/// ここは「キーがそろっているか」「型が合っているか」だけを見る。
+fn parse_patch_at(obj: &Bound<'_, PyAny>, where_: &str) -> PyResult<SurfacePatch> {
+    let err = |msg: String| GfemError::new_err(format!("{where_}{msg}"));
+    if let Ok(d) = obj.cast::<PyDict>() {
+        for key in d.keys() {
+            let key: String = key.extract().unwrap_or_default();
+            if !PATCH_KEYS.contains(&key.as_str()) {
+                return Err(err(format!(
+                    "に使えないキー {key:?} があります。使えるのは {} です",
+                    PATCH_KEYS.join(" / ")
+                )));
+            }
         }
-    };
-    let center = get("center")?.ok_or_else(|| {
-        GfemError::new_err(format!(
-            "{where_}に center がありません。\
-             {{\"center\": [x, y, z], \"radius\": r, \"pid\": 51}} の形で指定してください（単位は m）"
-        ))
-    })?;
-    let center: Vec<f64> = center.extract().map_err(|_| {
-        GfemError::new_err(format!(
-            "{where_}の center は 3 個の実数 [x, y, z] で指定してください"
-        ))
-    })?;
-    if center.len() != 3 {
-        return Err(GfemError::new_err(format!(
-            "{where_}の center の要素数が {} 個です（3 個で指定してください）",
-            center.len()
-        )));
     }
-    let radius: f64 = get("radius")?
-        .ok_or_else(|| GfemError::new_err(format!("{where_}に radius がありません（単位は m）")))?
-        .extract()
-        .map_err(|_| GfemError::new_err(format!("{where_}の radius は実数で指定してください")))?;
-    let pid: Option<u32> =
-        match get("pid")? {
-            Some(v) => Some(v.extract().map_err(|_| {
-                GfemError::new_err(format!("{where_}の pid は整数で指定してください"))
-            })?),
-            None => None,
-        };
-    Ok(SurfacePatch {
-        center: [center[0], center[1], center[2]],
-        radius,
-        pid,
-    })
+    let get =
+        |key: &str| -> Option<Bound<'_, PyAny>> { obj.get_item(key).ok().filter(|v| !v.is_none()) };
+    let real = |key: &str, what: &str| -> PyResult<Option<f64>> {
+        get(key)
+            .map(|v| {
+                v.extract::<f64>()
+                    .map_err(|_| err(format!("の {key} は実数で指定してください（{what}）")))
+            })
+            .transpose()
+    };
+    let vec3 = |key: &str, what: &str| -> PyResult<Option<[f64; 3]>> {
+        let Some(v) = get(key) else { return Ok(None) };
+        let v: Vec<f64> = v.extract().map_err(|_| {
+            err(format!(
+                "の {key} は 3 個の実数 [x, y, z] で指定してください（{what}）"
+            ))
+        })?;
+        <[f64; 3]>::try_from(v.as_slice()).map(Some).map_err(|_| {
+            err(format!(
+                "の {key} の要素数が {} 個です（[x, y, z] の 3 個で指定してください）",
+                v.len()
+            ))
+        })
+    };
+
+    let center = vec3("center", "単位は m")?.ok_or_else(|| {
+        err("に center がありません。             {\"center\": [x, y, z], \"radius\": r, \"pid\": 51} の形で指定してください（単位は m）"
+            .to_string())
+    })?;
+    let pid: Option<u32> = get("pid")
+        .map(|v| {
+            v.extract()
+                .map_err(|_| err("の pid は整数で指定してください".to_string()))
+        })
+        .transpose()?;
+    let shape: String = match get("shape") {
+        Some(v) => v
+            .extract::<String>()
+            .map_err(|_| err("の shape は \"circle\" か \"rect\" で指定してください".to_string()))?
+            .trim()
+            .to_ascii_lowercase(),
+        None => "circle".to_string(),
+    };
+    let only = |allowed: &[&str], shape_name: &str| -> PyResult<()> {
+        for key in [
+            "radius",
+            "width",
+            "height",
+            "corner_radius",
+            "axis",
+            "angle",
+        ] {
+            if !allowed.contains(&key) && get(key).is_some() {
+                return Err(err(format!(
+                    "は {shape_name} なので {key} は使えません（使えるのは {}）",
+                    allowed.join(" / ")
+                )));
+            }
+        }
+        Ok(())
+    };
+    match shape.as_str() {
+        "circle" => {
+            only(&["radius"], "円（shape: circle）")?;
+            let radius = real("radius", "単位は m")?
+                .ok_or_else(|| err("に radius がありません（単位は m）".to_string()))?;
+            Ok(SurfacePatch::circle(center, radius, pid))
+        }
+        "rect" => {
+            only(
+                &["width", "height", "corner_radius", "axis", "angle"],
+                "矩形（shape: rect）",
+            )?;
+            let need = |key: &str, what: &str| -> PyResult<f64> {
+                real(key, what)?.ok_or_else(|| {
+                    err(format!(
+                        "に {key} がありません（矩形は width と height が必要です。{what}）"
+                    ))
+                })
+            };
+            let rect = RectShape {
+                width: need("width", "単位は m。20 mm なら 0.02")?,
+                height: need("height", "単位は m")?,
+                corner_radius: real("corner_radius", "単位は m")?.unwrap_or(0.0),
+                axis: vec3("axis", "幅の辺の向き")?.ok_or_else(|| {
+                    err("に axis がありません。矩形は幅の辺の向きを [x, y, z] で指定してください                         （例: [1, 0, 0]。体表面に沿う向きに投影して使います）"
+                        .to_string())
+                })?,
+                angle: real("angle", "単位は度")?.unwrap_or(0.0),
+            };
+            Ok(SurfacePatch::rect(center, rect, pid))
+        }
+        other => Err(err(format!(
+            "の shape が {other:?} です。\"circle\"（円）か \"rect\"（矩形）で指定してください"
+        ))),
+    }
+}
+
+/// パッチの形を辞書に書き出す（`pick_patch` の戻り値と `check_patch` が使う）。
+fn describe_patch(d: &Bound<'_, PyDict>, patch: &SurfacePatch) -> PyResult<()> {
+    d.set_item("center", patch.center.to_vec())?;
+    d.set_item("pid", patch.pid)?;
+    d.set_item("nominal_area", patch.nominal_area())?;
+    match &patch.shape {
+        PatchShape::Circle { radius } => {
+            d.set_item("shape", "circle")?;
+            d.set_item("radius", *radius)?;
+        }
+        PatchShape::Rect(r) => {
+            d.set_item("shape", "rect")?;
+            d.set_item("width", r.width)?;
+            d.set_item("height", r.height)?;
+            d.set_item("corner_radius", r.corner_radius)?;
+            d.set_item("axis", r.axis.to_vec())?;
+            d.set_item("angle", r.angle)?;
+        }
+    }
+    Ok(())
 }
 
 fn parse_reference(reference: &str) -> PyResult<ReferencePotential> {
@@ -1703,6 +1838,20 @@ fn parse_preconditioner(name: &str) -> PyResult<&'static str> {
     Ok(Preconditioner::parse(name).map_err(to_py)?.label())
 }
 
+/// 体表面パッチの辞書を検査し、正規化した辞書（`nominal_area` つき）を返す。
+///
+/// ケースファイルの読み込み（Python）もここを通す。形の解釈と値の範囲の検査を
+/// Rust 側だけに置くため（SPEC §6.5「同じものを 2 か所に書かない」）。
+/// 向きの軸が面の法線と平行かどうかはメッシュが無いと分からないので、solve 時に見る。
+#[pyfunction]
+fn check_patch(py: Python<'_>, patch: Bound<'_, PyAny>) -> PyResult<Py<PyDict>> {
+    let parsed = parse_patch_at(&patch, "パッチ")?;
+    parsed.check().map_err(to_py)?;
+    let d = PyDict::new(py);
+    describe_patch(&d, &parsed)?;
+    Ok(d.unbind())
+}
+
 /// このビルドに CUDA バックエンドが入っているか（SPEC §8 M5）。
 #[pyfunction]
 fn cuda_available() -> bool {
@@ -1760,6 +1909,7 @@ fn _gfem(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(preconditioner_choices, m)?)?;
     m.add_function(wrap_pyfunction!(parse_backend, m)?)?;
     m.add_function(wrap_pyfunction!(parse_preconditioner, m)?)?;
+    m.add_function(wrap_pyfunction!(check_patch, m)?)?;
     m.add_function(wrap_pyfunction!(cuda_available, m)?)?;
     m.add_function(wrap_pyfunction!(cuda_devices, m)?)?;
     m.add_function(wrap_pyfunction!(cuda_check, m)?)?;
