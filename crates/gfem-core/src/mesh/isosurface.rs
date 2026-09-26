@@ -18,6 +18,7 @@
 //! 同じ入力からは常に同じ三角形列になる（CLAUDE.md 設計原則 1）。
 
 use crate::error::{GfemError, Result};
+use crate::geom::{cross, norm, sub};
 use crate::mesh::tetview::TetView;
 use crate::mesh::{Mesh, NodeIndex};
 use std::collections::HashMap;
@@ -60,14 +61,7 @@ impl TriangleMesh {
                 [self.points[i], self.points[i + 1], self.points[i + 2]]
             };
             let (a, b, c) = (p(t[0]), p(t[1]), p(t[2]));
-            let u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
-            let v = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
-            let n = [
-                u[1] * v[2] - u[2] * v[1],
-                u[2] * v[0] - u[0] * v[2],
-                u[0] * v[1] - u[1] * v[0],
-            ];
-            total += 0.5 * (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+            total += 0.5 * norm(cross(sub(b, a), sub(c, a)));
         }
         total
     }
@@ -203,52 +197,11 @@ pub fn iso_surface(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::io::nastran::read_nastran_from;
     use crate::mesh::tetview::TetView;
-    use crate::units::LengthUnit;
-    use std::path::Path;
 
     /// 単位立方体を 6 個の四面体に分けたメッシュ（Kuhn 分割）。
     fn unit_cube() -> Mesh {
-        let mut deck = String::new();
-        let corner = [
-            (0.0, 0.0, 0.0),
-            (1.0, 0.0, 0.0),
-            (0.0, 1.0, 0.0),
-            (1.0, 1.0, 0.0),
-            (0.0, 0.0, 1.0),
-            (1.0, 0.0, 1.0),
-            (0.0, 1.0, 1.0),
-            (1.0, 1.0, 1.0),
-        ];
-        for (i, (x, y, z)) in corner.iter().enumerate() {
-            deck.push_str(&format!("GRID,{},,{x},{y},{z}\n", i + 1));
-        }
-        deck.push_str("PSOLID,1,1\n");
-        // n = bx + 2by + 4bz、Kuhn の 6 分割
-        for (e, t) in [
-            [0, 1, 3, 7],
-            [0, 1, 5, 7],
-            [0, 2, 3, 7],
-            [0, 2, 6, 7],
-            [0, 4, 5, 7],
-            [0, 4, 6, 7],
-        ]
-        .iter()
-        .enumerate()
-        {
-            deck.push_str(&format!(
-                "CTETRA,{},1,{},{},{},{}\n",
-                e + 1,
-                t[0] + 1,
-                t[1] + 1,
-                t[2] + 1,
-                t[3] + 1
-            ));
-        }
-        read_nastran_from(deck.as_bytes(), Path::new("<test>"), LengthUnit::Meter)
-            .unwrap()
-            .0
+        crate::testing::kuhn_box([1, 1, 1], [1.0; 3])
     }
 
     #[test]

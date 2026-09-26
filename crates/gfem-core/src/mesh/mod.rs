@@ -214,6 +214,27 @@ fn iter_blocks(blocks: &[ElementBlock]) -> impl Iterator<Item = ElementRef<'_>> 
         })
 }
 
+/// ブロックの並びの中で、通し番号 `index` の要素を引く。範囲外なら `None`。
+///
+/// ブロック数は要素種の数だけ（高々 3 個）なので、線形に探しても十分速い。
+fn element_at(blocks: &[ElementBlock], index: usize) -> Option<ElementRef<'_>> {
+    let mut offset = 0;
+    for block in blocks {
+        if index < offset + block.len() {
+            let i = index - offset;
+            return Some(ElementRef {
+                index,
+                kind: block.kind(),
+                id: block.ids()[i],
+                pid: block.pids()[i],
+                conn: block.conn_of(i),
+            });
+        }
+        offset += block.len();
+    }
+    None
+}
+
 /// 有限要素メッシュ。
 #[derive(Debug, Clone)]
 pub struct Mesh {
@@ -261,32 +282,27 @@ impl Mesh {
 
     /// 通し番号でソリッド要素を引く。
     ///
-    /// ブロック数は要素種の数だけ（高々 3 個）なので、線形に探しても十分速い。
-    ///
     /// # パニック
     ///
     /// 範囲外の通し番号を渡すとパニックする。
     pub fn solid(&self, index: usize) -> ElementRef<'_> {
-        let mut offset = 0;
-        for block in &self.solids {
-            if index < offset + block.len() {
-                let i = index - offset;
-                return ElementRef {
-                    index,
-                    kind: block.kind(),
-                    id: block.ids()[i],
-                    pid: block.pids()[i],
-                    conn: block.conn_of(i),
-                };
-            }
-            offset += block.len();
-        }
-        panic!("ソリッド要素の通し番号が範囲外です: {index}");
+        element_at(&self.solids, index)
+            .unwrap_or_else(|| panic!("ソリッド要素の通し番号が範囲外です: {index}"))
     }
 
     /// 全シェル要素（電極候補面）を通し番号つきで走査する。
     pub fn iter_shells(&self) -> impl Iterator<Item = ElementRef<'_>> {
         iter_blocks(&self.shells)
+    }
+
+    /// 通し番号でシェル要素を引く（[`Mesh::iter_shells`] の `index`）。
+    ///
+    /// # パニック
+    ///
+    /// 範囲外の通し番号を渡すとパニックする。
+    pub fn shell(&self, index: usize) -> ElementRef<'_> {
+        element_at(&self.shells, index)
+            .unwrap_or_else(|| panic!("シェル要素の通し番号が範囲外です: {index}"))
     }
 
     /// 接続から節点座標（m）を取り出して `out` を埋める。

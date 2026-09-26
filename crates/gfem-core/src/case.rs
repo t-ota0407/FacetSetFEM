@@ -18,7 +18,10 @@ use std::collections::{BTreeMap, BTreeSet};
 /// エラー一覧に並べる最大件数。
 const SAMPLE_LIMIT: usize = 20;
 
-/// 電流保存（`1ᵀf = 0`）を満たしているとみなす相対しきい値（SPEC §2.2）。
+/// 電流保存を満たしているとみなす相対しきい値（SPEC §2.2 (a)）。
+///
+/// ケースの検証（陽極と陰極の総電流の一致）と、保存則チェック（`1ᵀf / I`。
+/// [`crate::post::check_conservation`]）の両方で使う。
 pub const CURRENT_BALANCE_TOLERANCE: f64 = 1.0e-12;
 
 /// 電極の役割。
@@ -67,6 +70,37 @@ pub struct SurfacePatch {
     ///
     /// 首の切断面のように「外表面だが体表面ではない」面を避けるために使う。
     pub pid: Option<PropId>,
+}
+
+impl SurfacePatch {
+    /// 中心と半径が使える値か確かめる。
+    ///
+    /// 電極面を解決するとき（[`resolve_faces`]）と、GUI のクリックで面を選ぶとき
+    /// （Python の `Mesh.pick_patch`）の両方がここを通る。
+    ///
+    /// **中心が NaN のまま通してはいけない。** ピックに失敗すると NaN が返ることがあり
+    /// （実測: `vtkHardwarePicker`）、通すと距離の比較が全て false になって先頭の面が
+    /// 選ばれ、見当違いの場所に電極ができる（SPEC §11.1）。
+    pub fn check(&self) -> Result<()> {
+        if !self.radius.is_finite() || self.radius < 0.0 {
+            return Err(GfemError::new(
+                ErrorKind::Case,
+                format!("パッチの半径が不正です: {} m", self.radius),
+            )
+            .with_hint("半径は 0 以上の有限値で指定してください（単位は m）"));
+        }
+        if self.center.iter().any(|v| !v.is_finite()) {
+            return Err(GfemError::new(
+                ErrorKind::Case,
+                format!("パッチの中心が数値になっていません: {:?}", self.center),
+            )
+            .with_hint(
+                "3D ビューのピックに失敗した可能性があります。体表面の上をもう一度クリック\
+                 してください（ケースファイルでは、体表面上の点を m で書いてください）",
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// 体表面の面 1 枚の指し方（SPEC §11.1）。
@@ -218,6 +252,11 @@ pub enum Preconditioner {
 }
 
 impl Preconditioner {
+    /// 選択肢として示す名前（既定を先頭に）。GUI の一覧とエラーの対処に使う。
+    ///
+    /// 別名（`"diagonal"` など）は [`Self::parse`] が受け付けるが、ここには載せない。
+    pub const CHOICES: [&'static str; 3] = ["jacobi", "amg", "none"];
+
     /// 表示・記録用の名前。
     pub const fn label(self) -> &'static str {
         match self {
@@ -235,7 +274,10 @@ impl Preconditioner {
             "amg" | "smoothed_aggregation" | "sa" => Ok(Preconditioner::Amg),
             other => Err(
                 GfemError::new(ErrorKind::Case, format!("未知の前処理です: \"{other}\""))
-                    .with_hint("jacobi / amg / none のいずれかを指定してください"),
+                    .with_hint(format!(
+                        "{} のいずれかを指定してください",
+                        Self::CHOICES.join(" / ")
+                    )),
             ),
         }
     }
@@ -264,6 +306,12 @@ pub enum Backend {
 }
 
 impl Backend {
+    /// 選択肢として示す名前（既定を先頭に）。GUI の一覧とエラーの対処に使う。
+    ///
+    /// 別名（`"gpu"` など）は [`Self::parse`] が受け付けるが、ここには載せない。
+    /// CPU 逐次は打ちやすい `"cpu"` で示す（記録用の名前 [`Self::label`] は `"cpu_serial"`）。
+    pub const CHOICES: [&'static str; 4] = ["auto", "cpu", "cpu_parallel", "cuda"];
+
     /// 表示・記録用の名前。
     pub const fn label(self) -> &'static str {
         match self {
@@ -285,7 +333,10 @@ impl Backend {
                 ErrorKind::Case,
                 format!("このビルドでは使えないバックエンドです: \"{other}\""),
             )
-            .with_hint("auto / cpu / cpu_parallel / cuda のいずれかを指定してください")),
+            .with_hint(format!(
+                "{} のいずれかを指定してください",
+                Self::CHOICES.join(" / ")
+            ))),
         }
     }
 
@@ -535,7 +586,7 @@ impl Case {
         // 値は電極の通し番号（名前で比べると、名前の検査をすり抜けたときに見逃す）
         let mut used_faces: BTreeMap<FaceKey, usize> = BTreeMap::new();
         for (index, e) in self.electrodes.iter().enumerate() {
-            let faces = self.resolve_faces(lookup, e)?;
+            let faces = resolve_faces(lookup, e)?;
             let mut off_surface: Vec<String> = Vec::new();
             for &face in &faces {
                 let (_, nodes) = lookup.face_nodes(face);
@@ -591,19 +642,6 @@ impl Case {
 
         Ok(warnings)
     }
-
-    /// 電極に属する面（昇順・重複なし）を求める。
-    ///
-    /// 中身は [`resolve_faces`]。ケースの設定には依存しないので、
-    /// 表示のためだけに面を引きたいとき（導電率をまだ入れていない GUI など）は
-    /// そちらを直接呼べる。
-    pub fn resolve_faces(
-        &self,
-        lookup: &FaceLookup,
-        electrode: &Electrode,
-    ) -> Result<Vec<ElectrodeFace>> {
-        resolve_faces(lookup, electrode)
-    }
 }
 
 /// 電極に属する面（昇順・重複なし）を求める。
@@ -618,155 +656,132 @@ impl Case {
 /// 3. 手で足した面
 /// 4. 手で外した面（**上の 3 つより優先する**）
 pub fn resolve_faces(lookup: &FaceLookup, electrode: &Electrode) -> Result<Vec<ElectrodeFace>> {
-    {
-        let mesh = lookup.mesh;
-        let wanted_pids: BTreeSet<PropId> = electrode.shell_pids.iter().copied().collect();
-        let wanted_ids: BTreeSet<ElemId> = electrode.element_ids.iter().copied().collect();
+    let mesh = lookup.mesh;
+    let wanted_pids: BTreeSet<PropId> = electrode.shell_pids.iter().copied().collect();
+    let wanted_ids: BTreeSet<ElemId> = electrode.element_ids.iter().copied().collect();
 
-        let mut faces: Vec<ElectrodeFace> = Vec::new();
-        let mut seen_pids: BTreeSet<PropId> = BTreeSet::new();
-        let mut seen_ids: BTreeSet<ElemId> = BTreeSet::new();
-        for s in mesh.iter_shells() {
-            let by_pid = wanted_pids.contains(&s.pid);
-            let by_id = wanted_ids.contains(&s.id);
-            if by_pid {
-                seen_pids.insert(s.pid);
-            }
-            if by_id {
-                seen_ids.insert(s.id);
-            }
-            if by_pid || by_id {
-                faces.push(ElectrodeFace::Shell(s.index as u32));
-            }
+    let mut faces: Vec<ElectrodeFace> = Vec::new();
+    let mut seen_pids: BTreeSet<PropId> = BTreeSet::new();
+    let mut seen_ids: BTreeSet<ElemId> = BTreeSet::new();
+    for s in mesh.iter_shells() {
+        let by_pid = wanted_pids.contains(&s.pid);
+        let by_id = wanted_ids.contains(&s.id);
+        if by_pid {
+            seen_pids.insert(s.pid);
         }
+        if by_id {
+            seen_ids.insert(s.id);
+        }
+        if by_pid || by_id {
+            faces.push(ElectrodeFace::Shell(s.index as u32));
+        }
+    }
 
-        // --- 体表面のパッチ（SPEC §11.1）---
-        for (k, patch) in electrode.patches.iter().enumerate() {
-            if !patch.radius.is_finite() || patch.radius < 0.0 {
-                return Err(GfemError::new(
-                    ErrorKind::Case,
-                    format!(
-                        "電極 {} のパッチ {} の半径が不正です: {} m",
-                        electrode.name,
-                        k + 1,
-                        patch.radius
-                    ),
-                )
-                .with_hint("半径は 0 以上の有限値で指定してください（単位は m）"));
-            }
-            if patch.center.iter().any(|v| !v.is_finite()) {
-                return Err(GfemError::new(
-                    ErrorKind::Case,
-                    format!(
-                        "電極 {} のパッチ {} の中心が不正です: {:?}",
-                        electrode.name,
-                        k + 1,
-                        patch.center
-                    ),
-                )
-                .with_hint("中心は体表面上の点を m で指定してください"));
-            }
-            let selected = lookup
-                .picker()
-                .select(patch.center, patch.radius, patch.pid);
-            if selected.is_empty() {
-                return Err(GfemError::new(
-                    ErrorKind::Case,
-                    format!(
-                        "電極 {} のパッチ {} が体表面の面を 1 枚も選べませんでした（中心 {:?} m, 半径 {} m{}）",
-                        electrode.name,
-                        k + 1,
-                        patch.center,
-                        patch.radius,
-                        match patch.pid {
-                            Some(p) => format!(", PID={p}"),
-                            None => String::new(),
-                        }
-                    ),
-                )
-                .with_hint(
-                    "PID で絞り込んでいる場合は、その領域が体表面に露出しているか確認してください\
-                     （読み込みレポートの領域一覧と、3D ビューの外表面表示で分かります）",
-                ));
-            }
-            faces.extend(selected.into_iter().map(ElectrodeFace::Surface));
-        }
-
-        // --- 手で足した面・外した面（SPEC §11.1）---
-        for face in &electrode.added_faces {
-            faces.push(ElectrodeFace::Surface(lookup.face_of(*face, electrode)?));
-        }
-        faces.sort_unstable();
-        faces.dedup();
-        if !electrode.removed_faces.is_empty() {
-            let mut dropped: BTreeSet<u32> = BTreeSet::new();
-            for face in &electrode.removed_faces {
-                // 選ばれていない面を外そうとしても黙って通す。半径を変えれば
-                // もともと選ばれなくなるので、そこで文句を言う筋合いはない
-                dropped.insert(lookup.face_of(*face, electrode)?);
-            }
-            faces.retain(|f| !matches!(f, ElectrodeFace::Surface(i) if dropped.contains(i)));
-        }
-
-        // シェル要素と体表面の面が同じ 1 枚を指していたら、体表面側を落とす。
-        // 残すと**同じ面を 2 回積分して面積が二重に数えられる**
-        if faces.iter().any(|f| matches!(f, ElectrodeFace::Shell(_))) {
-            let shells: BTreeSet<FaceKey> = faces
-                .iter()
-                .filter(|f| matches!(f, ElectrodeFace::Shell(_)))
-                .map(|f| face_key(lookup.face_nodes(*f).1))
-                .collect();
-            faces.retain(|f| match f {
-                ElectrodeFace::Shell(_) => true,
-                ElectrodeFace::Surface(_) => !shells.contains(&face_key(lookup.face_nodes(*f).1)),
-            });
-        }
-
-        let unknown_pids: Vec<String> = wanted_pids
-            .difference(&seen_pids)
-            .map(|p| p.to_string())
-            .collect();
-        if !unknown_pids.is_empty() {
+    // --- 体表面のパッチ（SPEC §11.1）---
+    for (k, patch) in electrode.patches.iter().enumerate() {
+        patch
+            .check()
+            .map_err(|e| e.with_entity(format!("電極 {} のパッチ {}", electrode.name, k + 1)))?;
+        let selected = lookup
+            .picker()
+            .select(patch.center, patch.radius, patch.pid);
+        if selected.is_empty() {
             return Err(GfemError::new(
                 ErrorKind::Case,
                 format!(
-                    "電極 {} が参照するシェル PID がメッシュにありません: PID={}",
+                    "電極 {} のパッチ {} が体表面の面を 1 枚も選べませんでした（中心 {:?} m, 半径 {} m{}）",
                     electrode.name,
-                    format_sample_list(&unknown_pids, SAMPLE_LIMIT)
-                ),
-            )
-            .with_hint("読み込みレポートの PSHELL 一覧から選び直してください"));
-        }
-        let unknown_ids: Vec<String> = wanted_ids
-            .difference(&seen_ids)
-            .map(|i| i.to_string())
-            .collect();
-        if !unknown_ids.is_empty() {
-            return Err(GfemError::new(
-                ErrorKind::Case,
-                format!(
-                    "電極 {} が参照するシェル要素がメッシュにありません: EID={}",
-                    electrode.name,
-                    format_sample_list(&unknown_ids, SAMPLE_LIMIT)
-                ),
-            )
-            .with_hint("CTRIA3 / CQUAD4 として存在する要素 ID を指定してください"));
-        }
-        if faces.is_empty() {
-            return Err(GfemError::new(
-                ErrorKind::Case,
-                format!(
-                    "電極 {} に面が 1 枚も割り当てられていません",
-                    electrode.name
+                    k + 1,
+                    patch.center,
+                    patch.radius,
+                    match patch.pid {
+                        Some(p) => format!(", PID={p}"),
+                        None => String::new(),
+                    }
                 ),
             )
             .with_hint(
-                "シェル PID・シェル要素 ID・体表面のパッチ（3D ビューでクリック）の\
-                 いずれかで電極面を指定してください",
+                "PID で絞り込んでいる場合は、その領域が体表面に露出しているか確認してください\
+                 （読み込みレポートの領域一覧と、3D ビューの外表面表示で分かります）",
             ));
         }
-        Ok(faces)
+        faces.extend(selected.into_iter().map(ElectrodeFace::Surface));
     }
+
+    // --- 手で足した面・外した面（SPEC §11.1）---
+    for face in &electrode.added_faces {
+        faces.push(ElectrodeFace::Surface(lookup.face_of(*face, electrode)?));
+    }
+    faces.sort_unstable();
+    faces.dedup();
+    if !electrode.removed_faces.is_empty() {
+        let mut dropped: BTreeSet<u32> = BTreeSet::new();
+        for face in &electrode.removed_faces {
+            // 選ばれていない面を外そうとしても黙って通す。半径を変えれば
+            // もともと選ばれなくなるので、そこで文句を言う筋合いはない
+            dropped.insert(lookup.face_of(*face, electrode)?);
+        }
+        faces.retain(|f| !matches!(f, ElectrodeFace::Surface(i) if dropped.contains(i)));
+    }
+
+    // シェル要素と体表面の面が同じ 1 枚を指していたら、体表面側を落とす。
+    // 残すと**同じ面を 2 回積分して面積が二重に数えられる**
+    if faces.iter().any(|f| matches!(f, ElectrodeFace::Shell(_))) {
+        let shells: BTreeSet<FaceKey> = faces
+            .iter()
+            .filter(|f| matches!(f, ElectrodeFace::Shell(_)))
+            .map(|f| face_key(lookup.face_nodes(*f).1))
+            .collect();
+        faces.retain(|f| match f {
+            ElectrodeFace::Shell(_) => true,
+            ElectrodeFace::Surface(_) => !shells.contains(&face_key(lookup.face_nodes(*f).1)),
+        });
+    }
+
+    let unknown_pids: Vec<String> = wanted_pids
+        .difference(&seen_pids)
+        .map(|p| p.to_string())
+        .collect();
+    if !unknown_pids.is_empty() {
+        return Err(GfemError::new(
+            ErrorKind::Case,
+            format!(
+                "電極 {} が参照するシェル PID がメッシュにありません: PID={}",
+                electrode.name,
+                format_sample_list(&unknown_pids, SAMPLE_LIMIT)
+            ),
+        )
+        .with_hint("読み込みレポートの PSHELL 一覧から選び直してください"));
+    }
+    let unknown_ids: Vec<String> = wanted_ids
+        .difference(&seen_ids)
+        .map(|i| i.to_string())
+        .collect();
+    if !unknown_ids.is_empty() {
+        return Err(GfemError::new(
+            ErrorKind::Case,
+            format!(
+                "電極 {} が参照するシェル要素がメッシュにありません: EID={}",
+                electrode.name,
+                format_sample_list(&unknown_ids, SAMPLE_LIMIT)
+            ),
+        )
+        .with_hint("CTRIA3 / CQUAD4 として存在する要素 ID を指定してください"));
+    }
+    if faces.is_empty() {
+        return Err(GfemError::new(
+            ErrorKind::Case,
+            format!(
+                "電極 {} に面が 1 枚も割り当てられていません",
+                electrode.name
+            ),
+        )
+        .with_hint(
+            "シェル PID・シェル要素 ID・体表面のパッチ（3D ビューでクリック）の\
+             いずれかで電極面を指定してください",
+        ));
+    }
+    Ok(faces)
 }
 
 /// 電極を構成する面 1 枚。
@@ -909,7 +924,7 @@ impl<'a> FaceLookup<'a> {
     ) -> (crate::element::ElementKind, &'a [NodeIndex]) {
         match face {
             ElectrodeFace::Shell(i) => {
-                let s = shell_at(self.mesh, i as usize);
+                let s = self.mesh.shell(i as usize);
                 (s.kind, s.conn)
             }
             ElectrodeFace::Surface(i) => {
@@ -923,7 +938,7 @@ impl<'a> FaceLookup<'a> {
     pub fn label(&self, face: ElectrodeFace) -> String {
         match face {
             ElectrodeFace::Shell(i) => {
-                let s = shell_at(self.mesh, i as usize);
+                let s = self.mesh.shell(i as usize);
                 format!("{} EID={}", s.kind.card_name(), s.id)
             }
             ElectrodeFace::Surface(i) => {
@@ -938,25 +953,6 @@ impl<'a> FaceLookup<'a> {
             }
         }
     }
-}
-
-/// 通し番号でシェル要素を引く。
-pub(crate) fn shell_at(mesh: &Mesh, index: usize) -> crate::mesh::ElementRef<'_> {
-    let mut offset = 0;
-    for block in &mesh.shells {
-        if index < offset + block.len() {
-            let i = index - offset;
-            return crate::mesh::ElementRef {
-                index,
-                kind: block.kind(),
-                id: block.ids()[i],
-                pid: block.pids()[i],
-                conn: block.conn_of(i),
-            };
-        }
-        offset += block.len();
-    }
-    panic!("シェル要素の通し番号が範囲外です: {index}");
 }
 
 #[cfg(test)]
@@ -1094,9 +1090,9 @@ CTRIA3,200,201,1,2,4
         let (mesh, surface) = setup();
         let lookup = FaceLookup::new(&mesh, &surface);
         let case = valid_case();
-        let faces = case.resolve_faces(&lookup, &case.electrodes[0]).unwrap();
+        let faces = resolve_faces(&lookup, &case.electrodes[0]).unwrap();
         assert_eq!(faces, vec![ElectrodeFace::Shell(0)]);
-        let faces = case.resolve_faces(&lookup, &case.electrodes[1]).unwrap();
+        let faces = resolve_faces(&lookup, &case.electrodes[1]).unwrap();
         assert_eq!(faces, vec![ElectrodeFace::Shell(1)]);
     }
 
@@ -1110,5 +1106,40 @@ CTRIA3,200,201,1,2,4
             warnings.iter().any(|w| w.contains("PID=42")),
             "{warnings:?}"
         );
+    }
+
+    #[test]
+    fn every_listed_choice_parses_and_the_list_covers_every_value() {
+        // GUI の選択肢とエラーの対処はこの一覧から作るので、読めない名前が
+        // 載っていても、選べない値があってもいけない
+        let backends: Vec<_> = Backend::CHOICES
+            .iter()
+            .map(|c| Backend::parse(c).unwrap())
+            .collect();
+        assert_eq!(backends[0], Backend::default());
+        for b in [
+            Backend::Auto,
+            Backend::CpuSerial,
+            Backend::CpuParallel,
+            Backend::Cuda,
+        ] {
+            assert!(backends.contains(&b), "{b:?} が選択肢にない");
+        }
+
+        let preconditioners: Vec<_> = Preconditioner::CHOICES
+            .iter()
+            .map(|c| Preconditioner::parse(c).unwrap())
+            .collect();
+        assert_eq!(preconditioners[0], SolverOptions::default().preconditioner);
+        for p in [
+            Preconditioner::None,
+            Preconditioner::Jacobi,
+            Preconditioner::Amg,
+        ] {
+            assert!(preconditioners.contains(&p), "{p:?} が選択肢にない");
+        }
+
+        let e = Preconditioner::parse("ilu").unwrap_err().to_string();
+        assert!(e.contains("jacobi / amg / none"), "{e}");
     }
 }

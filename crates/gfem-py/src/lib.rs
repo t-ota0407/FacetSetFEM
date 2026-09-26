@@ -191,29 +191,22 @@ impl PyMesh {
 
     /// 面共役な四面体分割（初回だけ作る）。
     fn tets(&self) -> PyResult<&gfem_core::mesh::TetView> {
-        if let Some(t) = self.tets.get() {
-            return Ok(t);
-        }
-        let built = gfem_core::mesh::TetView::build(&self.inner).map_err(to_py)?;
-        Ok(self.tets.get_or_init(|| built))
+        lazy(&self.tets, || gfem_core::mesh::TetView::build(&self.inner)).map_err(to_py)
     }
 
     /// 流線の下ごしらえ（初回だけ作る）。
     fn navigator(&self) -> PyResult<&gfem_core::mesh::Navigator> {
-        if let Some(n) = self.navigator.get() {
-            return Ok(n);
-        }
-        let built = gfem_core::mesh::Navigator::build(&self.inner).map_err(to_py)?;
-        Ok(self.navigator.get_or_init(|| built))
+        lazy(&self.navigator, || {
+            gfem_core::mesh::Navigator::build(&self.inner)
+        })
+        .map_err(to_py)
     }
 
     /// 外表面（初回だけ抽出する）。GIL を手放した中からも呼べるよう、コアのエラーで返す。
     fn surface_core(&self) -> gfem_core::Result<&gfem_core::mesh::Surface> {
-        if let Some(s) = self.surface.get() {
-            return Ok(s);
-        }
-        let built = gfem_core::mesh::extract_surface(&self.inner)?;
-        Ok(self.surface.get_or_init(|| built))
+        lazy(&self.surface, || {
+            gfem_core::mesh::extract_surface(&self.inner)
+        })
     }
 
     /// 外表面（初回だけ抽出する）。
@@ -433,30 +426,14 @@ impl PyMesh {
         radius: f64,
         pid: Option<u32>,
     ) -> PyResult<Py<PyDict>> {
-        if !radius.is_finite() || radius < 0.0 {
-            return Err(to_py(
-                gfem_core::GfemError::new(
-                    gfem_core::ErrorKind::Case,
-                    format!("パッチの半径が不正です: {radius} m"),
-                )
-                .with_hint("半径は 0 以上の有限値で指定してください（単位は m）"),
-            ));
+        // 半径と中心（ピックに失敗した NaN を含む）の検証は、電極面の解決と同じ関数で行う
+        SurfacePatch {
+            center,
+            radius,
+            pid,
         }
-        // ピックに失敗すると NaN が返ることがある（実測: vtkHardwarePicker）。
-        // 黙って通すと距離の比較が全て false になり、**先頭の面が選ばれて
-        // 見当違いの場所に電極ができる**ので、ここで止める
-        if center.iter().any(|v| !v.is_finite()) {
-            return Err(to_py(
-                gfem_core::GfemError::new(
-                    gfem_core::ErrorKind::Case,
-                    format!("パッチの中心が数値になっていません: {center:?}"),
-                )
-                .with_hint(
-                    "3D ビューのピックに失敗した可能性があります。\
-                     体表面の上をもう一度クリックしてください",
-                ),
-            ));
-        }
+        .check()
+        .map_err(to_py)?;
         let faces = self.picker()?.select(center, radius, pid);
         let d = self.describe_faces(py, &faces)?;
         d.set_item("center", center.to_vec())?;
@@ -942,14 +919,11 @@ pub struct PySolution {
 impl PySolution {
     /// 領域統計（初回だけ求める）。
     fn stats(&self) -> PyResult<&[RegionStats]> {
-        if let Some(stats) = self.stats.get() {
-            return Ok(stats);
-        }
-        let built = self
-            .inner
-            .region_stats(&self.mesh.get().inner, &self.case)
-            .map_err(to_py)?;
-        Ok(self.stats.get_or_init(|| built))
+        lazy(&self.stats, || {
+            self.inner.region_stats(&self.mesh.get().inner, &self.case)
+        })
+        .map(Vec::as_slice)
+        .map_err(to_py)
     }
 
     /// 実行サマリに添えるプロビナンス（SPEC §5.5）。
@@ -1532,6 +1506,18 @@ fn parse_reference(reference: &str) -> PyResult<ReferencePotential> {
     }
 }
 
+/// `cell` が空なら `build` で作って入れ、中身を返す（`OnceLock::get_or_try_init` の代わり）。
+///
+/// 作るのに失敗したら何も入れずにエラーを返すので、次の呼び出しでまた作り直す。
+/// 2 つのスレッドが同時に作り始めたら、先に入れたほうが残る（どちらも同じものを作る）。
+fn lazy<T, E>(cell: &OnceLock<T>, build: impl FnOnce() -> Result<T, E>) -> Result<&T, E> {
+    if let Some(value) = cell.get() {
+        return Ok(value);
+    }
+    let built = build()?;
+    Ok(cell.get_or_init(|| built))
+}
+
 /// Nastran バルクデータ（.bdf / .nas）を読み込む。
 ///
 /// `length_unit` はファイル中の座標値の単位（`"mm"` / `"cm"` / `"m"` / `"inch"`）。
@@ -1565,6 +1551,40 @@ fn read_nastran(py: Python<'_>, path: PathBuf, length_unit: Option<&str>) -> PyR
 #[pyfunction]
 fn length_units() -> Vec<&'static str> {
     LengthUnit::ALL.iter().map(|u| u.symbol()).collect()
+}
+
+/// 長さ単位 `unit` の 1 が何メートルか（`"mm"` なら 0.001）。
+///
+/// 換算表は Rust 側（`gfem_core::units`）の 1 か所だけに置き、Python はここから引く。
+#[pyfunction]
+fn metres_per_unit(unit: &str) -> PyResult<f64> {
+    Ok(LengthUnit::parse(unit).map_err(to_py)?.to_meters())
+}
+
+/// 指定できる計算バックエンド（既定が先頭）。別名（`"gpu"` など）も解釈はできる。
+#[pyfunction]
+fn backend_choices() -> Vec<&'static str> {
+    Backend::CHOICES.to_vec()
+}
+
+/// 指定できる前処理（既定が先頭）。別名（`"diagonal"` など）も解釈はできる。
+#[pyfunction]
+fn preconditioner_choices() -> Vec<&'static str> {
+    Preconditioner::CHOICES.to_vec()
+}
+
+/// バックエンド名を解釈して記録用の名前を返す。解釈できなければ `GfemError`。
+///
+/// 別名の表は Rust 側にしかないので、ケースファイルの検査もここを通す。
+#[pyfunction]
+fn parse_backend(name: &str) -> PyResult<&'static str> {
+    Ok(Backend::parse(name).map_err(to_py)?.label())
+}
+
+/// 前処理の名前を解釈して記録用の名前を返す。解釈できなければ `GfemError`。
+#[pyfunction]
+fn parse_preconditioner(name: &str) -> PyResult<&'static str> {
+    Ok(Preconditioner::parse(name).map_err(to_py)?.label())
 }
 
 /// このビルドに CUDA バックエンドが入っているか（SPEC §8 M5）。
@@ -1619,6 +1639,11 @@ fn _gfem(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySolution>()?;
     m.add_function(wrap_pyfunction!(read_nastran, m)?)?;
     m.add_function(wrap_pyfunction!(length_units, m)?)?;
+    m.add_function(wrap_pyfunction!(metres_per_unit, m)?)?;
+    m.add_function(wrap_pyfunction!(backend_choices, m)?)?;
+    m.add_function(wrap_pyfunction!(preconditioner_choices, m)?)?;
+    m.add_function(wrap_pyfunction!(parse_backend, m)?)?;
+    m.add_function(wrap_pyfunction!(parse_preconditioner, m)?)?;
     m.add_function(wrap_pyfunction!(cuda_available, m)?)?;
     m.add_function(wrap_pyfunction!(cuda_devices, m)?)?;
     m.add_function(wrap_pyfunction!(cuda_check, m)?)?;

@@ -43,6 +43,7 @@
 
 use crate::element::tet4;
 use crate::error::{GfemError, Result};
+use crate::geom::{dot, norm, sub};
 use crate::mesh::Mesh;
 use crate::mesh::spatial::CellGrid;
 use crate::mesh::tetview::TetView;
@@ -167,7 +168,7 @@ impl Navigator {
     /// メッシュから作る。
     pub fn build(mesh: &Mesh) -> Result<Self> {
         let tets = TetView::build(mesh)?;
-        let adjacency = build_face_adjacency(&tets)?;
+        let adjacency = build_face_adjacency(&tets);
         let grid = CellGrid::build(mesh, &tets);
         Ok(Self {
             tets,
@@ -240,7 +241,7 @@ impl Navigator {
                 sign * field[3 * parent + 1],
                 sign * field[3 * parent + 2],
             ];
-            let speed = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+            let speed = norm(v);
             if speed <= 0.0 {
                 continue;
             }
@@ -297,7 +298,7 @@ impl Navigator {
                 sign * field[3 * parent + 1],
                 sign * field[3 * parent + 2],
             ];
-            let mut speed = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+            let mut speed = norm(v);
             if speed <= 0.0 {
                 stop_reason = StopReason::ZeroField;
                 break;
@@ -307,8 +308,8 @@ impl Navigator {
             // そのまま進むと要素の外へ出るので、面に沿って滑らせる（モジュール冒頭を参照）
             if let Some(entry) = entry_face {
                 let g = shape.grad[entry];
-                let g2 = g[0] * g[0] + g[1] * g[1] + g[2] * g[2];
-                let rate = g[0] * v[0] + g[1] * v[1] + g[2] * v[2];
+                let g2 = dot(g, g);
+                let rate = dot(g, v);
                 // 押し戻しが丸め誤差の大きさなら滑らせない（場が面や稜線にぴったり沿う
                 // ときは法線成分が ±10⁻¹⁶ 程度で、符号はたまたま決まる）。滑らせると
                 // 稜線のまわりの四面体を歩幅ゼロで巡り続ける。この程度の押し戻しを
@@ -317,7 +318,7 @@ impl Navigator {
                     // ∇N_entry は面に垂直なので、その成分を落とせば面に沿った向きが残る
                     let k = rate / g2;
                     v = [v[0] - k * g[0], v[1] - k * g[1], v[2] - k * g[2]];
-                    let along = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+                    let along = norm(v);
                     if along <= SINK_RATIO * speed {
                         stop_reason = StopReason::Sink;
                         break;
@@ -333,7 +334,7 @@ impl Navigator {
             let mut exit_face = usize::MAX;
             for (i, &l) in lambda.iter().enumerate() {
                 let g = shape.grad[i];
-                let rate = g[0] * v[0] + g[1] * v[1] + g[2] * v[2];
+                let rate = dot(g, v);
                 if rate >= 0.0 {
                     continue; // その面からは遠ざかっている
                 }
@@ -420,8 +421,7 @@ fn tet_size(p: &[[f64; 3]; 4]) -> f64 {
     let mut worst: f64 = 0.0;
     for i in 0..4 {
         for j in (i + 1)..4 {
-            let d = [p[j][0] - p[i][0], p[j][1] - p[i][1], p[j][2] - p[i][2]];
-            worst = worst.max((d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt());
+            worst = worst.max(norm(sub(p[j], p[i])));
         }
     }
     worst
@@ -431,11 +431,11 @@ fn tet_size(p: &[[f64; 3]; 4]) -> f64 {
 ///
 /// `λ_i(x) = δ_{i0} + ∇N_i · (x − p0)`。∇N_i が要素内で一定なので閉じた式で書ける。
 fn barycentric(shape: &tet4::Tet4Shape, p0: [f64; 3], x: [f64; 3]) -> [f64; 4] {
-    let d = [x[0] - p0[0], x[1] - p0[1], x[2] - p0[2]];
+    let d = sub(x, p0);
     let mut lambda = [0.0f64; 4];
     for (i, l) in lambda.iter_mut().enumerate() {
         let g = shape.grad[i];
-        *l = g[0] * d[0] + g[1] * d[1] + g[2] * d[2];
+        *l = dot(g, d);
         if i == 0 {
             *l += 1.0;
         }
@@ -446,51 +446,10 @@ fn barycentric(shape: &tet4::Tet4Shape, p0: [f64; 3], x: [f64; 3]) -> [f64; 4] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::io::nastran::read_nastran_from;
-    use crate::units::LengthUnit;
-    use std::path::Path;
 
-    /// nx × 1 × 1 の直方体を Kuhn 分割した棒（x 方向に伸びる）。
+    /// nx × 1 × 1 の直方体を Kuhn 分割した棒（x 方向に伸びる、長さ 1）。
     fn bar(nx: usize) -> Mesh {
-        let mut deck = String::new();
-        let node = |i: usize, j: usize, k: usize| i + (nx + 1) * (j + 2 * k) + 1;
-        for k in 0..2 {
-            for j in 0..2 {
-                for i in 0..=nx {
-                    deck.push_str(&format!(
-                        "GRID,{},,{},{},{}\n",
-                        node(i, j, k),
-                        i as f64 / nx as f64,
-                        j as f64,
-                        k as f64
-                    ));
-                }
-            }
-        }
-        deck.push_str("PSOLID,1,1\n");
-        let mut eid = 1;
-        for i in 0..nx {
-            let corner: Vec<usize> = (0..8)
-                .map(|n| node(i + (n & 1), (n >> 1) & 1, (n >> 2) & 1))
-                .collect();
-            for t in [
-                [0, 1, 3, 7],
-                [0, 1, 5, 7],
-                [0, 2, 3, 7],
-                [0, 2, 6, 7],
-                [0, 4, 5, 7],
-                [0, 4, 6, 7],
-            ] {
-                deck.push_str(&format!(
-                    "CTETRA,{eid},1,{},{},{},{}\n",
-                    corner[t[0]], corner[t[1]], corner[t[2]], corner[t[3]]
-                ));
-                eid += 1;
-            }
-        }
-        read_nastran_from(deck.as_bytes(), Path::new("<test>"), LengthUnit::Meter)
-            .unwrap()
-            .0
+        crate::testing::kuhn_box([nx, 1, 1], [1.0; 3])
     }
 
     /// 全要素に同じベクトルを与える場。

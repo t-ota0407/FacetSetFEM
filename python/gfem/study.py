@@ -26,7 +26,17 @@ from typing import Any, Callable
 
 import yaml
 
-from ._gfem import Case, GfemError, Mesh, Solution, read_nastran
+from ._gfem import (
+    Case,
+    GfemError,
+    Mesh,
+    Solution,
+    backend_choices,
+    parse_backend,
+    parse_preconditioner,
+    preconditioner_choices,
+    read_nastran,
+)
 
 __all__ = [
     "ElectrodeSpec",
@@ -136,27 +146,16 @@ class ElectrodeSpec:
         }
 
 
-#: 指定できるバックエンド（SPEC §4.4）。
-#: どれを選んでも結果はビット単位で同じで、速度だけが変わる。
-KNOWN_BACKENDS = frozenset(
-    {"auto", "cpu", "cpu_serial", "serial", "cpu_parallel", "parallel", "cuda", "gpu"}
-)
-
-#: 指定できる前処理（SPEC §4.3 / §4.5）。
-#: バックエンドと違い、こちらは反復の道筋が変わるので収束判定の範囲で答えが揺れる。
-KNOWN_PRECONDITIONERS = frozenset(
-    {"jacobi", "diagonal", "amg", "smoothed_aggregation", "sa", "none"}
-)
-
-
 @dataclass
 class SolverSpec:
     """ソルバ設定（SPEC §4.3）。"""
 
-    #: "auto"（規模で自動選択）/ "cpu"（逐次）/ "cpu_parallel"（rayon）/ "cuda"（GPU）
+    #: "auto"（規模で自動選択）/ "cpu"（逐次）/ "cpu_parallel"（rayon）/ "cuda"（GPU）。
+    #: どれを選んでも結果はビット単位で同じで、速度だけが変わる（SPEC §4.4）
     backend: str = "auto"
     method: str = "cg"
-    #: "jacobi"（既定）/ "amg"（代数マルチグリッド）/ "none"
+    #: "jacobi"（既定）/ "amg"（代数マルチグリッド）/ "none"。バックエンドと違い、
+    #: 反復の道筋が変わるので収束判定の範囲で答えが揺れる（SPEC §4.3 / §4.5）
     preconditioner: str = "jacobi"
     gauge: str = "mean_zero"
     tolerance: float = 1.0e-10
@@ -577,21 +576,30 @@ def _solver_from(data: Any, where_: str) -> SolverSpec:
             f"{where_} の gauge",
             "射影による mean_zero のみです。1 節点ピン留めは採用しません（SPEC §2.2）",
         )
-    if spec.backend not in KNOWN_BACKENDS:
+    if not _parses(parse_backend, spec.backend):
         raise _error(
             f"このビルドでは使えないバックエンドです: {spec.backend}",
             f"{where_} の backend",
-            "auto / cpu / cpu_parallel / cuda のいずれかです。"
+            f"{' / '.join(backend_choices())} のいずれかです。"
             "cuda が使えるかは gfem.describe_gpus() で確認できます",
         )
-    if spec.preconditioner not in KNOWN_PRECONDITIONERS:
+    if not _parses(parse_preconditioner, spec.preconditioner):
         raise _error(
             f"未知の前処理です: {spec.preconditioner}",
             f"{where_} の preconditioner",
-            "jacobi / amg / none のいずれかです。amg は反復回数が"
+            f"{' / '.join(preconditioner_choices())} のいずれかです。amg は反復回数が"
             "メッシュの細かさにほとんど依存しなくなります（SPEC §4.5）",
         )
     return spec
+
+
+def _parses(parse: Callable[[str], str], value: str) -> bool:
+    """Rust 側の解釈で読めるか。別名（"gpu" など）の表は Rust 側の 1 か所だけに置く。"""
+    try:
+        parse(value)
+    except GfemError:
+        return False
+    return True
 
 
 def _output_from(data: Any, where_: str) -> OutputSpec:

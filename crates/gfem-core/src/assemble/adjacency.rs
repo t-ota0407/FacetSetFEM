@@ -159,15 +159,6 @@ mod tests {
     use super::*;
     use crate::assemble::sparsity::build_sparsity;
     use crate::assemble::stiffness::assemble_stiffness;
-    use crate::io::nastran::read_nastran_from;
-    use crate::units::LengthUnit;
-    use std::path::Path;
-
-    fn read(text: &str) -> Mesh {
-        read_nastran_from(text.as_bytes(), Path::new("<test>"), LengthUnit::Meter)
-            .unwrap()
-            .0
-    }
 
     fn sigma_map(pid: PropId, value: f64) -> BTreeMap<PropId, Conductivity> {
         let mut m = BTreeMap::new();
@@ -175,53 +166,14 @@ mod tests {
         m
     }
 
-    /// nx × ny × nz の格子を Kuhn 分割した直方体。
-    fn box_deck(nx: usize, ny: usize, nz: usize) -> String {
-        let mut deck = String::from("PSOLID,1,1\n");
-        let node = |i: usize, j: usize, k: usize| i + (nx + 1) * (j + (ny + 1) * k) + 1;
-        for k in 0..=nz {
-            for j in 0..=ny {
-                for i in 0..=nx {
-                    deck.push_str(&format!(
-                        "GRID,{},,{},{},{}\n",
-                        node(i, j, k),
-                        i as f64,
-                        j as f64,
-                        k as f64
-                    ));
-                }
-            }
-        }
-        let mut eid = 1;
-        for k in 0..nz {
-            for j in 0..ny {
-                for i in 0..nx {
-                    let corner: Vec<usize> = (0..8)
-                        .map(|n| node(i + (n & 1), j + ((n >> 1) & 1), k + ((n >> 2) & 1)))
-                        .collect();
-                    for t in [
-                        [0, 1, 3, 7],
-                        [0, 1, 5, 7],
-                        [0, 2, 3, 7],
-                        [0, 2, 6, 7],
-                        [0, 4, 5, 7],
-                        [0, 4, 6, 7],
-                    ] {
-                        deck.push_str(&format!(
-                            "CTETRA,{eid},1,{},{},{},{}\n",
-                            corner[t[0]], corner[t[1]], corner[t[2]], corner[t[3]]
-                        ));
-                        eid += 1;
-                    }
-                }
-            }
-        }
-        deck
+    /// nx × ny × nz の格子（間隔 1）を Kuhn 分割した直方体。
+    fn box_mesh(nx: usize, ny: usize, nz: usize) -> Mesh {
+        crate::testing::kuhn_box([nx, ny, nz], [nx as f64, ny as f64, nz as f64])
     }
 
     #[test]
     fn node_element_lists_are_sorted_and_complete() {
-        let mesh = read(&box_deck(2, 2, 2));
+        let mesh = box_mesh(2, 2, 2);
         let adjacency = build_node_elements(&mesh);
         assert_eq!(adjacency.len(), mesh.nodes.len());
         assert_eq!(adjacency.total_references(), mesh.n_solid_elements() * 4);
@@ -241,7 +193,7 @@ mod tests {
     #[test]
     fn parallel_assembly_matches_serial_bitwise() {
         // CLAUDE.md 設計原則 1: 並列化しても行列が変わってはいけない
-        let mesh = read(&box_deck(4, 3, 3));
+        let mesh = box_mesh(4, 3, 3);
         let sigma = sigma_map(1, 0.35);
 
         let mut serial = build_sparsity(&mesh).unwrap();
@@ -256,7 +208,7 @@ mod tests {
 
     #[test]
     fn parallel_assembly_works_for_meshes_smaller_than_one_task() {
-        let mesh = read(&box_deck(1, 1, 1));
+        let mesh = box_mesh(1, 1, 1);
         assert!(mesh.nodes.len() < ROWS_PER_TASK);
         let sigma = sigma_map(1, 1.0);
 
@@ -270,7 +222,7 @@ mod tests {
 
     #[test]
     fn missing_conductivity_is_reported() {
-        let mesh = read(&box_deck(2, 2, 2));
+        let mesh = box_mesh(2, 2, 2);
         let adjacency = build_node_elements(&mesh);
         let mut matrix = build_sparsity(&mesh).unwrap();
         let e = assemble_stiffness_parallel(&mesh, &BTreeMap::new(), &adjacency, &mut matrix)

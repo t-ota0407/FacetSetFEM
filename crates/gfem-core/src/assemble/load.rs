@@ -14,7 +14,7 @@
 //! 電流は電極エッジに集中する（理論上は発散する）ため、エッジ近傍の電流密度は
 //! 過小評価になる。将来の完全電極モデル（CEM）は SPEC §9 の予定項目。
 
-use crate::case::{Case, ElectrodeRole, FaceLookup};
+use crate::case::{Case, ElectrodeRole, FaceLookup, resolve_faces};
 use crate::element::shell::face_integral;
 use crate::error::{ErrorKind, GfemError, Result};
 use crate::mesh::{Mesh, NodeIndex};
@@ -64,7 +64,7 @@ impl ElectrodeGeometry {
 
 /// 荷重ベクトル f と、電極ごとの幾何情報を作る。
 ///
-/// 電極面は [`Case::resolve_faces`] が返す通し番号の昇順にたどるので、
+/// 電極面は [`resolve_faces`] が返す通し番号の昇順にたどるので、
 /// 同じ入力からは常に同じ加算順序になる（CLAUDE.md 設計原則 1）。
 pub fn assemble_load(
     mesh: &Mesh,
@@ -75,7 +75,7 @@ pub fn assemble_load(
     let mut geometries = Vec::with_capacity(case.electrodes.len());
 
     for electrode in &case.electrodes {
-        let faces = case.resolve_faces(lookup, electrode)?;
+        let faces = resolve_faces(lookup, electrode)?;
 
         // 1. 面積と ∫N_i dS を集める
         let mut weights: BTreeMap<NodeIndex, f64> = BTreeMap::new();

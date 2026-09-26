@@ -131,6 +131,45 @@ pub trait LinearBackend {
     }
 }
 
+/// CPU のバックエンド（逐次・並列）に共通の、ホストの `Vec<f64>` を使う生成と転送。
+///
+/// 行列は元の [`CsrMatrix`] を借りるだけ、ベクトルはただの `Vec<f64>` なので、
+/// 「転送」はコピーか何もしないかになる。逐次と並列で違うのは演算だけ。
+macro_rules! host_vector_transfers {
+    () => {
+        fn upload_matrix<'a>(&self, a: &'a CsrMatrix) -> Result<&'a CsrMatrix> {
+            Ok(a)
+        }
+
+        fn zeros(&self, n: usize) -> Result<Vec<f64>> {
+            Ok(vec![0.0; n])
+        }
+
+        fn upload(&self, host: &[f64]) -> Result<Vec<f64>> {
+            Ok(host.to_vec())
+        }
+
+        fn download(&self, x: &Vec<f64>, host: &mut [f64]) -> Result<()> {
+            host.copy_from_slice(x);
+            Ok(())
+        }
+
+        fn upload_into(&self, host: &[f64], x: &mut Vec<f64>) -> Result<()> {
+            x.copy_from_slice(host);
+            Ok(())
+        }
+
+        fn copy_from(&self, src: &Vec<f64>, dst: &mut Vec<f64>) -> Result<()> {
+            dst.copy_from_slice(src);
+            Ok(())
+        }
+
+        fn len(&self, x: &Vec<f64>) -> usize {
+            x.len()
+        }
+    };
+}
+
 /// CPU 逐次バックエンド。
 ///
 /// 全ての総和を [`reduce`] のブロック分割規則で行うので、
@@ -146,36 +185,7 @@ impl LinearBackend for CpuSerial {
         "cpu_serial"
     }
 
-    fn upload_matrix<'a>(&self, a: &'a CsrMatrix) -> Result<&'a CsrMatrix> {
-        Ok(a)
-    }
-
-    fn zeros(&self, n: usize) -> Result<Vec<f64>> {
-        Ok(vec![0.0; n])
-    }
-
-    fn upload(&self, host: &[f64]) -> Result<Vec<f64>> {
-        Ok(host.to_vec())
-    }
-
-    fn download(&self, x: &Vec<f64>, host: &mut [f64]) -> Result<()> {
-        host.copy_from_slice(x);
-        Ok(())
-    }
-
-    fn upload_into(&self, host: &[f64], x: &mut Vec<f64>) -> Result<()> {
-        x.copy_from_slice(host);
-        Ok(())
-    }
-
-    fn copy_from(&self, src: &Vec<f64>, dst: &mut Vec<f64>) -> Result<()> {
-        dst.copy_from_slice(src);
-        Ok(())
-    }
-
-    fn len(&self, x: &Vec<f64>) -> usize {
-        x.len()
-    }
+    host_vector_transfers!();
 
     fn spmv(&self, a: &&CsrMatrix, x: &Vec<f64>, y: &mut Vec<f64>) -> Result<()> {
         a.spmv(x, y);
@@ -253,36 +263,7 @@ impl LinearBackend for CpuParallel {
         "cpu_parallel"
     }
 
-    fn upload_matrix<'a>(&self, a: &'a CsrMatrix) -> Result<&'a CsrMatrix> {
-        Ok(a)
-    }
-
-    fn zeros(&self, n: usize) -> Result<Vec<f64>> {
-        Ok(vec![0.0; n])
-    }
-
-    fn upload(&self, host: &[f64]) -> Result<Vec<f64>> {
-        Ok(host.to_vec())
-    }
-
-    fn download(&self, x: &Vec<f64>, host: &mut [f64]) -> Result<()> {
-        host.copy_from_slice(x);
-        Ok(())
-    }
-
-    fn upload_into(&self, host: &[f64], x: &mut Vec<f64>) -> Result<()> {
-        x.copy_from_slice(host);
-        Ok(())
-    }
-
-    fn copy_from(&self, src: &Vec<f64>, dst: &mut Vec<f64>) -> Result<()> {
-        dst.copy_from_slice(src);
-        Ok(())
-    }
-
-    fn len(&self, x: &Vec<f64>) -> usize {
-        x.len()
-    }
+    host_vector_transfers!();
 
     fn spmv(&self, a: &&CsrMatrix, x: &Vec<f64>, y: &mut Vec<f64>) -> Result<()> {
         use rayon::prelude::*;

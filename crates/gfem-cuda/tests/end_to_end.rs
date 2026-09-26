@@ -6,22 +6,22 @@
 //!
 //! GPU が無い環境では黙って通す（設計原則 5）。
 
+// gfem-core の結合テストと同じメッシュ生成を使う（別クレートなので path で読み込む）
+#[path = "../../gfem-core/tests/common/mod.rs"]
+mod common;
+
+use common::{BOTTOM_PID, Layer, TOP_PID};
 use gfem_core::case::{
     Backend, Case, Electrode, Preconditioner, ReferencePotential, SolverOptions,
 };
-use gfem_core::io::nastran::read_nastran_from;
 use gfem_core::solver::{BackendSolver, CpuParallel, CpuSerial};
-use gfem_core::units::LengthUnit;
 use gfem_core::{Analysis, Mesh, solve_with};
 use gfem_cuda::CudaBackend;
-use std::path::Path;
 use std::time::Instant;
 
 const CURRENT: f64 = 2.0e-3;
 const LX: f64 = 0.060;
 const LY: f64 = 0.040;
-const TOP_PID: u32 = 101;
-const BOTTOM_PID: u32 = 201;
 /// 層構成（PID, 厚さ [m], σ [S/m], 分割数）
 const LAYERS: [(u32, f64, f64, usize); 3] = [
     (1, 0.002, 0.10, 2),
@@ -48,99 +48,17 @@ macro_rules! gpu_or_skip {
     };
 }
 
-/// nx × ny × Σ分割 の格子を Kuhn 分割した 3 層スラブ。
+/// nx × ny × Σ分割 の格子を Kuhn 分割した 3 層スラブ（z の分割数は `refine` 倍）。
 fn slab(nx: usize, ny: usize, refine: usize) -> Mesh {
-    let mut z = vec![0.0f64];
-    for (_pid, thickness, _sigma, divisions) in LAYERS {
-        let base = *z.last().unwrap();
-        let divisions = divisions * refine;
-        for i in 1..=divisions {
-            z.push(base + thickness * i as f64 / divisions as f64);
-        }
-    }
-    let nz = z.len() - 1;
-    let node = |i: usize, j: usize, k: usize| 1 + i + (nx + 1) * (j + (ny + 1) * k);
-
-    let mut deck = String::new();
-    for (pid, _t, _s, _d) in LAYERS {
-        deck.push_str(&format!("PSOLID,{pid},{pid}\n"));
-    }
-    deck.push_str(&format!("PSHELL,{TOP_PID},{TOP_PID},0.1\n"));
-    deck.push_str(&format!("PSHELL,{BOTTOM_PID},{BOTTOM_PID},0.1\n"));
-    for (k, &zk) in z.iter().enumerate() {
-        for j in 0..=ny {
-            for i in 0..=nx {
-                let x = LX * i as f64 / nx as f64;
-                let y = LY * j as f64 / ny as f64;
-                deck.push_str(&format!("GRID,{},,{x},{y},{zk}\n", node(i, j, k)));
-            }
-        }
-    }
-
-    // z 方向の段 k がどの層に属するか
-    let layer_of = |k: usize| {
-        let mut rest = k;
-        for (pid, _t, _s, d) in LAYERS {
-            let d = d * refine;
-            if rest < d {
-                return pid;
-            }
-            rest -= d;
-        }
-        unreachable!()
-    };
-
-    let mut eid = 1;
-    for k in 0..nz {
-        let pid = layer_of(k);
-        for j in 0..ny {
-            for i in 0..nx {
-                let c = [
-                    node(i, j, k),
-                    node(i + 1, j, k),
-                    node(i, j + 1, k),
-                    node(i + 1, j + 1, k),
-                    node(i, j, k + 1),
-                    node(i + 1, j, k + 1),
-                    node(i, j + 1, k + 1),
-                    node(i + 1, j + 1, k + 1),
-                ];
-                for t in [
-                    [0, 1, 3, 7],
-                    [0, 1, 5, 7],
-                    [0, 2, 3, 7],
-                    [0, 2, 6, 7],
-                    [0, 4, 5, 7],
-                    [0, 4, 6, 7],
-                ] {
-                    deck.push_str(&format!(
-                        "CTETRA,{eid},{pid},{},{},{},{}\n",
-                        c[t[0]], c[t[1]], c[t[2]], c[t[3]]
-                    ));
-                    eid += 1;
-                }
-            }
-        }
-    }
-    for (k, pid) in [(nz, TOP_PID), (0, BOTTOM_PID)] {
-        for j in 0..ny {
-            for i in 0..nx {
-                let q = [
-                    node(i, j, k),
-                    node(i + 1, j, k),
-                    node(i + 1, j + 1, k),
-                    node(i, j + 1, k),
-                ];
-                deck.push_str(&format!("CTRIA3,{eid},{pid},{},{},{}\n", q[0], q[1], q[2]));
-                eid += 1;
-                deck.push_str(&format!("CTRIA3,{eid},{pid},{},{},{}\n", q[0], q[2], q[3]));
-                eid += 1;
-            }
-        }
-    }
-    read_nastran_from(deck.as_bytes(), Path::new("<test>"), LengthUnit::Meter)
-        .unwrap()
-        .0
+    let layers: Vec<Layer> = LAYERS
+        .iter()
+        .map(|&(pid, thickness, _sigma, divisions)| Layer {
+            pid,
+            thickness,
+            divisions: divisions * refine,
+        })
+        .collect();
+    common::slab(LX, LY, nx, ny, &layers)
 }
 
 fn case_with(backend: Backend) -> Case {

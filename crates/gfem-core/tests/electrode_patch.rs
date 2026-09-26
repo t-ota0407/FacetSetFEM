@@ -160,8 +160,7 @@ fn an_empty_patch_says_why() {
         }]),
         Electrode::cathode("E2", 2.0e-3).with_patches([bottom_patch()]),
     );
-    let err = case
-        .resolve_faces(&lookup, &case.electrodes[0])
+    let err = gfem_core::case::resolve_faces(&lookup, &case.electrodes[0])
         .unwrap_err()
         .to_string();
     assert!(err.contains("1 枚も選べませんでした"), "{err}");

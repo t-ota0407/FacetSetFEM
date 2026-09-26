@@ -30,10 +30,13 @@ from ._gfem import (
     Solution,
     SolverCancelled,
     __version__,
+    backend_choices,
     cuda_available,
     cuda_check,
     cuda_devices,
     length_units,
+    metres_per_unit,
+    preconditioner_choices,
     read_nastran,
 )
 from .study import ElectrodeSpec, Material, OutputSpec, SolverSpec, Study, SurfacePatch
@@ -57,22 +60,22 @@ __all__ = [
     "TISSUES",
     "Tissue",
     "__version__",
+    "backend_choices",
     "cuda_available",
     "cuda_check",
     "cuda_devices",
     "describe_bounding_box",
+    "describe_extent",
     "describe_gpus",
     "length_units",
     "load_library",
+    "metres_per_unit",
+    "preconditioner_choices",
     "read_nastran",
     "sweep",
     "tissue",
     "tissue_names",
 ]
-
-#: 1 単位が何メートルか。Rust 側（`gfem_core::units`）と同じ値を持つ
-_METRES_PER_UNIT = {"mm": 1.0e-3, "cm": 1.0e-2, "m": 1.0, "inch": 0.0254}
-
 
 def describe_bounding_box(mesh: Mesh, unit: str | None = None) -> str:
     """バウンディングボックスを「選んだ単位」と「m」の両方で表した文字列を返す。
@@ -84,10 +87,17 @@ def describe_bounding_box(mesh: Mesh, unit: str | None = None) -> str:
     box = mesh.bounding_box()
     if box is None:
         return "（節点がありません）"
-    unit = unit or mesh.length_unit
-    scale = _METRES_PER_UNIT[unit]
     lo, hi = box
-    size_m = [h - l for l, h in zip(lo, hi)]
+    return describe_extent([h - l for l, h in zip(lo, hi)], unit or mesh.length_unit)
+
+
+def describe_extent(size_m, unit: str) -> str:
+    """寸法 [m] を「選んだ単位」と「m」の両方で表した文字列を返す。
+
+    GUI の単位選択ダイアログは、単位を決める前の寸法をこれで見せる。
+    換算係数は Rust 側の表（:func:`metres_per_unit`）から引く。
+    """
+    scale = metres_per_unit(unit)
     in_unit = " x ".join(_fmt(s / scale) + f" {unit}" for s in size_m)
     in_metre = " x ".join(_fmt(s) + " m" for s in size_m)
     return f"{in_unit} = {in_metre}"

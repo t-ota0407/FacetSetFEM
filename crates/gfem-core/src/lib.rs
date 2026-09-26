@@ -21,12 +21,15 @@ pub mod assemble;
 pub mod case;
 pub mod element;
 pub mod error;
+mod geom;
 pub mod io;
 pub mod material;
 pub mod mesh;
 pub mod post;
 pub mod provenance;
 pub mod solver;
+#[cfg(test)]
+mod testing;
 pub mod units;
 
 pub use analysis::{Analysis, Timings, solve, solve_prepared, solve_with, write_analysis_vtu};

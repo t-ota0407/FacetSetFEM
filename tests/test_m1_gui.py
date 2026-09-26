@@ -362,8 +362,11 @@ def test_view_and_screenshot(window, tmp_path):
 
 
 def test_unit_selector_shows_both_units(qt_app):
-    from gfem.gui.widgets import format_extent
+    from gfem.gui.widgets import UnitSelector
 
-    text = format_extent((60.0, 40.0, 20.0), "mm")
-    assert "60 mm" in text
-    assert "0.06 m" in text
+    dialog = UnitSelector((60.0, 40.0, 20.0))
+    dialog.combo.setCurrentText("mm")
+    assert dialog.preview.text() == "60 mm x 40 mm x 20 mm = 0.06 m x 0.04 m x 0.02 m"
+    dialog.combo.setCurrentText("inch")
+    assert "60 inch" in dialog.preview.text()
+    assert "1.524 m" in dialog.preview.text()

@@ -15,10 +15,7 @@ __all__ = ["ConvergencePlot", "UnitSelector"]
 
 from PySide6.QtWidgets import QComboBox, QDialog, QDialogButtonBox, QLabel, QVBoxLayout
 
-from .. import length_units
-
-#: 1 単位が何メートルか
-_METRES_PER_UNIT = {"mm": 1.0e-3, "cm": 1.0e-2, "m": 1.0, "inch": 0.0254}
+from .. import describe_extent, length_units, metres_per_unit
 
 
 class ConvergencePlot(QWidget):
@@ -155,12 +152,6 @@ class UnitSelector(QDialog):
         return self.combo.currentText()
 
     def _update_preview(self, unit: str) -> None:
-        self.preview.setText(format_extent(self._raw, unit))
-
-
-def format_extent(raw_extent, unit: str) -> str:
-    """ファイル中の生の寸法を、選んだ単位と m の両方で表した文字列にする。"""
-    scale = _METRES_PER_UNIT[unit]
-    in_unit = " × ".join(f"{v:.6g} {unit}" for v in raw_extent)
-    in_metre = " × ".join(f"{v * scale:.6g} m" for v in raw_extent)
-    return f"{in_unit}  =  {in_metre}"
+        # ファイル中の生の寸法を、選んだ単位で読んだときの m に直して見せる
+        scale = metres_per_unit(unit)
+        self.preview.setText(describe_extent([v * scale for v in self._raw], unit))

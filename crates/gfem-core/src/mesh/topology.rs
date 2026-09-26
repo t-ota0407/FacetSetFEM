@@ -273,7 +273,7 @@ impl FaceAdjacency {
 /// 入力は[面共役な四面体分割](crate::mesh::TetView)。Hex8 / Penta6 を含むメッシュでも、
 /// 四角形面が両側から同じ対角線で割られているので、面はちょうど 2 つの四面体に
 /// 共有されるか外表面かのどちらかになる。
-pub fn build_face_adjacency(tets: &TetView) -> Result<FaceAdjacency> {
+pub fn build_face_adjacency(tets: &TetView) -> FaceAdjacency {
     let n = tets.len();
     let mut entries: Vec<(FaceKey, u32, u8)> = Vec::with_capacity(n * 4);
     for t in 0..n {
@@ -307,7 +307,7 @@ pub fn build_face_adjacency(tets: &TetView) -> Result<FaceAdjacency> {
         }
         i = j;
     }
-    Ok(adjacency)
+    adjacency
 }
 
 #[cfg(test)]
@@ -417,7 +417,7 @@ CTETRA,10,1,1,2,3,4
 CTETRA,11,1,5,4,3,2
 ",
         );
-        let adjacency = build_face_adjacency(&TetView::build(&mesh).unwrap()).unwrap();
+        let adjacency = build_face_adjacency(&TetView::build(&mesh).unwrap());
         assert_eq!(adjacency.len(), 2);
 
         // 共有面はちょうど 1 組

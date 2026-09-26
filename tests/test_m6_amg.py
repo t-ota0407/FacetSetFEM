@@ -13,7 +13,7 @@ import shutil
 import pytest
 
 import gfem
-from gfem.study import KNOWN_PRECONDITIONERS, Study
+from gfem.study import Study
 
 CURRENT = 2.0e-3  # A
 
@@ -41,8 +41,8 @@ def solved(sample_bdf, slab_sigma):
 
 
 def test_amg_is_a_known_preconditioner():
-    assert "amg" in KNOWN_PRECONDITIONERS
-    assert "jacobi" in KNOWN_PRECONDITIONERS
+    assert "amg" in gfem.preconditioner_choices()
+    assert "jacobi" in gfem.preconditioner_choices()
 
 
 def test_set_solver_accepts_amg(sample_bdf, slab_sigma):

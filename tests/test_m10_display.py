@@ -127,12 +127,12 @@ def test_solving_switches_the_view_to_current_density(window, qt_app):
 
 def test_edges_are_on_for_small_models_only(window, monkeypatch):
     """細かいメッシュで稜線を全部描くと、潰れて形がかえって見えなくなる。"""
-    from gfem.gui import main_window as mw
+    from gfem.gui import pages
 
     assert window.page_result.edges.isChecked(), "小さなモデルでは稜線を出す"
 
     # 大きなモデルのつもりで開き直すと、既定で消える
-    monkeypatch.setattr(mw, "EDGE_LIMIT", 10)
+    monkeypatch.setattr(pages, "EDGE_LIMIT", 10)
     window.page_result._mesh_key = None
     window.page_result.reload()
     assert not window.page_result.edges.isChecked()

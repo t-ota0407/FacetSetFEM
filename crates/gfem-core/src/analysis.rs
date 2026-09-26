@@ -550,23 +550,13 @@ fn apply_reference(
         // ソルバの射影で既に平均ゼロになっている
         ReferencePotential::ZeroMean => return Ok(()),
         ReferencePotential::CathodeMean => {
-            let mut sum = 0.0;
-            let mut weight = 0.0;
-            for e in electrodes
-                .iter()
-                .filter(|e| e.role == ElectrodeRole::Cathode)
-            {
-                let w = e.signed_current.abs();
-                sum += w * e.mean_potential(phi);
-                weight += w;
-            }
-            if weight == 0.0 {
+            if !electrodes.iter().any(|e| e.role == ElectrodeRole::Cathode) {
                 return Err(GfemError::new(
                     ErrorKind::Case,
                     "基準電位に cathode_mean が指定されていますが、陰極がありません",
                 ));
             }
-            sum / weight
+            crate::post::weighted_potential(electrodes, phi, ElectrodeRole::Cathode)
         }
         ReferencePotential::Node(id) => {
             let Some(index) = mesh.nodes.ids().iter().position(|&n| n == id) else {

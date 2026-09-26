@@ -10,6 +10,7 @@
 //! この結果として **E は要素内で完全に一定**（区分定数）になる。
 
 use crate::element::shape::{MAX_ELEMENT_NODES, QuadraturePoint, ShapeFunctions};
+use crate::geom::{cross, dot, scale, sub};
 use crate::material::Conductivity;
 
 /// Tet4 の形状関数勾配と体積。
@@ -127,30 +128,6 @@ impl ShapeFunctions for Tet4 {
 /// 「共通経路と結果が一致すること」をテストで確かめるために置いてある。
 #[derive(Debug, Clone, Copy)]
 pub struct Tet4;
-
-#[inline]
-fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
-}
-
-#[inline]
-fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    ]
-}
-
-#[inline]
-fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
-}
-
-#[inline]
-fn scale(a: [f64; 3], s: f64) -> [f64; 3] {
-    [a[0] * s, a[1] * s, a[2] * s]
-}
 
 #[cfg(test)]
 mod tests {

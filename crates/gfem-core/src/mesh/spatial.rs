@@ -178,59 +178,10 @@ fn choose_dims(extent: [f64; 3], n: usize) -> [usize; 3] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::io::nastran::read_nastran_from;
-    use crate::units::LengthUnit;
-    use std::path::Path;
 
-    /// nx × ny × nz の直方体を Kuhn 分割した四面体メッシュ。
+    /// nx × ny × nz の単位立方体を Kuhn 分割した四面体メッシュ。
     fn box_mesh(nx: usize, ny: usize, nz: usize) -> Mesh {
-        let mut deck = String::new();
-        let node = |i: usize, j: usize, k: usize| (k * (ny + 1) + j) * (nx + 1) + i + 1;
-        for k in 0..=nz {
-            for j in 0..=ny {
-                for i in 0..=nx {
-                    deck.push_str(&format!(
-                        "GRID,{},,{},{},{}\n",
-                        node(i, j, k),
-                        i as f64 / nx as f64,
-                        j as f64 / ny as f64,
-                        k as f64 / nz as f64
-                    ));
-                }
-            }
-        }
-        deck.push_str("PSOLID,1,1\n");
-        // Kuhn の 6 分割
-        const KUHN: [[usize; 4]; 6] = [
-            [0, 1, 3, 7],
-            [0, 1, 7, 5],
-            [0, 5, 7, 4],
-            [0, 3, 2, 7],
-            [0, 6, 4, 7],
-            [0, 2, 6, 7],
-        ];
-        let mut eid = 1;
-        for k in 0..nz {
-            for j in 0..ny {
-                for i in 0..nx {
-                    let corner =
-                        |c: usize| node(i + (c & 1), j + ((c >> 1) & 1), k + ((c >> 2) & 1));
-                    for t in KUHN {
-                        deck.push_str(&format!(
-                            "CTETRA,{eid},1,{},{},{},{}\n",
-                            corner(t[0]),
-                            corner(t[1]),
-                            corner(t[2]),
-                            corner(t[3])
-                        ));
-                        eid += 1;
-                    }
-                }
-            }
-        }
-        read_nastran_from(deck.as_bytes(), Path::new("<test>"), LengthUnit::Meter)
-            .unwrap()
-            .0
+        crate::testing::kuhn_box([nx, ny, nz], [1.0; 3])
     }
 
     #[test]

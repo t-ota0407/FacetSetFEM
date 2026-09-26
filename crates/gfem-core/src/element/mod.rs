@@ -147,15 +147,11 @@ const HEX8_FACES: [&[usize]; 6] = [
 /// Nastran の CTETRA は正の体積になる節点順序を要求するため、負の値は
 /// 節点順序の反転を意味する（読み込み時に検出して警告する）。
 pub fn tet4_signed_volume(p: &[[f64; 3]; 4]) -> f64 {
-    let a = [p[1][0] - p[0][0], p[1][1] - p[0][1], p[1][2] - p[0][2]];
-    let b = [p[2][0] - p[0][0], p[2][1] - p[0][1], p[2][2] - p[0][2]];
-    let c = [p[3][0] - p[0][0], p[3][1] - p[0][1], p[3][2] - p[0][2]];
-    let cross = [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    ];
-    (cross[0] * c[0] + cross[1] * c[1] + cross[2] * c[2]) / 6.0
+    use crate::geom::{cross, dot, sub};
+    let a = sub(p[1], p[0]);
+    let b = sub(p[2], p[0]);
+    let c = sub(p[3], p[0]);
+    dot(cross(a, b), c) / 6.0
 }
 
 /// 節点集合の最大辺長。退化判定を無次元化するために使う。

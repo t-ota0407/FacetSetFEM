@@ -18,6 +18,7 @@ use crate::case::ElectrodeRole;
 use crate::element::shape::{self, MAX_ELEMENT_NODES, ShapeFunctions};
 use crate::element::{ElementKind, Hex8, Penta6, tet4};
 use crate::error::{GfemError, Result};
+use crate::geom::{dot, norm};
 use crate::material::Conductivity;
 use crate::mesh::{Mesh, PropId};
 use crate::solver::reduce;
@@ -26,8 +27,8 @@ use std::collections::BTreeMap;
 /// エネルギー収支の相対誤差の許容値（SPEC §5.4）。
 pub const ENERGY_TOLERANCE: f64 = 1.0e-6;
 
-/// 電流保存の許容値（SPEC §2.2）。
-pub const CURRENT_BALANCE_TOLERANCE: f64 = 1.0e-12;
+/// 電流保存の許容値（SPEC §2.2）。ケースの検証と同じ値を使う。
+pub use crate::case::CURRENT_BALANCE_TOLERANCE;
 
 /// 離散残差 ‖Kφ − f‖/‖f‖ が収束判定しきい値の何倍を超えたら警告するか（SPEC §5.4）。
 ///
@@ -195,7 +196,7 @@ fn element_field(
         e_magnitude: norm(field),
         j_magnitude: norm(current),
         // σ|E|² = E·(σE) = E·J。異方性でも成り立つ形にしておく
-        power_density: field[0] * current[0] + field[1] * current[1] + field[2] * current[2],
+        power_density: dot(field, current),
         volume,
     })
 }
@@ -377,8 +378,15 @@ pub fn check_conservation(
     }
 }
 
-/// 同じ役割の電極を電流で重み付けした平均電位。
-fn weighted_potential(electrodes: &[ElectrodeGeometry], phi: &[f64], role: ElectrodeRole) -> f64 {
+/// 同じ役割の電極を電流で重み付けした平均電位（その役割の電極が無ければ 0）。
+///
+/// 電極間インピーダンス（SPEC §5.3）と、基準電位 `cathode_mean` の付け替え
+/// （[`crate::analysis`]）の両方で使う。
+pub(crate) fn weighted_potential(
+    electrodes: &[ElectrodeGeometry],
+    phi: &[f64],
+    role: ElectrodeRole,
+) -> f64 {
     let mut sum = 0.0;
     let mut weight = 0.0;
     for e in electrodes.iter().filter(|e| e.role == role) {
@@ -387,11 +395,6 @@ fn weighted_potential(electrodes: &[ElectrodeGeometry], phi: &[f64], role: Elect
         weight += w;
     }
     if weight > 0.0 { sum / weight } else { 0.0 }
-}
-
-#[inline]
-fn norm(v: [f64; 3]) -> f64 {
-    (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt()
 }
 
 #[cfg(test)]

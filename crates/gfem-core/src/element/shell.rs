@@ -10,6 +10,7 @@
 //! 部分に過剰な電流が集まり、電流密度分布がメッシュ依存に歪むため。
 
 use crate::element::ElementKind;
+use crate::geom::{cross, norm, sub};
 
 /// 面 1 枚の積分量。
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -121,25 +122,6 @@ fn quad4_jacobian(p: &[[f64; 3]], xi: f64, eta: f64) -> ([f64; 3], [f64; 3]) {
         }
     }
     (dxi, deta)
-}
-
-#[inline]
-fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
-}
-
-#[inline]
-fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    ]
-}
-
-#[inline]
-fn norm(a: [f64; 3]) -> f64 {
-    (a[0] * a[0] + a[1] * a[1] + a[2] * a[2]).sqrt()
 }
 
 #[cfg(test)]
