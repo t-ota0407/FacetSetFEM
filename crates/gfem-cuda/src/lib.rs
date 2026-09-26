@@ -44,7 +44,7 @@ pub mod device;
 mod error;
 
 pub use backend::{CudaBackend, CudaCsr, CudaVector};
-pub use device::{DeviceInfo, MIN_COMPUTE_CAPABILITY, devices};
+pub use device::{Device, DeviceInfo, MIN_COMPUTE_CAPABILITY, devices};
 
 use gfem_core::case::Preconditioner;
 use gfem_core::solver::{BackendSolver, LinearSolver};
@@ -81,10 +81,20 @@ pub fn required_memory(n_nodes: usize, nnz: usize, preconditioner: Preconditione
 /// 空き VRAM に対して確保しすぎないための余裕（実測の断片化ぶん）。
 const HEADROOM: f64 = 0.90;
 
+/// 空き VRAM `free` [byte] に `needed` [byte] が収まるか（断片化の余裕を見る）。
+fn fits(needed: usize, free: usize) -> bool {
+    needed <= (free as f64 * HEADROOM) as usize
+}
+
 /// GPU で解けるかを判定し、駄目なら理由を返す。
 ///
 /// `nnz` が分かっていれば渡す。分からない場合は節点あたり 15 非ゼロ（Tet4 の実測値）
 /// で見積もる。前処理によって要る VRAM が違う（AMG は階層を持つ）ので、それも渡す。
+///
+/// **初期化済みの GPU に収まるなら、それを選ぶ**（空きのいちばん多いもの）。ほかの GPU を
+/// 調べ直すには 1 枚ごとにコンテキストを作って捨てる必要があり、60 ms 前後かかる。
+/// どの GPU で解いても答えはビット単位で同じなので、選び方で結果は変わらない。
+/// 収まらないときだけ、見えている GPU をすべて調べて空きのいちばん多いものを選ぶ。
 pub fn can_use_gpu(
     n_nodes: usize,
     nnz: Option<usize>,
@@ -92,6 +102,14 @@ pub fn can_use_gpu(
 ) -> std::result::Result<DeviceInfo, String> {
     let nnz = nnz.unwrap_or(n_nodes * 15);
     let needed = required_memory(n_nodes, nnz, preconditioner);
+
+    if let Some(ready) = device::ready_devices()
+        .into_iter()
+        .filter(|d| fits(needed, d.free_memory))
+        .max_by_key(|d| d.free_memory)
+    {
+        return Ok(ready);
+    }
 
     let all = devices();
     if all.is_empty() {
@@ -110,8 +128,7 @@ pub fn can_use_gpu(
              倍精度演算に使えません"
         ));
     };
-    let budget = (best.free_memory as f64 * HEADROOM) as usize;
-    if needed > budget {
+    if !fits(needed, best.free_memory) {
         return Err(format!(
             "VRAM が足りません: {:.1} GB 必要ですが、GPU {} の空きは {:.1} GB です",
             needed as f64 / 1e9,

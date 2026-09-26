@@ -22,6 +22,7 @@ use gfem_core::assemble::CsrMatrix;
 use gfem_core::error::{GfemError, Result};
 use gfem_core::solver::LinearBackend;
 use gfem_core::solver::reduce::{self, BLOCK};
+use std::sync::Arc;
 
 /// CSR の転送に失敗したときのエラー。VRAM 不足が圧倒的に多いので、そう書く。
 fn upload_err(what: &str, e: &cudarc::driver::DriverError) -> GfemError {
@@ -56,16 +57,20 @@ pub struct CudaVector {
 }
 
 /// CUDA バックエンド。
+///
+/// デバイス（コンテキストとコンパイル済みのカーネル）は同じ GPU を使うバックエンドどうしで
+/// 共有する（[`Device::shared`]）。別のスレッドで同時に解いても、ストリームは 1 本なので
+/// カーネルは順に流れ、それぞれの VRAM は別なので答えは変わらない。
 #[derive(Debug)]
 pub struct CudaBackend {
-    device: Device,
+    device: Arc<Device>,
 }
 
 impl CudaBackend {
-    /// デバイス `ordinal` で初期化する。
+    /// デバイス `ordinal` を使う。初期化はプロセスで初回だけ（[`Device::shared`]）。
     pub fn new(ordinal: usize) -> Result<Self> {
         Ok(Self {
-            device: Device::new(ordinal)?,
+            device: Device::shared(ordinal)?,
         })
     }
 
@@ -152,6 +157,19 @@ impl CudaBackend {
             )));
         }
         Ok(())
+    }
+}
+
+impl Drop for CudaBackend {
+    /// 解くのに使った VRAM を、プールから GPU へ返させる。
+    ///
+    /// cudarc は VRAM をストリーム順序付きのプール（`cuMemAllocAsync`）から取り、解放も
+    /// ストリームに積むだけにする。プールが VRAM を実際に手放すのは次の同期のとき
+    /// （既定の release threshold は 0）。デバイスを使い回すようになってからは、ここで
+    /// 同期しないと、解き終わったあとも VRAM を掴んだままになる（以前はコンテキストごと
+    /// 捨てていたので問題にならなかった）。
+    fn drop(&mut self) {
+        let _ = self.device.stream.synchronize();
     }
 }
 

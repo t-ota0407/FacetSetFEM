@@ -1,10 +1,18 @@
 //! CUDA コンテキストの初期化と、使えるかどうかの判定（SPEC §4.4 / §8 M5）。
+//!
+//! # 初期化は 1 回だけ
+//!
+//! コンテキストの作成と NVRTC によるカーネルのコンパイルは合わせて 0.2 秒ほどかかる。
+//! 以前は解くたびにやり直していて、GPU を調べ直すぶん（1 枚 60 ms 前後）と合わせると
+//! 1 回 0.37 秒——28 万節点の解析本体（約 1 秒）の 4 割近くを毎回払っていた。
+//! いまは初期化済みのデバイスを [`Device::shared`] でプロセスが終わるまで使い回す。
+//! どの GPU で・何度目に解いても答えはビット単位で同じなので、結果には影響しない。
 
 use crate::error::cuda_error;
 use cudarc::driver::{CudaContext, CudaFunction, CudaModule, CudaStream};
 use cudarc::nvrtc::{CompileOptions, compile_ptx_with_opts};
 use gfem_core::error::{GfemError, Result};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// 倍精度演算に必要な Compute Capability（SPEC §4.4）。
 pub const MIN_COMPUTE_CAPABILITY: (i32, i32) = (6, 0);
@@ -26,7 +34,7 @@ pub struct DeviceInfo {
     pub compute_capability: (i32, i32),
     /// 総 VRAM [byte]
     pub total_memory: usize,
-    /// 空き VRAM [byte]
+    /// 空き VRAM [byte]（調べた時点の値）
     pub free_memory: usize,
 }
 
@@ -57,6 +65,30 @@ fn probe(ordinal: usize) -> Option<DeviceInfo> {
     })
 }
 
+/// 初期化済みのデバイス（デバイス番号ごとに 1 つ）。プロセスが終わるまで持ち続ける。
+///
+/// 持ち続けるので、一度 GPU で解いたプロセスはコンテキストのぶんの VRAM（数百 MB）を
+/// 掴んだままになる。解くための VRAM は解き終わるたびに返す（[`crate::CudaBackend`] の `Drop`）。
+static READY: Mutex<Vec<Arc<Device>>> = Mutex::new(Vec::new());
+
+/// 初期化済みのデバイスの素性。空き VRAM は今の値で、調べられなかったものは除く。
+///
+/// コンテキストが生きているので、ここは GPU を調べ直すより桁違いに速い（0.1 ms 未満）。
+pub(crate) fn ready_devices() -> Vec<DeviceInfo> {
+    let ready = READY
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    ready
+        .iter()
+        .filter_map(|d| {
+            Some(DeviceInfo {
+                free_memory: d.free_memory().ok()?,
+                ..d.info.clone()
+            })
+        })
+        .collect()
+}
+
 /// カーネル一式を読み込んだデバイス。
 pub struct Device {
     pub(crate) stream: Arc<CudaStream>,
@@ -82,7 +114,25 @@ impl std::fmt::Debug for Device {
 }
 
 impl Device {
-    /// デバイス `ordinal` を初期化し、カーネルをコンパイルして読み込む。
+    /// デバイス `ordinal` を返す。初回だけ初期化し、以後は同じものを返す。
+    ///
+    /// 同時に呼ばれても初期化は 1 回だけ（初期化の間はロックを持つ）。初期化に失敗したら
+    /// 何も覚えないので、次の呼び出しでやり直す。
+    pub fn shared(ordinal: usize) -> Result<Arc<Device>> {
+        let mut ready = READY
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(device) = ready.iter().find(|d| d.info.ordinal == ordinal) {
+            return Ok(Arc::clone(device));
+        }
+        let device = Arc::new(Device::new(ordinal)?);
+        ready.push(Arc::clone(&device));
+        Ok(device)
+    }
+
+    /// デバイス `ordinal` を新しく初期化し、カーネルをコンパイルして読み込む。
+    ///
+    /// ふつうは使い回す [`Device::shared`] を使う。こちらは呼ぶたびに 0.2 秒ほどかかる。
     pub fn new(ordinal: usize) -> Result<Self> {
         let ctx = CudaContext::new(ordinal).map_err(|e| {
             cuda_error(format!("GPU {ordinal} を初期化できませんでした"), &e).with_hint(
@@ -160,8 +210,16 @@ impl Device {
         })
     }
 
-    /// 使っている GPU の素性。
+    /// 使っている GPU の素性（空き VRAM は初期化した時点の値）。
     pub fn info(&self) -> &DeviceInfo {
         &self.info
+    }
+
+    /// いまの空き VRAM [byte]。
+    pub fn free_memory(&self) -> Result<usize> {
+        self._ctx
+            .mem_get_info()
+            .map(|(free, _)| free)
+            .map_err(|e| cuda_error("空き VRAM を取得できませんでした", &e))
     }
 }
