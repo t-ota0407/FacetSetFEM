@@ -398,13 +398,17 @@ class Session:
     def result_array(self, key: str) -> np.ndarray | None:
         """表示量（`FIELD_ARRAYS` の鍵）の配列。解いていないか、表示量でなければ `None`。
 
-        `Solution` の配列は取り出すたびに丸ごと複製されて numpy に渡る（SPEC §6.3 の
-        zero-copy は未実装）ので、解ごとに 1 度だけ受け取って持っておく。
+        `Solution` の配列は Rust のメモリを複製せずに読み取り専用で見せたもの（SPEC §6.3）。
+        **VTK に渡す前に、解ごとに 1 度だけ複製して持つ。** pyvista は読み取り専用の印を
+        見ずにメモリを共有するので、そのまま渡すと表示側から結果そのものを書き換えられる。
         """
         if self.solution is None or key not in FIELD_ARRAYS:
             return None
         if key not in self._arrays:
-            self._arrays[key] = FIELD_ARRAYS[key](self.solution)
+            values = FIELD_ARRAYS[key](self.solution)
+            if not values.flags.writeable:
+                values = values.copy()
+            self._arrays[key] = values
         return self._arrays[key]
 
     def model_box(self) -> tuple[np.ndarray, np.ndarray]:
@@ -433,8 +437,9 @@ class Session:
                 spec = field_by_key(key)
                 target = grid.cell_data if spec.is_element_value else grid.point_data
                 target[key] = self.result_array(key)
-            grid.cell_data["E [V/m]"] = result.electric_field
-            grid.cell_data["J [A/m2]"] = result.current_density
+            # 読み取り専用のビューは VTK に渡さない（`result_array` の説明を参照）
+            grid.cell_data["E [V/m]"] = result.electric_field.copy()
+            grid.cell_data["J [A/m2]"] = result.current_density.copy()
         self._grid = grid
         return grid
 

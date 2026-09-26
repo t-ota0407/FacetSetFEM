@@ -26,7 +26,8 @@ use gfem_core::mesh::{Plane, TriangleMesh};
 use gfem_core::post::RegionStats;
 use gfem_core::provenance::{Provenance, SourceTree};
 use gfem_core::{Analysis, LengthUnit, VtuOptions};
-use numpy::{IntoPyArray, PyArray1, PyArray2, PyArrayMethods};
+use numpy::ndarray::{ArrayView1, ArrayView2, Dimension};
+use numpy::{IntoPyArray, PyArray, PyArray1, PyArray2, PyArrayMethods};
 use pyo3::create_exception;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
@@ -80,9 +81,45 @@ fn array1(py: Python<'_>, v: Vec<f64>) -> Bound<'_, PyArray1<f64>> {
     v.into_pyarray(py)
 }
 
-fn array2(py: Python<'_>, v: Vec<f64>, cols: usize) -> PyResult<Bound<'_, PyArray2<f64>>> {
-    let rows = v.len() / cols;
-    v.into_pyarray(py).reshape([rows, cols])
+/// `data` を、それを持つ Python オブジェクト `owner` を親にした**読み取り専用**の numpy 配列
+/// として渡す。**複製しない**（SPEC §6.3 の zero-copy）。
+///
+/// 安全である理由: numpy 配列は `owner` を親として参照し続けるので、配列が生きている間
+/// `owner` は解放されない。`owner` は `frozen` の pyclass（`Solution` / `Mesh`）で、`data` を
+/// 書き換えたり作り直したりする手段が無いので、見せているメモリが動くことも変わることもない。
+///
+/// Python から書き換えると Rust 側の計算（領域統計・VTU の書き出しなど）が狂うので、
+/// 書き込みは禁じる。親が numpy 配列ではないので、Python 側から書き込み可に戻すこともできない。
+/// ただし pyvista（VTK）はこの印を見ずにメモリを共有するので、その先からは書き換えられる。
+/// だから座標のように壊れると以後の解析すべてが狂うもの（`Mesh.points`）には使わない。
+/// 配列を持っている間は `owner` 全体が解放されない（独立に持ちたければ `.copy()`）。
+fn view1<'py>(owner: &Bound<'py, PyAny>, data: &[f64]) -> Bound<'py, PyArray1<f64>> {
+    // SAFETY: 上の説明のとおり、`data` は `owner` が生きている間動かず、変わらない
+    let array = unsafe { PyArray1::borrow_from_array(&ArrayView1::from(data), owner.clone()) };
+    read_only(array)
+}
+
+/// [`view1`] の 2 次元版。`data` を `cols` 列ずつに区切った `(len / cols, cols)` の配列。
+fn view2<'py>(
+    owner: &Bound<'py, PyAny>,
+    data: &[f64],
+    cols: usize,
+) -> PyResult<Bound<'py, PyArray2<f64>>> {
+    let view = ArrayView2::from_shape((data.len() / cols, cols), data).map_err(|e| {
+        to_py(gfem_core::GfemError::internal(format!(
+            "配列を {cols} 列に区切れません（{} 要素）: {e}",
+            data.len()
+        )))
+    })?;
+    // SAFETY: view1 と同じ
+    let array = unsafe { PyArray2::borrow_from_array(&view, owner.clone()) };
+    Ok(read_only(array))
+}
+
+/// numpy 配列の書き込み可の印を外す。
+fn read_only<D: Dimension>(array: Bound<'_, PyArray<f64, D>>) -> Bound<'_, PyArray<f64, D>> {
+    let readonly = array.readwrite().make_nonwriteable();
+    (*readonly).clone()
 }
 
 // --- 読み込みレポート -------------------------------------------------------
@@ -346,8 +383,19 @@ impl PyMesh {
     }
 
     /// 節点座標 `(n_nodes, 3)` [m]。
+    ///
+    /// **呼ぶたびに複製する**（`Solution` の配列と違って zero-copy にしない）。pyvista などは
+    /// numpy の読み取り専用の印を見ずにメモリを共有し、その先から書き換えられてしまう。
+    /// 座標が書き換わると、このメッシュで解くものが以後すべて黙って狂うので、ここは
+    /// 安全を取る。節点座標は要素ごとの配列より小さい（頭部クラスで 16 MB）。
     fn points<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<f64>>> {
-        array2(py, self.inner.nodes.coords().to_vec(), 3)
+        let rows = self.inner.nodes.len();
+        self.inner
+            .nodes
+            .coords()
+            .to_vec()
+            .into_pyarray(py)
+            .reshape([rows, 3])
     }
 
     /// ソリッド要素ごとの PID `(n_solid_elements,)`。要素値配列と同じ並び。
@@ -1052,45 +1100,50 @@ impl PySolution {
     }
 
     /// 節点電位 φ [V]、`(n_nodes,)`。
+    ///
+    /// この getter を含め、結果の配列は**複製せずに読み取り専用で**渡す（SPEC §6.3）。
+    /// 何度呼んでも同じメモリを指すので速いが、書き換えはできない（要るなら `.copy()`）。
+    /// pyvista などに渡してその先で書き換えるなら、先に `.copy()` すること（pyvista は
+    /// 読み取り専用の印を見ずにメモリを共有するので、この結果そのものが書き換わる）。
     #[getter]
-    fn potential<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
-        array1(py, self.inner.potential.clone())
+    fn potential<'py>(slf: &Bound<'py, Self>) -> Bound<'py, PyArray1<f64>> {
+        view1(slf.as_any(), &slf.get().inner.potential)
     }
 
     /// 電界 E [V/m]、`(n_elements, 3)`。Tet4 では要素内で一定。
     #[getter]
-    fn electric_field<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<f64>>> {
-        array2(py, self.inner.fields.electric_field.clone(), 3)
+    fn electric_field<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyArray2<f64>>> {
+        view2(slf.as_any(), &slf.get().inner.fields.electric_field, 3)
     }
 
     /// 電流密度 J [A/m²]、`(n_elements, 3)`。
     #[getter]
-    fn current_density<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<f64>>> {
-        array2(py, self.inner.fields.current_density.clone(), 3)
+    fn current_density<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyArray2<f64>>> {
+        view2(slf.as_any(), &slf.get().inner.fields.current_density, 3)
     }
 
     /// |E| [V/m]、`(n_elements,)`。**最大値の評価にはこの要素値を使うこと**。
     #[getter]
-    fn e_magnitude<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
-        array1(py, self.inner.fields.e_magnitude.clone())
+    fn e_magnitude<'py>(slf: &Bound<'py, Self>) -> Bound<'py, PyArray1<f64>> {
+        view1(slf.as_any(), &slf.get().inner.fields.e_magnitude)
     }
 
     /// |J| [A/m²]、`(n_elements,)`。
     #[getter]
-    fn j_magnitude<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
-        array1(py, self.inner.fields.j_magnitude.clone())
+    fn j_magnitude<'py>(slf: &Bound<'py, Self>) -> Bound<'py, PyArray1<f64>> {
+        view1(slf.as_any(), &slf.get().inner.fields.j_magnitude)
     }
 
     /// 電力密度 σ|E|² [W/m³]、`(n_elements,)`。
     #[getter]
-    fn power_density<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
-        array1(py, self.inner.fields.power_density.clone())
+    fn power_density<'py>(slf: &Bound<'py, Self>) -> Bound<'py, PyArray1<f64>> {
+        view1(slf.as_any(), &slf.get().inner.fields.power_density)
     }
 
     /// 要素体積 [m³]、`(n_elements,)`。
     #[getter]
-    fn element_volume<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
-        array1(py, self.inner.fields.volume.clone())
+    fn element_volume<'py>(slf: &Bound<'py, Self>) -> Bound<'py, PyArray1<f64>> {
+        view1(slf.as_any(), &slf.get().inner.fields.volume)
     }
 
     /// 要素値を体積重み平均で節点に外挿した値（表示用）。
@@ -1161,8 +1214,8 @@ impl PySolution {
 
     /// 収束履歴（GUI の収束曲線用）。
     #[getter]
-    fn history<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
-        array1(py, self.inner.solver.history.clone())
+    fn history<'py>(slf: &Bound<'py, Self>) -> Bound<'py, PyArray1<f64>> {
+        view1(slf.as_any(), &slf.get().inner.solver.history)
     }
 
     /// 使用したバックエンド名。
