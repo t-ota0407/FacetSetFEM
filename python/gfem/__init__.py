@@ -11,7 +11,7 @@ GUI（`gfem.gui`）もバッチスクリプトも、このモジュールを通�
     >>> case.add_electrode("E2", role="cathode", current=2e-3, shell_pids=[201])
     >>> result = case.solve()
     >>> round(result.impedance, 1)
-    206.4
+    548.6
     >>> result.write_vtu("out.vtu")
 
 ケースファイル（YAML）から一括で回すこともできる:

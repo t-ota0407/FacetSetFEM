@@ -931,6 +931,21 @@ impl PyCase {
             .map_err(to_py)
     }
 
+    /// 実行前の整合性チェックの不備を**全部**集める（SPEC §6.2 の手順 4）。
+    ///
+    /// `(不備, 警告)` をどちらも文字列の一覧で返す（例外は出さない）。不備の 1 件目は
+    /// `validate` が例外にするものと同じ。GUI はこれで不備を一覧にして一度に直させる。
+    fn problems(&self, py: Python<'_>) -> PyResult<(Vec<String>, Vec<String>)> {
+        let mesh = self.mesh.get();
+        let (problems, warnings) = py
+            .detach(|| {
+                mesh.lookup()
+                    .map(|lookup| self.inner.problems_with(&lookup))
+            })
+            .map_err(to_py)?;
+        Ok((problems.iter().map(|p| p.to_string()).collect(), warnings))
+    }
+
     /// 電極ごとの面積と電流密度。面を選びながら確認するために使う（SPEC §6.2 の手順 3）。
     fn electrode_info(&self, py: Python<'_>) -> PyResult<Py<PyList>> {
         let mesh = self.mesh.get();

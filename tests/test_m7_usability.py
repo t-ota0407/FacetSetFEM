@@ -435,7 +435,7 @@ def test_the_sweep_dialog_runs_and_fills_the_table(main_window, sample_bdf, tmp_
             "current"
         )
     )
-    dialog.values.setText("1e-3, 2e-3")
+    dialog.values.setText("1, 2")  # 電流は電極のページと同じ mA で入れる
     dialog.start()
     assert dialog._thread is not None
     dialog._thread.wait(60_000)
@@ -446,7 +446,16 @@ def test_the_sweep_dialog_runs_and_fills_the_table(main_window, sample_bdf, tmp_
 
     assert dialog.table is not None
     assert len(dialog.table) == 2
+    assert [row["current"] for row in dialog.table.rows] == pytest.approx([1e-3, 2e-3])
     assert dialog.result_table.rowCount() == 2
+    # 表の見出しは日本語と単位、振った値は入力と同じ mA で出す
+    assert dialog.result_table.horizontalHeaderItem(0).text() == "刺激電流（全電極） [mA]"
+    assert dialog.result_table.item(1, 0).text() == "2"
+    headings = [
+        dialog.result_table.horizontalHeaderItem(c).text()
+        for c in range(dialog.result_table.columnCount())
+    ]
+    assert "等価抵抗 R [Ω]" in headings and "impedance_ohm" not in headings
     assert dialog.save_button.isEnabled()
 
     path = tmp_path / "sweep.csv"

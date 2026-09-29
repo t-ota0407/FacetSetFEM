@@ -58,7 +58,8 @@ def full_face_bdf(tmp_path_factory, make_sample_mesh) -> Path:
     return out
 
 
-#: サンプルモデルの寸法 [m] と層構成（厚さ [m], σ [S/m]）
+#: サンプルモデルの寸法 [m] と層構成（PID, 厚さ [m], σ [S/m]）。PID 順で、積む順ではない
+#: （z = 0 から muscle・fat・skin の順に積んである。皮膚が電極を貼る上面）
 SLAB_AREA = 0.060 * 0.040
 SLAB_LAYERS = [(1, 0.002, 0.10), (2, 0.004, 0.04), (3, 0.014, 0.35)]
 

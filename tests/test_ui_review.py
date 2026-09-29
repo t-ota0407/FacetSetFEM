@@ -139,7 +139,7 @@ def test_the_isosurface_is_coloured_on_the_whole_model_range(window, qt_app):
     page.field.setCurrentIndex(page.field.findData(FIELD))
     page.mode.setCurrentIndex(page.mode.findData("isosurface"))
     assert FIELD in window.plotter.scalar_bars.keys()
-    lo, hi = window.plotter.mapper.scalar_range
+    lo, hi = window.plotter.scalar_bars[FIELD].GetLookupTable().GetRange()
     assert (lo, hi) == pytest.approx(window.session.field_range(FIELD))
     assert hi > lo
     assert page.iso_value.text().startswith("いまのしきい値")
@@ -253,3 +253,176 @@ def test_closing_asks_about_unsaved_changes(window, monkeypatch):
     event = QCloseEvent()
     window.closeEvent(event)
     assert event.isAccepted()
+
+
+# --- 見やすさ・使い勝手（2026-09 の見直しの続き）-----------------------------
+
+
+def test_the_scalar_bar_title_drops_the_bars_and_splits_the_unit():
+    """VTK の既定のフォントでは `|` が描かれない。量と単位は 2 行に分けて細い帯に収める。"""
+    from gfem.gui.main_window import scalar_bar_title
+
+    assert scalar_bar_title("|J| [A/m2]") == "J\n[A/m2]"
+    assert scalar_bar_title("power density [W/m3]") == "power density\n[W/m3]"
+    assert scalar_bar_title("PID") == "PID"
+
+
+def test_the_scalar_bar_gets_its_own_strip_beside_the_model(window, qt_app):
+    """カラーバーはモデルと別の描画領域（右端の帯）に置き、モデルと重ねない。"""
+    _solve(window, qt_app)
+    main = window.plotter.renderer
+    strip = window._scalar_bar_renderer
+    assert main.GetViewport()[2] < 1.0
+    assert strip.GetViewport()[0] == pytest.approx(main.GetViewport()[2])
+    assert strip.GetActors2D().GetNumberOfItems() >= 1  # バーと見出し
+    window.page_result.show_shape()  # 色分けなし → バーは無く、全幅に戻る
+    assert main.GetViewport()[2] == 1.0
+
+
+def test_coloured_surfaces_are_not_darkened_too_much_by_shading(window, qt_app):
+    """値で塗っている間は環境光を足し、光の当たらない面でも色が読めるようにする。"""
+    from gfem.gui.main_window import SCALAR_LIGHTING
+
+    _solve(window, qt_app)
+    ambients = [
+        actor.GetProperty().GetAmbient()
+        for actor in window.plotter.renderer.actors.values()
+        if hasattr(actor, "GetMapper")
+        and hasattr(actor.GetProperty(), "GetAmbient")
+        and actor.GetMapper().GetScalarVisibility()
+    ]
+    assert SCALAR_LIGHTING["ambient"] in ambients
+
+
+def test_choosing_a_slice_faces_it_and_shows_the_body_outline(window, qt_app):
+    """断面を選ぶと正面から見る向きにし、体の外形を薄く重ねる。"""
+    import numpy as np
+
+    from gfem.gui.main_window import SECTION_CONTEXT_OPACITY
+
+    _solve(window, qt_app)
+    page = window.page_result
+    page.slice_normal.setCurrentText("y")
+    page.mode.setCurrentIndex(page.mode.findData("slice"))
+    direction = np.asarray(window.plotter.renderer.GetActiveCamera().GetDirectionOfProjection())
+    assert abs(direction @ np.array([0.0, 1.0, 0.0])) == pytest.approx(1.0, abs=1e-9)
+    opacities = [
+        actor.GetProperty().GetOpacity()
+        for actor in window.plotter.renderer.actors.values()
+        if hasattr(actor, "GetProperty")
+    ]
+    assert SECTION_CONTEXT_OPACITY in opacities
+
+
+def test_other_electrodes_are_outlined_while_one_is_edited(window):
+    """選んでいない電極も、縁を役割の色で描いて位置を見せる。"""
+    from gfem.gui.main_window import ELECTRODE_OUTLINE_COLORS
+    from pyvista import Color
+
+    outline = window.session.electrode_outline("E1")
+    assert outline.n_cells > 0
+    window.select_item("electrode", "E2")
+    anode = Color(ELECTRODE_OUTLINE_COLORS["anode"]).float_rgb
+    colours = [
+        tuple(actor.GetProperty().GetColor())
+        for actor in window.plotter.renderer.actors.values()
+        if hasattr(actor, "GetProperty")
+    ]
+    assert any(c == pytest.approx(anode) for c in colours), "E1（陽極）の縁が無い"
+
+
+def test_a_new_electrode_is_selected_right_away(window):
+    window.add_electrode()
+    assert window.pages.currentWidget() is window.page_electrode
+    assert window.page_electrode.name == "E3"
+    assert window.tree.currentItem().text(0).startswith("E3")
+
+
+def test_a_bad_tolerance_is_explained_where_it_was_typed(window):
+    from gfem.gui.pages import tolerance_problem
+
+    assert tolerance_problem("1e-10") is None
+    assert "範囲外" in tolerance_problem("5")
+    assert "範囲外" in tolerance_problem("-1")
+    assert "数値として読めません" in tolerance_problem("abc")
+    window.select_item("solver", None)
+    page = window.page_solver
+    page.tolerance.setText("5")
+    page.tolerance.editingFinished.emit()
+    assert window.session.study.solver.tolerance == 1e-10, "範囲外の値は入れない"
+    assert page.tolerance.text() == "1e-10"
+    assert not page.tolerance_error.isHidden()
+
+
+def test_every_problem_is_listed_at_once(sample_bdf):
+    """整合性チェックは不備を全部まとめて出す（以前は 1 件ずつ）。"""
+    s = Session()
+    s.open_mesh(sample_bdf, "mm")
+    s.add_electrode("E1", role="anode", current=0.0, shell_pids=[101])
+    s.add_electrode("E2", role="anode", current=CURRENT, shell_pids=[101])
+    problems, _warnings = s.problems()
+    assert len(problems) == 4, problems
+    assert "導電率が未設定" in problems[0]
+    assert any("cathode が定義されていません" in p for p in problems)
+    assert any("総電流が正の有限値ではありません" in p for p in problems)
+    assert any("両方に含まれています" in p for p in problems)
+
+
+def test_an_unset_conductivity_reads_as_unset(window):
+    page = window.page_region
+    window.session.set_conductivity(2, 0.0)
+    page.bind(2)
+    assert page.sigma_spin.text() == "未設定"
+    page.bind(1)
+    assert page.sigma_spin.text() == "0.1 S/m", "末尾の 0 は落とす"
+
+
+def test_removing_a_patch_needs_a_selection(window):
+    page = window.page_electrode
+    window.select_item("electrode", "E1")
+    assert not page.remove_patch_button.isEnabled()
+    window.session.add_patch("E1", (0.030, 0.020, 0.020), 0.005, pid=1)
+    page.bind("E1")
+    assert not page.remove_patch_button.isEnabled()
+    page.patch_list.setCurrentRow(0)
+    assert page.remove_patch_button.isEnabled()
+
+
+def test_only_the_controls_of_the_current_mode_can_be_used(window, qt_app):
+    page = window.page_result
+    assert not page.slice_box.isEnabled() and not page.iso_box.isEnabled()
+    assert not page.stream_box.isEnabled(), "解く前は流線を引けない"
+    _solve(window, qt_app)
+    assert page.stream_box.isEnabled()
+    page.mode.setCurrentIndex(page.mode.findData("clip"))
+    assert page.slice_box.isEnabled() and not page.iso_box.isEnabled()
+    page.mode.setCurrentIndex(page.mode.findData("isosurface"))
+    assert page.iso_box.isEnabled() and not page.slice_box.isEnabled()
+
+
+def test_statistics_carry_units_and_a_zero_reference_reads_as_zero(sample_bdf):
+    from gfem.gui.state import REGION_STATS_COLUMNS
+
+    assert "|J| 最大 [A/m²]" in REGION_STATS_COLUMNS
+    assert "|E| 99% [V/m]" in REGION_STATS_COLUMNS
+    s = Session()
+    s.open_mesh(sample_bdf, "mm")
+    _setup(s)
+    s.study.output.reference_potential = "cathode_mean"
+    s.solve()
+    summary = s.result_summary()
+    assert "E2: 0 V" in summary, summary  # 以前は -5.3e-17 V と出ていた
+    assert "電位の基準: 陰極の平均 = 0 V" in summary
+
+
+def test_the_sample_model_has_skin_under_the_electrodes(sample_bdf):
+    """サンプルモデルの電極は皮膚（PID 1）の上に貼ってある（以前は筋肉の上だった）。"""
+    s = Session()
+    s.open_mesh(sample_bdf, "mm")
+    _setup(s)
+    faces = s.electrode_polydata("E1")
+    top = faces.points[:, 2].max()
+    assert top == pytest.approx(0.020)
+    pick = s.pick_patch((0.030, 0.020, 0.020), 0.001)
+    assert pick["n_faces"] > 0
+    assert s.pick_patch((0.030, 0.020, 0.020), 0.001, pid=1)["n_faces"] == pick["n_faces"]

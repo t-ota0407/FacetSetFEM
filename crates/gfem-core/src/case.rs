@@ -565,7 +565,24 @@ impl Case {
     /// 解析（[`crate::analysis`]）は同じ `FaceLookup` で検証と荷重の組み立てをするので、
     /// パッチ選択の索引を 2 度作らずに済む。
     pub fn validate_with(&self, lookup: &FaceLookup) -> Result<Vec<String>> {
+        let (mut problems, warnings) = self.problems_with(lookup);
+        if problems.is_empty() {
+            Ok(warnings)
+        } else {
+            Err(problems.remove(0))
+        }
+    }
+
+    /// 実行前の整合性チェックの**不備を全部**集める（SPEC §6.2 の手順 4）。
+    ///
+    /// 戻り値は `(不備, 警告)`。[`validate_with`](Self::validate_with) は不備の 1 件目を
+    /// エラーとして返すが、GUI はこれで全部を一覧にして一度に直せるようにする
+    /// （以前は 1 件ずつしか出ず、直しては F5 を押すことを繰り返した）。
+    /// 並びは `validate_with` が返してきた順（1 件目は以前と同じ不備になる）。
+    /// ほかの不備から当然に従うもの（陰極が無いときの電流の不一致など）は重ねて出さない。
+    pub fn problems_with(&self, lookup: &FaceLookup) -> (Vec<GfemError>, Vec<String>) {
         let (mesh, surface) = (lookup.mesh(), lookup.surface());
+        let mut problems: Vec<GfemError> = Vec::new();
         let mut warnings = Vec::new();
 
         // --- 導電率 ---
@@ -576,15 +593,17 @@ impl Case {
             .map(|pid| pid.to_string())
             .collect();
         if !missing.is_empty() {
-            return Err(GfemError::new(
-                ErrorKind::Case,
-                format!(
-                    "導電率が未設定の領域があります（{} 件）: PID={}",
-                    missing.len(),
-                    format_sample_list(&missing, SAMPLE_LIMIT)
-                ),
-            )
-            .with_hint("全ての PSOLID の PID に σ [S/m] を割り当ててください"));
+            problems.push(
+                GfemError::new(
+                    ErrorKind::Case,
+                    format!(
+                        "導電率が未設定の領域があります（{} 件）: PID={}",
+                        missing.len(),
+                        format_sample_list(&missing, SAMPLE_LIMIT)
+                    ),
+                )
+                .with_hint("全ての PSOLID の PID に σ [S/m] を割り当ててください"),
+            );
         }
         for pid in self.conductivity.keys() {
             if !region_pids.contains(pid) {
@@ -596,16 +615,52 @@ impl Case {
 
         // --- 電極の有無 ---
         if self.electrodes.is_empty() {
-            return Err(GfemError::new(ErrorKind::Case, "電極が定義されていません")
-                .with_hint("陽極（anode）と陰極（cathode）を最低 1 つずつ定義してください"));
+            problems.push(
+                GfemError::new(ErrorKind::Case, "電極が定義されていません")
+                    .with_hint("陽極（anode）と陰極（cathode）を最低 1 つずつ定義してください"),
+            );
+        } else {
+            self.electrode_problems(lookup, surface, &mut problems);
         }
+
+        // --- ソルバ設定 ---
+        if !(self.solver.tolerance > 0.0 && self.solver.tolerance < 1.0) {
+            problems.push(
+                GfemError::new(
+                    ErrorKind::Case,
+                    format!("収束判定しきい値が範囲外です: {}", self.solver.tolerance),
+                )
+                .with_hint("0 < tolerance < 1 の相対残差で指定してください（既定 1e-10）"),
+            );
+        }
+        if self.solver.max_iterations == 0 {
+            problems.push(
+                GfemError::new(ErrorKind::Case, "最大反復回数が 0 です")
+                    .with_hint("1 以上を指定してください（既定 50000）"),
+            );
+        }
+
+        (problems, warnings)
+    }
+
+    /// 電極の不備（役割・名前・電流・電流保存・電極面）を `problems` に足す。
+    fn electrode_problems(
+        &self,
+        lookup: &FaceLookup,
+        surface: &Surface,
+        problems: &mut Vec<GfemError>,
+    ) {
+        let mut roles_complete = true;
         for role in [ElectrodeRole::Anode, ElectrodeRole::Cathode] {
             if !self.electrodes.iter().any(|e| e.role == role) {
-                return Err(GfemError::new(
-                    ErrorKind::Case,
-                    format!("{} が定義されていません", role.label()),
-                )
-                .with_hint("電流の流入口と流出口の両方が必要です"));
+                roles_complete = false;
+                problems.push(
+                    GfemError::new(
+                        ErrorKind::Case,
+                        format!("{} が定義されていません", role.label()),
+                    )
+                    .with_hint("電流の流入口と流出口の両方が必要です"),
+                );
             }
         }
         // 電極名は結果（平均電位・実行サマリ）とケースファイルで電極を指す鍵。
@@ -613,56 +668,73 @@ impl Case {
         // 捕まらず、荷重が打ち消し合って「R = 0 Ω・警告なし」という結果が出てしまう
         let mut seen_names: BTreeSet<&str> = BTreeSet::new();
         let mut duplicated: BTreeSet<&str> = BTreeSet::new();
+        let mut blank_name = false;
         for e in &self.electrodes {
             if e.name.trim().is_empty() {
-                return Err(GfemError::new(ErrorKind::Case, "名前が空の電極があります")
-                    .with_hint("電極には E1・E2 のような名前を付けてください"));
-            }
-            if !seen_names.insert(e.name.as_str()) {
+                blank_name = true;
+            } else if !seen_names.insert(e.name.as_str()) {
                 duplicated.insert(e.name.as_str());
             }
         }
+        if blank_name {
+            problems.push(
+                GfemError::new(ErrorKind::Case, "名前が空の電極があります")
+                    .with_hint("電極には E1・E2 のような名前を付けてください"),
+            );
+        }
         if !duplicated.is_empty() {
             let names: Vec<String> = duplicated.iter().map(|n| n.to_string()).collect();
-            return Err(GfemError::new(
-                ErrorKind::Case,
-                format!(
-                    "同じ名前の電極が複数あります: {}",
-                    format_sample_list(&names, SAMPLE_LIMIT)
-                ),
-            )
-            .with_hint(
-                "電極名は結果とケースファイルで電極を指す鍵なので、電極ごとに違う名前にしてください",
-            ));
-        }
-        for e in &self.electrodes {
-            if !e.current.is_finite() || e.current <= 0.0 {
-                return Err(GfemError::new(
+            problems.push(
+                GfemError::new(
                     ErrorKind::Case,
                     format!(
-                        "電極 {} の総電流が正の有限値ではありません: {} A",
-                        e.name, e.current
+                        "同じ名前の電極が複数あります: {}",
+                        format_sample_list(&names, SAMPLE_LIMIT)
                     ),
                 )
                 .with_hint(
-                    "総電流は正の値で指定し、向きは role（anode / cathode）で表してください",
-                ));
+                    "電極名は結果とケースファイルで電極を指す鍵なので、電極ごとに違う名前にしてください",
+                ),
+            );
+        }
+        let mut currents_valid = true;
+        for e in &self.electrodes {
+            if !e.current.is_finite() || e.current <= 0.0 {
+                currents_valid = false;
+                problems.push(
+                    GfemError::new(
+                        ErrorKind::Case,
+                        format!(
+                            "電極 {} の総電流が正の有限値ではありません: {} A",
+                            e.name, e.current
+                        ),
+                    )
+                    .with_hint(
+                        "総電流は正の値で指定し、向きは role（anode / cathode）で表してください",
+                    ),
+                );
             }
         }
 
         // --- 電流保存（SPEC §2.2 の適合条件）---
+        // 役割が欠けている・電流が不正なときは、不一致はその結果なので重ねて出さない
         let anode = self.total_anode_current();
         let cathode = self.total_cathode_current();
         let scale = anode.max(cathode);
-        if (anode - cathode).abs() > CURRENT_BALANCE_TOLERANCE * scale {
-            return Err(GfemError::new(
-                ErrorKind::Case,
-                format!("総流入電流と総流出電流が一致しません: 陽極 {anode} A / 陰極 {cathode} A"),
-            )
-            .with_hint(
-                "全 Neumann 境界の問題なので、Σ I_k = 0 でなければ解が存在しません（SPEC §2.2）。\
-                 電極の電流値を見直してください",
-            ));
+        if roles_complete
+            && currents_valid
+            && (anode - cathode).abs() > CURRENT_BALANCE_TOLERANCE * scale
+        {
+            problems.push(
+                GfemError::new(
+                    ErrorKind::Case,
+                    format!("総流入電流と総流出電流が一致しません: 陽極 {anode} A / 陰極 {cathode} A"),
+                )
+                .with_hint(
+                    "全 Neumann 境界の問題なので、Σ I_k = 0 でなければ解が存在しません（SPEC §2.2）。\
+                     電極の電流値を見直してください",
+                ),
+            );
         }
 
         // --- 電極面 ---
@@ -670,8 +742,15 @@ impl Case {
         // 指していても重複として捕まえられるようにするため。
         // 値は電極の通し番号（名前で比べると、名前の検査をすり抜けたときに見逃す）
         let mut used_faces: BTreeMap<FaceKey, usize> = BTreeMap::new();
+        let mut overlapping: BTreeSet<(usize, usize)> = BTreeSet::new();
         for (index, e) in self.electrodes.iter().enumerate() {
-            let faces = resolve_faces(lookup, e)?;
+            let faces = match resolve_faces(lookup, e) {
+                Ok(faces) => faces,
+                Err(err) => {
+                    problems.push(err);
+                    continue;
+                }
+            };
             let mut off_surface: Vec<String> = Vec::new();
             for &face in &faces {
                 let (_, nodes) = lookup.face_nodes(face);
@@ -681,51 +760,42 @@ impl Case {
                 }
                 if let Some(other) = used_faces.insert(face_key(nodes), index)
                     && other != index
+                    && overlapping.insert((other, index))
                 {
-                    return Err(GfemError::new(
-                        ErrorKind::Case,
-                        format!(
-                            "{} が電極 {} と {} の両方に含まれています",
-                            lookup.label(face),
-                            self.electrodes[other].name,
-                            e.name
-                        ),
-                    )
-                    .with_hint("1 つの面を 2 つの電極に割り当てることはできません"));
+                    // 同じ組の重なりは最初の 1 面だけ出す（全部出すと一覧が埋まる）
+                    problems.push(
+                        GfemError::new(
+                            ErrorKind::Case,
+                            format!(
+                                "{} が電極 {} と {} の両方に含まれています",
+                                lookup.label(face),
+                                self.electrodes[other].name,
+                                e.name
+                            ),
+                        )
+                        .with_hint("1 つの面を 2 つの電極に割り当てることはできません"),
+                    );
                 }
             }
             if !off_surface.is_empty() {
                 // SPEC §11.1: 電極は必ず体表面にある
-                return Err(GfemError::new(
-                    ErrorKind::Case,
-                    format!(
-                        "電極 {} の面のうち {} 枚が体表面（外表面）に載っていません: {}",
-                        e.name,
-                        off_surface.len(),
-                        format_sample_list(&off_surface, SAMPLE_LIMIT)
+                problems.push(
+                    GfemError::new(
+                        ErrorKind::Case,
+                        format!(
+                            "電極 {} の面のうち {} 枚が体表面（外表面）に載っていません: {}",
+                            e.name,
+                            off_surface.len(),
+                            format_sample_list(&off_surface, SAMPLE_LIMIT)
+                        ),
+                    )
+                    .with_hint(
+                        "経皮電気刺激では電極は必ず体表面にあります（SPEC §11.1）。\
+                         内部面を指しているか、シェル要素の節点がソリッドの面と一致していません",
                     ),
-                )
-                .with_hint(
-                    "経皮電気刺激では電極は必ず体表面にあります（SPEC §11.1）。\
-                     内部面を指しているか、シェル要素の節点がソリッドの面と一致していません",
-                ));
+                );
             }
         }
-
-        // --- ソルバ設定 ---
-        if !(self.solver.tolerance > 0.0 && self.solver.tolerance < 1.0) {
-            return Err(GfemError::new(
-                ErrorKind::Case,
-                format!("収束判定しきい値が範囲外です: {}", self.solver.tolerance),
-            )
-            .with_hint("0 < tolerance < 1 の相対残差で指定してください（既定 1e-10）"));
-        }
-        if self.solver.max_iterations == 0 {
-            return Err(GfemError::new(ErrorKind::Case, "最大反復回数が 0 です")
-                .with_hint("1 以上を指定してください（既定 50000）"));
-        }
-
-        Ok(warnings)
     }
 }
 
@@ -1088,6 +1158,36 @@ CTRIA3,200,201,1,2,4
         let e = case.validate(&mesh, &surface).unwrap_err();
         assert!(e.to_string().contains("導電率が未設定"), "{e}");
         assert!(e.to_string().contains("PID=1"), "{e}");
+    }
+
+    #[test]
+    fn lists_every_problem_at_once() {
+        // GUI は不備を一覧にして一度に直させる。validate は 1 件目だけを返す
+        let (mesh, surface) = setup();
+        let mut case = valid_case();
+        case.conductivity.clear();
+        case.electrodes[0].current = 0.0;
+        case.electrodes[1].shell_pids = vec![101];
+        case.solver.tolerance = 5.0;
+        let lookup = FaceLookup::new(&mesh, &surface);
+        let (problems, _) = case.problems_with(&lookup);
+        let text: Vec<String> = problems.iter().map(|p| p.to_string()).collect();
+        assert_eq!(problems.len(), 4, "{text:#?}");
+        assert!(text[0].contains("導電率が未設定"), "{text:#?}");
+        assert!(
+            text[1].contains("総電流が正の有限値ではありません"),
+            "{text:#?}"
+        );
+        assert!(text[2].contains("両方に含まれています"), "{text:#?}");
+        assert!(text[3].contains("収束判定しきい値が範囲外"), "{text:#?}");
+        // 電流が不正なら、電流の不一致は重ねて出さない
+        assert!(
+            !text.iter().any(|t| t.contains("一致しません")),
+            "{text:#?}"
+        );
+        // validate は同じ 1 件目を返す
+        let first = case.validate(&mesh, &surface).unwrap_err().to_string();
+        assert_eq!(first, text[0]);
     }
 
     #[test]

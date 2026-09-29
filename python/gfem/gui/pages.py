@@ -178,6 +178,8 @@ class RegionPage(ScrollPage):
         self.sigma_spin.setRange(0.0, 1000.0)
         self.sigma_spin.setSingleStep(0.01)
         self.sigma_spin.setSuffix(" S/m")
+        # σ = 0 は未設定を表す（Session.open_mesh）。「0 S/m」と出すと入れた値に見える
+        self.sigma_spin.set_floor_text("未設定")
         form.addRow("PID", self.pid_label)
         form.addRow("名前", self.name_edit)
         form.addRow("導電率 σ", self.sigma_spin)
@@ -372,7 +374,11 @@ class ElectrodePage(ScrollPage):
         self.patch_list = QListWidget()
         # 1 枚を 2 行で出す（形と場所 / 面数・面積・指定面積とのずれ）。1 行だと
         # 肝心のずれが横スクロールの先に隠れる
-        self.patch_list.setMaximumHeight(120)
+        # 高さは行の高さから決める（1 枚 2 行で、2〜3 枚ぶん）。以前は 120 px 固定で、
+        # 高 DPI の画面では 1 枚ぶんしか見えなかった
+        line = self.patch_list.fontMetrics().lineSpacing()
+        self.patch_list.setMinimumHeight(int(line * 4.8))
+        self.patch_list.setMaximumHeight(int(line * 7.2))
         self.patch_list.setWordWrap(True)
         mode_row = QHBoxLayout()
         self.add_mode = QPushButton("追加")
@@ -407,6 +413,7 @@ class ElectrodePage(ScrollPage):
         button_row.addWidget(self.reshape_patch_button)
         self.remove_patch_button = QPushButton("選んだパッチを外す")
         self.remove_patch_button.clicked.connect(self._remove_patch)
+        self.remove_patch_button.setEnabled(False)
         button_row.addWidget(self.remove_patch_button)
         self.clear_edits_button = QPushButton("手直しを消す")
         self.clear_edits_button.setToolTip(
@@ -545,6 +552,7 @@ class ElectrodePage(ScrollPage):
                 item.setToolTip(AREA_MISMATCH_HINT)
             self.patch_list.addItem(item)
         self.reshape_patch_button.setEnabled(False)
+        self.remove_patch_button.setEnabled(False)  # 一覧で選ぶまで押せない
 
     def _reload_hand_edits(self) -> None:
         """手で足した面・外した面の枚数を出す。"""
@@ -624,6 +632,7 @@ class ElectrodePage(ScrollPage):
         spec = self.window.session.electrode(self.name) if self.name else None
         valid = spec is not None and 0 <= row < len(spec.patches)
         self.reshape_patch_button.setEnabled(valid)
+        self.remove_patch_button.setEnabled(valid)
         if not valid:
             return
         patch = spec.patches[row]
@@ -861,6 +870,20 @@ class ElectrodePage(ScrollPage):
         )
 
 
+def tolerance_problem(text: str) -> str | None:
+    """収束判定の入力の不備（無ければ None）。範囲はコアの検証（`Case::validate`）と同じ。"""
+    try:
+        value = float(text)
+    except ValueError:
+        return f"「{text.strip()}」を数値として読めません。1e-10 のように入れてください。元の値に戻しました。"
+    if not 0.0 < value < 1.0:
+        return (
+            f"収束判定 {value:g} は範囲外です。0 より大きく 1 より小さい相対残差にしてください"
+            "（既定 1e-10）。元の値に戻しました。"
+        )
+    return None
+
+
 class SolverPage(ScrollPage):
     """ソルバ設定（SPEC §4.3）。"""
 
@@ -887,6 +910,12 @@ class SolverPage(ScrollPage):
         form.addRow("計算バックエンド", self.backend)
         form.addRow("基準電位", self.reference)
         layout.addLayout(form)
+        # 収束判定が読めない・範囲外のとき、その場で理由を出す（値は元に戻す）
+        self.tolerance_error = QLabel("")
+        self.tolerance_error.setWordWrap(True)
+        self.tolerance_error.setStyleSheet(f"color: {STALE_COLOR};")
+        self.tolerance_error.setVisible(False)
+        layout.addWidget(self.tolerance_error)
         layout.addWidget(
             QLabel(
                 "ゲージ固定は射影（平均ゼロ）で行います。\n"
@@ -919,6 +948,7 @@ class SolverPage(ScrollPage):
         if study is None:
             return
         self._loading = True
+        self.tolerance_error.setVisible(False)
         self.tolerance.setText(f"{study.solver.tolerance:g}")
         self.max_iterations.setValue(study.solver.max_iterations)
         # ケースファイルに選択肢に無い値（`node:<ID>` の基準電位など）が入っていたときに、
@@ -938,10 +968,15 @@ class SolverPage(ScrollPage):
         if study is None or self._loading:
             return
         self.window.checkpoint("ソルバ設定を変更")
-        try:
+        problem = tolerance_problem(self.tolerance.text())
+        if problem is None:
             study.solver.tolerance = float(self.tolerance.text())
-        except ValueError:
+        else:
+            # 以前は負の値や 1 以上も黙って受け付け（F5 を押すまで何も言わない）、
+            # 数値でなければ黙って元に戻していた
             self.tolerance.setText(f"{study.solver.tolerance:g}")
+        self.tolerance_error.setText(problem or "")
+        self.tolerance_error.setVisible(problem is not None)
         study.solver.max_iterations = self.max_iterations.value()
         study.solver.preconditioner = self.preconditioner.currentText()
         study.solver.backend = self.backend.currentText()
@@ -998,7 +1033,7 @@ class ResultPage(ScrollPage):
         layout.addWidget(self.edges)
         layout.addWidget(self.nodes)
 
-        slice_box = QGroupBox("断面 / クリップ")
+        slice_box = self.slice_box = QGroupBox("断面 / クリップ")
         slice_layout = QVBoxLayout(slice_box)
         self.slice_normal = QComboBox()
         self.slice_normal.addItems(["x", "y", "z"])
@@ -1013,7 +1048,7 @@ class ResultPage(ScrollPage):
         slice_layout.addWidget(self.slice_position)
         layout.addWidget(slice_box)
 
-        iso_box = QGroupBox("等値面")
+        iso_box = self.iso_box = QGroupBox("等値面")
         iso_layout = QVBoxLayout(iso_box)
         self.iso_level = QSlider(Qt.Orientation.Horizontal)
         self.iso_level.setRange(0, 100)
@@ -1026,7 +1061,7 @@ class ResultPage(ScrollPage):
         iso_layout.addWidget(self.iso_value)
         layout.addWidget(iso_box)
 
-        stream_box = QGroupBox("ストリームライン")
+        stream_box = self.stream_box = QGroupBox("ストリームライン")
         stream_layout = QVBoxLayout(stream_box)
         self.streamlines = QCheckBox("電流の流線を重ねる")
         self.n_seeds = QSpinBox()
@@ -1060,8 +1095,14 @@ class ResultPage(ScrollPage):
         # （もう別の見方に移っている）。稜線やカラーマップは見方に含めない
         self.field.currentIndexChanged.connect(self._forget_saved_view)
         self.mode.currentIndexChanged.connect(self._forget_saved_view)
+        # 断面・クリップを選んだとき、法線を変えたときは、それが見える向きに視点を向ける
+        self.mode.currentIndexChanged.connect(self._face_section)
+        self.mode.currentIndexChanged.connect(self._update_enabled)
+        self.streamlines.toggled.connect(self._update_enabled)
+        self.slice_normal.currentIndexChanged.connect(self._face_section)
         self.streamlines.toggled.connect(self._forget_saved_view)
         self._update_shape_button()
+        self._update_enabled()
 
     def reload(self) -> None:
         session = self.window.session
@@ -1082,6 +1123,7 @@ class ResultPage(ScrollPage):
         )
         self._loading = False
         self._update_shape_button()
+        self._update_enabled()
 
     def _apply_size_defaults(self) -> None:
         """モデルを開き直したとき、規模に合わせて稜線の既定を決める。
@@ -1175,6 +1217,29 @@ class ResultPage(ScrollPage):
         view, self._saved_view = self._saved_view, None
         if view is not None:
             self._apply_view(view)
+
+    def _update_enabled(self, *_args) -> None:
+        """いまの表示モードで効く欄だけを押せるようにする。
+
+        以前は全体表示の間も断面や等値面のスライダーが動かせ、動かしても何も変わらなかった。
+        押せない欄には、どうすれば使えるかをツールチップで出す。
+        """
+        mode = self.mode.currentData()
+        solved = self.window.session.solution is not None
+        for box, on, hint in (
+            (self.slice_box, mode in ("slice", "clip"), "表示モードを「断面スライス」か「クリップ」にすると使えます。"),
+            (self.iso_box, mode == "isosurface", "表示モードを「等値面」にすると使えます。"),
+            (self.stream_box, solved, "求解すると使えます（実行 → 求解、F5）。"),
+        ):
+            box.setEnabled(on)
+            box.setToolTip("" if on else hint)
+        self.n_seeds.setEnabled(self.streamlines.isChecked())
+
+    def _face_section(self, *_args) -> None:
+        mode = self.mode.currentData()
+        if self._loading or mode not in ("slice", "clip"):
+            return
+        self.window.view_section(mode, self.slice_normal.currentText())
 
     def _forget_saved_view(self, *_args) -> None:
         if self._loading:

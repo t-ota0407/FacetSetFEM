@@ -105,12 +105,12 @@ REGION_STATS_COLUMNS = [
     "要素数",
     "体積 [cm³]",
     "電力 [mW]",
-    "|J| 最大",
-    "|J| 平均",
-    "|J| 中央",
-    "|J| 99%",
-    "|E| 最大",
-    "|E| 99%",
+    "|J| 最大 [A/m²]",
+    "|J| 平均 [A/m²]",
+    "|J| 中央 [A/m²]",
+    "|J| 99% [A/m²]",
+    "|E| 最大 [V/m]",
+    "|E| 99% [V/m]",
     "ホットスポット EID",
 ]
 
@@ -119,12 +119,24 @@ NODAL_VALUE_WARNING = (
     "節点値は体積重み平均で平滑化されています。最大値の評価には要素値を使ってください。"
 )
 
+#: 電位の丸め誤差とみなす大きさ（電極間電位差に対する割合）。これ以下は 0 と書く
+POTENTIAL_ROUNDOFF = 1e-12
+
+#: 電位の基準の書き方（結果の要約に出す）
+REFERENCE_LABELS = {"cathode_mean": "陰極の平均", "zero_mean": "全節点の平均"}
+
 #: 選ばれた面の面積が指定面積からこれ以上ずれたら警告する（相対値。SPEC §11.1）。
 #:
 #: 面は 1 枚単位で入るか外れるかなので、縁のぶんだけ必ずずれる。2 cm 角の電極を
 #: 一辺 2.6 mm の皮膚の面（頭部モデル）に置くと数 % に収まる。これを超えるなら、
 #: 電極に対してメッシュが粗すぎるか、曲面で接平面への投影が効いている
 AREA_MISMATCH_WARNING = 0.10
+
+#: 外表面のこの割合以上を占める領域を皮膚とみなし、パッチの絞り込みの既定にする
+SKIN_SHARE = 0.7
+
+#: 電極の縁を面から浮かせる量（モデルの対角長に対する割合。見た目のためだけ）
+OUTLINE_LIFT = 0.002
 
 #: 組織物性の目安 [S/m]。GUI の入力補助に使う（出典を明記できるようになるまでは目安扱い）
 TISSUE_HINTS: dict[str, float] = {name: t.sigma for name, t in TISSUES.items()}
@@ -203,6 +215,8 @@ class Session:
         self._surface: pv.PolyData | None = None
         #: 領域ごとの境界面（ハイライト用）。形だけなので、解き直しても使い回す
         self._region_boundaries: dict[int, pv.PolyData] = {}
+        #: 電極の縁（`electrode_outline`）。電極名 → (電極の指定の repr, 折れ線)
+        self._outlines: dict[str, tuple[str, pv.PolyData]] = {}
         # Undo / Redo（SPEC §8 M7）。
         # 解析条件は Study 1 つに閉じていて、メッシュも結果も含まないので、
         # 操作ごとに丸ごと複製して積むだけで済む。差分を持つ設計は
@@ -427,6 +441,22 @@ class Session:
         """実行前の整合性チェック（SPEC §6.2 の手順 4）。警告の一覧を返す。"""
         return self.build_case().validate()
 
+    def problems(self) -> tuple[list[str], list[str]]:
+        """実行前の整合性チェックの `(不備, 警告)` を**全部**（SPEC §6.2 の手順 4）。
+
+        `validate` は不備の 1 件目で例外になるが、GUI は全部を一覧にして一度に直させる。
+        σ 未設定（0）の領域は Case に渡せない（Case が拒む）ので外して組み、
+        コアの検査に「導電率が未設定」として拾わせる。
+        """
+        study = self._require_study()
+        kept = study.materials
+        try:
+            study.materials = [m for m in kept if m.sigma > 0.0]
+            case = study.build_case(self._require_mesh())
+        finally:
+            study.materials = kept
+        return case.problems()
+
     def electrode_info(self, name: str | None = None) -> list[dict]:
         """電極の合計面積と平均電流密度（SPEC §6.2 の手順 3）。
 
@@ -518,6 +548,7 @@ class Session:
         self._grid = None
         self._surface = None
         self._region_boundaries = {}
+        self._outlines = {}
 
     # --- 表示用データ -------------------------------------------------------
 
@@ -617,10 +648,17 @@ class Session:
 
         シェル要素で指定した面と、体表面から選んだパッチの両方を合わせて返す。
         """
+        triangles = self._electrode_triangles(name)
+        if not len(triangles):
+            return pv.PolyData()
+        return self._polydata(self._require_mesh().points(), triangles, {})
+
+    def _electrode_triangles(self, name: str) -> np.ndarray:
+        """電極の面の三角形（節点の通し番号）。面が無ければ空。"""
         mesh = self._require_mesh()
         spec = self.electrode(name)
         if spec is None:
-            return pv.PolyData()
+            return np.zeros((0, 3), dtype=np.int64)
         tris, shell_pids, ids = mesh.shell_triangles()
         keep = np.isin(shell_pids, spec.shell_pids) | np.isin(ids, spec.element_ids)
         pieces = [tris[keep]] if len(tris) else []
@@ -630,10 +668,55 @@ class Session:
             pieces.append(self.electrode_faces(name)["triangles"])
         except GfemError:
             pass  # まだ面が 1 枚も無いなど。表示は空でよい
-        pieces = [p for p in pieces if len(p)]
+        pieces = [np.asarray(p, dtype=np.int64) for p in pieces if len(p)]
         if not pieces:
+            return np.zeros((0, 3), dtype=np.int64)
+        return np.vstack(pieces)
+
+    def electrode_outline(self, name: str) -> pv.PolyData:
+        """電極の面の縁（折れ線）。**ほかの電極の位置を 3D ビューに出す**ために使う。
+
+        以前はツリーで選んだ電極しか 3D ビューに出ず、別の電極を編集している間は
+        ほかの電極がどこにあるか見えなかった（重なりを判断できない）。面で塗ると
+        結果の色を隠すので、縁だけを描く。縁は面の法線の向きに少し浮かせる
+        （同じ高さだと面に埋もれて途切れる）。電極の指定が変わるまで使い回す。
+        """
+        spec = self.electrode(name)
+        if spec is None:
             return pv.PolyData()
-        return self._polydata(mesh.points(), np.vstack(pieces), {})
+        key = repr(spec)
+        cached = self._outlines.get(name)
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        poly = self._boundary_lines(self._electrode_triangles(name))
+        self._outlines[name] = (key, poly)
+        return poly
+
+    def _boundary_lines(self, triangles: np.ndarray) -> pv.PolyData:
+        """三角形の集まりの縁（1 枚の三角形にしか属さない辺）を折れ線にする。"""
+        if not len(triangles):
+            return pv.PolyData()
+        edges = np.sort(triangles[:, [0, 1, 1, 2, 2, 0]].reshape(-1, 2), axis=1)
+        unique, counts = np.unique(edges, axis=0, return_counts=True)
+        boundary = unique[counts == 1]
+        if not len(boundary):
+            return pv.PolyData()
+        points = self._require_mesh().points()
+        # 節点ごとの法線（まわりの三角形の法線の和）の向きに浮かせる
+        a, b, c = (points[triangles[:, i]] for i in range(3))
+        face_normals = np.cross(b - a, c - a)
+        nodes, local = np.unique(boundary, return_inverse=True)
+        normals = np.zeros((len(points), 3))
+        for i in range(3):
+            np.add.at(normals, triangles[:, i], face_normals)
+        lifted = normals[nodes]
+        lifted /= np.maximum(np.linalg.norm(lifted, axis=1, keepdims=True), 1e-300)
+        lo, hi = self.model_box()
+        offset = OUTLINE_LIFT * float(np.linalg.norm(hi - lo))
+        lines = np.hstack(
+            [np.full((len(boundary), 1), 2, dtype=np.int64), local.reshape(-1, 2)]
+        )
+        return pv.PolyData(points[nodes] + offset * lifted, lines=lines.ravel())
 
     # --- 体表面から選ぶ電極（SPEC §11.1）------------------------------------
 
@@ -646,9 +729,20 @@ class Session:
         return self._require_mesh().surface_pids()
 
     def default_surface_pid(self) -> int | None:
-        """パッチの PID 絞り込みの既定値。いちばん広い面（ふつう皮膚）。"""
+        """パッチの PID 絞り込みの既定値。外表面の大半を占める領域（ふつう皮膚）。
+
+        人体モデルでは皮膚が外表面の大半を占め（頭部モデルで約 8 割）、首の切断面などに
+        出る内部組織は小さい。**いちばん広い領域が外表面の `SKIN_SHARE` 以上を占めるときだけ**
+        それを皮膚とみなして絞り込み、そうでなければ絞り込まない（None）。以前は無条件に
+        いちばん広い領域を既定にしていて、皮膚が上面の薄い層になっているスラブでは
+        側面と下面を持つ筋肉が選ばれ、上面（皮膚）をクリックしても面が選べなかった。
+        """
         choices = self.surface_pid_choices()
-        return choices[0]["pid"] if choices else None
+        if not choices:
+            return None
+        total = sum(c["area"] for c in choices)
+        top = choices[0]
+        return top["pid"] if total > 0.0 and top["area"] >= SKIN_SHARE * total else None
 
     def is_on_the_model(self, point, margin_ratio: float = 0.05) -> bool:
         """クリックされた点がモデルの上とみなせるか。
@@ -886,6 +980,25 @@ class Session:
         normal[k] = 1.0
         return origin.tolist(), normal
 
+    @staticmethod
+    def section_view(kind: str, axis: str) -> tuple[list[float], list[float]]:
+        """断面・クリップを見る向き `(焦点からカメラへの向き, 画面の上)`（単位ベクトル）。
+
+        断面は板なので**正面から**見る（以前は選んだときの視点のままで、ほぼ真横から
+        見えて暗く、読めなかった）。クリップは切り落とした側（軸の正の側）の斜め上から
+        見て、切り口と残った体の両方が見えるようにする。上は z 軸（法線が z なら y 軸）。
+        """
+        k = {"x": 0, "y": 1, "z": 2}[axis]
+        normal = np.zeros(3)
+        normal[k] = 1.0
+        up = np.array([0.0, 1.0, 0.0]) if axis == "z" else np.array([0.0, 0.0, 1.0])
+        toward = normal
+        if kind == "clip":
+            side = np.cross(up, normal)
+            toward = normal + 0.6 * side + 0.5 * up
+            toward /= np.linalg.norm(toward)
+        return [float(v) for v in toward], [float(v) for v in up]
+
     def section(self, kind: str, axis: str, position: float, field: str | None) -> pv.PolyData:
         """断面（`kind="slice"`）かクリップ（`"clip"`）に表示量を貼ったもの（SPEC §6.3）。
 
@@ -1105,7 +1218,18 @@ class Session:
             "",
             "電極の平均電位:",
         ]
-        lines += [f"  {name}: {v:.6g} V" for name, v in result.electrode_potentials]
+        # 基準に選んだ電位（陰極の平均など）は理屈の上で 0 だが、丸め誤差で
+        # 「-5.3e-17 V」と出ていた。電位差に比べて無視できる値は 0 と書く
+        scale = max([abs(result.voltage)] + [abs(v) for _n, v in result.electrode_potentials])
+        lines += [
+            f"  {name}: {0.0 if abs(v) <= POTENTIAL_ROUNDOFF * scale else v:.6g} V"
+            for name, v in result.electrode_potentials
+        ]
+        reference = REFERENCE_LABELS.get(
+            self.solved_study.output.reference_potential if self.solved_study else "", ""
+        )
+        if reference:
+            lines.append(f"  （電位の基準: {reference} = 0 V）")
         lines += [
             "",
             "保存則チェック（SPEC §5.4）:",

@@ -127,6 +127,9 @@ class MixedValueSpinBox(QDoubleSpinBox):
     - **番兵の値を外へ漏らさない。** 上矢印は番兵からではなく下限から数える
       （番兵から数えると下限を割った値が出る）。下矢印では何もしない
     - 番兵の値そのもので `valueChanged` は出さない。受け手は `value() < floor` を無視すればよい
+
+    ほかに、下限ちょうどの値に別の文字を出せる（`set_floor_text`。σ の「未設定」）。
+    数値は末尾の 0 を落として出す（小数 6 桁の欄で 0.04 が「0.040000」と出ていた）。
     """
 
     MIXED_TEXT = "（値がそろっていません）"
@@ -135,6 +138,8 @@ class MixedValueSpinBox(QDoubleSpinBox):
         super().__init__(parent)
         self._floor = 0.0
         self._mixed = False
+        #: 下限ちょうどの値のときに出す文字（空なら数値のまま）
+        self._floor_text = ""
         # 受け手より先に呼ばれるよう、最初につなぐ
         self.valueChanged.connect(self._on_value_changed)
         self.editingFinished.connect(self._restore_range)
@@ -147,6 +152,19 @@ class MixedValueSpinBox(QDoubleSpinBox):
     def setRange(self, lo: float, hi: float) -> None:  # noqa: N802 - Qt の名前に合わせる
         self._floor = lo
         super().setRange(lo - 1.0 if self._mixed else lo, hi)
+
+    def set_floor_text(self, text: str) -> None:
+        """下限ちょうどの値のときに、数値の代わりに `text` を出す（σ = 0 の「未設定」）。"""
+        self._floor_text = text
+        if not self._mixed:
+            self.setSpecialValueText(text)
+
+    def textFromValue(self, value: float) -> str:  # noqa: N802 - Qt の名前に合わせる
+        """末尾の 0 を落とす（0.040000 → 0.04）。桁数の上限は `decimals()` のまま。"""
+        text = f"{value:.{self.decimals()}f}"
+        if "." in text:
+            text = text.rstrip("0").rstrip(".")
+        return text or "0"
 
     @property
     def is_mixed(self) -> bool:
@@ -176,7 +194,7 @@ class MixedValueSpinBox(QDoubleSpinBox):
     def _restore_range(self) -> None:
         if self._mixed or self.minimum() >= self._floor:
             return
-        self.setSpecialValueText("")
+        self.setSpecialValueText(self._floor_text)
         super().setRange(self._floor, self.maximum())
 
     def stepBy(self, steps: int) -> None:  # noqa: N802 - Qt の名前に合わせる

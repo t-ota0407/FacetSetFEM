@@ -66,12 +66,12 @@ def test_potential_matches_the_analytic_profile(layered_solution):
     mesh, result = layered_solution
     z = mesh.points()[:, 2]
 
-    # 層は z = 0 から順に積まれている（skin が下、muscle が上）。
+    # 層は z = 0 から muscle・fat・skin の順に積まれている（皮膚が電極を貼る上面）。
     # 陰極は下面なので φ(0) = 0 とし、上へ積み上げる
     def exact(height: float) -> float:
         phi = 0.0
         lower = 0.0
-        for _pid, thickness, sigma in SLAB_LAYERS:
+        for _pid, thickness, sigma in reversed(SLAB_LAYERS):
             upper = lower + thickness
             if height > lower:
                 phi += CURRENT / (sigma * SLAB_AREA) * (min(height, upper) - lower)

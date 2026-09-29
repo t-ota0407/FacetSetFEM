@@ -61,7 +61,7 @@ def test_rectangles_survive_a_case_file_round_trip(session, tmp_path):
     """ケースファイルには形・寸法・角の半径・向きが人の読める形で残ること。"""
     session.add_electrode("E1", role="anode", current=CURRENT)
     session.add_patch(
-        "E1", TOP, pid=3, shape="rect", width=0.03, height=0.02, corner_radius=0.004,
+        "E1", TOP, pid=1, shape="rect", width=0.03, height=0.02, corner_radius=0.004,
         axis=[0.0, 1.0, 0.0], angle=30.0,
     )
     session.add_electrode("E2", role="cathode", current=CURRENT)
@@ -82,7 +82,7 @@ def test_rectangles_survive_a_case_file_round_trip(session, tmp_path):
     assert (patch.width, patch.height, patch.corner_radius) == pytest.approx((0.03, 0.02, 0.004))
     assert patch.axis == pytest.approx((0.0, 1.0, 0.0))
     assert patch.angle == pytest.approx(30.0)
-    assert patch.pid == 3
+    assert patch.pid == 1
     assert not reopened.study.electrodes[1].patches[0].is_rect
     # 同じ面が選ばれる
     assert reopened.electrode_info()[0]["area"] == session.electrode_info()[0]["area"]

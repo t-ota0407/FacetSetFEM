@@ -38,6 +38,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+import numpy as np
+import pyvista as pv
+
 from .. import read_nastran
 from .busy import BusyOverlay, busy_scope, run_in_thread
 from .pages import ElectrodePage, MeshPage, RegionPage, ResultPage, SolverPage
@@ -67,22 +70,51 @@ NODE_SIZE = 4
 #: 選択中の領域の色（無彩色の中で目を引くように）
 REGION_COLOR = "#f08a24"
 
+#: 電極の縁の色（役割ごと）。選んでいる電極は面を赤で塗り、ほかの電極は縁だけを描く
+ELECTRODE_OUTLINE_COLORS = {"anode": "#c62828", "cathode": "#1e56b8"}
+
 #: 体表面に出ていない領域を選んだとき、外側をどれだけ透かすか
 BURIED_OPACITY = 0.25
 
-#: カラーバーの体裁。横置きだと窓が狭いときに数字が重なって読めなくなる
+#: カラーバーの体裁。横置きだと窓が狭いときに数字が重なって読めなくなる。
+#: 位置と大きさは**カラーバー専用の描画領域**（`SCALAR_BAR_STRIP`）に対する割合
 SCALAR_BAR = {
     "vertical": True,
-    "position_x": 0.82,
-    "position_y": 0.12,
-    "width": 0.05,
+    "position_x": 0.18,
+    "position_y": 0.1,
+    "width": 0.22,
     "height": 0.72,
     "n_labels": 5,
     "fmt": "%.3g",
     "title_font_size": 14,
     "label_font_size": 12,
+    "unconstrained_font_size": True,
     "color": "#1b1e21",
 }
+
+#: カラーバーを出している間、3D ビューの右端のこの幅 [px] をカラーバー専用にする。
+#: 以前はモデルと同じ描画領域に重ねていて、モデルの右側にかぶり、途中の目盛りが
+#: 暗い色のモデルの上で読めなかった（窓が狭いとバーがモデルを横切った）
+SCALAR_BAR_STRIP_PX = 130
+
+
+def scalar_bar_title(key: str) -> str:
+    """カラーバーの見出し。量と単位を 2 行に分ける（`"|J| [A/m2]"` → `"J\\n[A/m2]"`）。
+
+    1 行だと細い帯に収まらず端が切れる。VTK の既定のフォントには日本語が無いので、
+    見出しは表示量の鍵（英字）から作る。**縦棒は落とす**——VTK の既定のフォントでは
+    `|` が描かれず、しかも複数行の左寄せが崩れる（実測）。大きさであることは
+    結果ページの表示量の名前で分かる。
+    """
+    name, bracket, unit = key.partition(" [")
+    name = name.replace("|", "").strip()
+    return f"{name}\n[{unit}" if bracket else name
+
+#: 値で色分けしているときの陰影。**色は値を表すので、陰影で色を変えすぎない。**
+#: 形状表示と同じ強い陰影だと、光の当たらない側面が真っ黒に近くなり、同じ値でも
+#: 面の向きで違う色に見えた。環境光を足して暗くなりすぎないようにし、形が読める
+#: だけの陰影を残す
+SCALAR_LIGHTING = {"ambient": 0.45, "diffuse": 0.55, "specular": 0.0}
 
 #: 背景。うっすら階調をつけると、白いモデルの輪郭が背景に溶けない
 BACKGROUND_BOTTOM = "#e9edf2"
@@ -93,6 +125,10 @@ BACKGROUND_TOP = "#fdfdfe"
 #: 実測（RTX A6000 / 20 コア）で、35.9 万節点だと領域を選び直すだけで 0.98 秒、
 #: 1.5 万節点なら 0.05 秒。10 万節点あたりが「待たされたと感じる」境目にあたる。
 BIG_MODEL_NODES = 100_000
+
+#: 断面スライスを出している間、体の外形をこの不透明度で薄く重ねる。板だけだと、
+#: どこを切った断面なのか分からなかった
+SECTION_CONTEXT_OPACITY = 0.12
 
 #: 流線を重ねている間の外表面の不透明度。流線は体の中を通るので、外表面が
 #: 不透明だと 1 本も見えない（以前は「重ねる」を入れても何も変わらなかった）
@@ -136,6 +172,9 @@ class MainWindow(QMainWindow):
         self._rotating = False
         #: 視点を合わせたメッシュ（`Session.mesh_serial`）。開き直したときだけ合わせ直す
         self._framed_mesh: int | None = None
+        #: 合わせたときの描画領域と視点。帯の出入りで合わせ直してよいかの判断に使う
+        self._framed_viewport: tuple | None = None
+        self._framed_camera: tuple | None = None
         #: 閉じるときに、求解中・保存していない変更を確かめるか（テストでは切る）
         self.ask_before_closing = True
 
@@ -214,6 +253,17 @@ class MainWindow(QMainWindow):
         # 三点照明キットを入れると、白一色でも形が読める
         self.plotter.enable_lightkit()
         self.plotter.set_background(BACKGROUND_BOTTOM, top=BACKGROUND_TOP)
+        # カラーバー専用の描画領域（`_make_room_for_scalar_bar`）。背景はモデル側とそろえ、
+        # マウス操作は受けない（受けると、ここでドラッグしたときに何も無い視点が回る）
+        from vtkmodules.vtkRenderingCore import vtkRenderer
+
+        self._scalar_bar_renderer = vtkRenderer()
+        self._scalar_bar_renderer.SetViewport(0.0, 0.0, 0.0, 0.0)
+        self._scalar_bar_renderer.SetInteractive(False)
+        self._scalar_bar_renderer.GradientBackgroundOn()
+        self._scalar_bar_renderer.SetBackground(pv.Color(BACKGROUND_BOTTOM).float_rgb)
+        self._scalar_bar_renderer.SetBackground2(pv.Color(BACKGROUND_TOP).float_rgb)
+        self.plotter.ren_win.AddRenderer(self._scalar_bar_renderer)
 
         self.pages = QStackedWidget()
         self.page_mesh = MeshPage(self)
@@ -247,6 +297,7 @@ class MainWindow(QMainWindow):
         self.stats_table.setColumnCount(len(REGION_STATS_COLUMNS))
         self.stats_table.setHorizontalHeaderLabels(REGION_STATS_COLUMNS)
         self.stats_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.stats_table.verticalHeader().setVisible(False)  # 行番号は PID の列と紛らわしい
 
         self.bottom = QTabWidget()
         self.bottom.addTab(self.log_view, "ログ")
@@ -853,6 +904,16 @@ class MainWindow(QMainWindow):
         self.session.add_electrode(f"E{index}", role=role)
         self.refresh_tree()
         self.log(f"電極 E{index} を追加しました（{role}）")
+        # 追加した電極を選んで、そのページを開く。以前は選択が前の項目のままで、
+        # 追加した電極をツリーで探して選び直す必要があった
+        self.select_item("electrode", f"E{index}")
+
+    def select_item(self, kind: str, key) -> None:
+        """ツリーの項目を選ぶ（選択が変わるので、その項目のページが開く）。"""
+        for item in self._tree_items():
+            if self._item_key(item) == (kind, key):
+                self.tree.setCurrentItem(item)
+                return
 
     def remove_selected_electrode(self) -> None:
         item = self.tree.currentItem()
@@ -868,11 +929,16 @@ class MainWindow(QMainWindow):
     # --- 実行 ---------------------------------------------------------------
 
     def check_consistency(self) -> list[str] | None:
-        """整合性チェック（SPEC §6.2 の手順 4）。"""
+        """整合性チェック（SPEC §6.2 の手順 4）。不備があれば全部を一覧で出して None。"""
         try:
-            warnings = self.run_busy("整合性をチェックしています", self.session.validate)
+            problems, warnings = self.run_busy(
+                "整合性をチェックしています", self.session.problems
+            )
         except Exception as exc:  # noqa: BLE001
             self.show_error(exc)
+            return None
+        if problems:
+            self._show_problems(problems)
             return None
         if warnings:
             self.log("整合性チェック: 警告 " + str(len(warnings)) + " 件")
@@ -888,10 +954,32 @@ class MainWindow(QMainWindow):
             )
         return warnings
 
+    def _show_problems(self, problems: list[str]) -> None:
+        """解く前に直すところを、全部まとめて見せる（ログにも残す）。
+
+        以前は 1 件目だけをダイアログに出していて、直しては F5 を押すことを
+        不備の数だけ繰り返した。
+        """
+        self.log(f"整合性チェック: 直すところが {len(problems)} 件あります")
+        for p in problems:
+            self.log("  " + p.replace("\n", "\n  "))
+        numbered = "\n\n".join(f"{i}. {p}" for i, p in enumerate(problems, start=1))
+        QMessageBox.warning(
+            self,
+            "整合性チェック",
+            f"解く前に直すところが {len(problems)} 件あります。\n\n{numbered}",
+        )
+
     def start_solve(self) -> None:
         if self.solver is not None and self.solver.isRunning():
             return
         try:
+            problems, _warnings = self.run_busy(
+                "整合性をチェックしています", self.session.problems
+            )
+            if problems:
+                self._show_problems(problems)
+                return
             case, study = self.run_busy("解析条件を組み立てています", self.session.prepare_solve)
             case.validate()
         except Exception as exc:  # noqa: BLE001
@@ -1241,12 +1329,90 @@ class MainWindow(QMainWindow):
         **拡大して見ていたところからモデル全体の表示に戻されていた**（向きは保たれる）。
         全体に戻したいときは 3D ビューで r キーを押す（pyvista の既定）。
         """
-        if self._framed_mesh == self.session.mesh_serial:
+        camera = self.plotter.renderer.GetActiveCamera()
+        viewport = tuple(self.plotter.renderer.GetViewport())
+        untouched = self._framed_camera == self._camera_state(camera)
+        if self._framed_mesh == self.session.mesh_serial and not (
+            # カラーバーの帯が出た・消えたときは、描く幅が変わるので合わせ直す。
+            # ただし利用者が視点を動かしていないときだけ（動かしていれば、その視点を保つ）
+            untouched and viewport != self._framed_viewport
+        ):
             # 表示するものが変わる（等値面・断面など）ので、手前と奥の切り取りだけ合わせ直す
             self.plotter.renderer.reset_camera_clipping_range()
             return
         self._framed_mesh = self.session.mesh_serial
+        self._framed_viewport = viewport
         self.plotter.reset_camera()
+        self._framed_camera = self._camera_state(camera)
+
+    def view_section(self, kind: str, axis: str) -> None:
+        """断面・クリップを選んだ・法線を変えたときに、それが見える向きに視点を向ける。
+
+        利用者が表示モードや法線を選んだときだけ呼ぶ（位置のスライダーでは呼ばない。
+        スライダーを動かすたびに視点が変わると、見比べられない）。
+        """
+        if self.session.mesh is None:
+            return
+        toward, up = Session.section_view(kind, axis)
+        lo, hi = self.session.model_box()
+        centre = 0.5 * (lo + hi)
+        camera = self.plotter.renderer.GetActiveCamera()
+        camera.SetFocalPoint(*centre)
+        camera.SetPosition(*(centre + float(np.linalg.norm(hi - lo)) * np.asarray(toward)))
+        camera.SetViewUp(*up)
+        self.plotter.reset_camera(bounds=[lo[0], hi[0], lo[1], hi[1], lo[2], hi[2]])
+        self._framed_viewport = tuple(self.plotter.renderer.GetViewport())
+        self._framed_camera = self._camera_state(camera)
+        self.plotter.render()
+
+    @staticmethod
+    def _camera_state(camera) -> tuple:
+        return (
+            camera.GetPosition(),
+            camera.GetFocalPoint(),
+            camera.GetViewUp(),
+            camera.GetViewAngle(),
+            camera.GetParallelScale(),
+        )
+
+    def _make_room_for_scalar_bar(self) -> None:
+        """カラーバーを右端の専用の描画領域へ移し、モデルの描画領域をその分だけ狭める。
+
+        カラーバーは 2D の重ね描きなので、同じ描画領域に置くとモデルにかぶる。
+        別のレンダラに移せば、モデルとは決して重ならない（視点は変えない）。
+        カラーバーが無いときはモデルの描画領域を全幅に戻す。
+        """
+        strip = self._scalar_bar_renderer
+        strip.RemoveAllViewProps()
+        bars = list(self.plotter.scalar_bars.values())
+        for bar in bars:
+            self.plotter.renderer.RemoveActor2D(bar)
+            strip.AddActor2D(bar)
+            # 見出しは VTK のカラーバーに描かせない。バーの幅に合わせて右寄せ・縮小され、
+            # 細い帯では端が切れた。帯の左上に、左寄せの文字として置く
+            title = scalar_bar_title(bar.GetTitle())  # 管理の鍵は表示量の鍵のまま
+            bar.SetTitle("")
+            strip.AddActor2D(self._scalar_bar_title_actor(title))
+        width = max(self.plotter.interactor.width(), 1)
+        right = 1.0 - min(SCALAR_BAR_STRIP_PX / width, 0.4) if bars else 1.0
+        self.plotter.renderer.SetViewport(0.0, 0.0, right, 1.0)
+        strip.SetViewport(right, 0.0, 1.0, 1.0) if bars else strip.SetViewport(0.0, 0.0, 0.0, 0.0)
+
+    @staticmethod
+    def _scalar_bar_title_actor(title: str):
+        """カラーバーの帯の左上に置く見出し（左寄せ・上揃え）。"""
+        from vtkmodules.vtkRenderingCore import vtkTextActor
+
+        actor = vtkTextActor()
+        actor.SetInput(title)
+        prop = actor.GetTextProperty()
+        prop.SetFontSize(SCALAR_BAR["title_font_size"])
+        prop.SetColor(pv.Color(SCALAR_BAR["color"]).float_rgb)
+        prop.SetJustificationToLeft()
+        prop.SetVerticalJustificationToTop()
+        actor.GetPositionCoordinate().SetCoordinateSystemToNormalizedViewport()
+        actor.SetPosition(0.08, 0.92)
+        return actor
 
     def _draw_view(self, scope, highlight_pid, highlight_electrode) -> None:
         self.plotter.clear()
@@ -1355,6 +1521,7 @@ class MainWindow(QMainWindow):
                 categories=scalars == "PID",
                 opacity=opacity,
                 reset_camera=False,
+                **SCALAR_LIGHTING,
             )
         if options["nodes"]:
             self.plotter.add_mesh(
@@ -1368,11 +1535,33 @@ class MainWindow(QMainWindow):
             )
         if lines is not None and lines.n_cells:
             self.plotter.add_mesh(lines, color="black", line_width=2, reset_camera=False)
+        if mode == "slice" and target is not surface:
+            self.plotter.add_mesh(
+                surface,
+                color=SURFACE_COLOR,
+                opacity=SECTION_CONTEXT_OPACITY,
+                pickable=False,
+                reset_camera=False,
+            )
 
         for region in regions:
             self.plotter.add_mesh(
                 region, color=REGION_COLOR, show_edges=False, pickable=False, reset_camera=False
             )
+        # ほかの電極の位置も見えるように、縁を役割の色で描く（選んでいる電極は下で面を塗る）
+        for spec in self.session.study.electrodes:
+            if spec.name == highlight_electrode:
+                continue
+            outline = self.session.electrode_outline(spec.name)
+            if outline.n_cells:
+                self.plotter.add_mesh(
+                    outline,
+                    color=ELECTRODE_OUTLINE_COLORS.get(spec.role, "black"),
+                    line_width=3,
+                    lighting=False,
+                    pickable=False,
+                    reset_camera=False,
+                )
         if highlight_electrode is not None:
             scope.step("電極の面を取り出しています")
             faces = self.session.electrode_polydata(highlight_electrode)
@@ -1381,6 +1570,7 @@ class MainWindow(QMainWindow):
 
         scope.step("描画しています")
         self.plotter.add_axes()
+        self._make_room_for_scalar_bar()
         self._frame_new_mesh()
         self.plotter.render()
         # clear() でピッキングも外れるので、選択中なら掛け直す

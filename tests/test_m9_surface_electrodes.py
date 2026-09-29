@@ -40,8 +40,17 @@ def test_the_outer_surface_lists_the_regions_it_exposes(session):
     assert [r["pid"] for r in rows] == [3, 1, 2]  # 面積の大きい順
     assert rows[0]["area"] > rows[-1]["area"]
     assert sum(r["n_faces"] for r in rows) == 944  # 外表面の三角形の総数
-    # 既定はいちばん広い領域（人体モデルなら皮膚にあたる）
-    assert session.default_surface_pid() == 3
+    # スラブでは、いちばん広い筋肉（側面と下面）も外表面の 6 割に届かない。
+    # 皮膚とはみなせないので絞り込まない（上面の皮膚をクリックできなくなるため）
+    assert session.default_surface_pid() is None
+
+
+def test_the_default_filter_is_the_region_covering_most_of_the_surface(session, monkeypatch):
+    """人体モデルのように 1 つの領域（皮膚）が外表面の大半を占めるなら、それで絞り込む。"""
+    rows = [{"pid": 51, "area": 0.16, "n_faces": 1}, {"pid": 62, "area": 0.022, "n_faces": 1},
+            {"pid": 53, "area": 0.010, "n_faces": 1}]  # 頭部モデルの内訳（SPEC §11.1）
+    monkeypatch.setattr(session, "surface_pid_choices", lambda: rows)
+    assert session.default_surface_pid() == 51
 
 
 def test_a_click_selects_a_connected_patch(session):
@@ -105,7 +114,7 @@ def test_a_model_without_shells_can_be_solved(session, tmp_path, make_sample_mes
 def test_patches_survive_a_case_file_round_trip(session, tmp_path):
     """ケースファイルに残るのは面の一覧ではなく中心と半径（人が読める形）。"""
     session.add_electrode("E1", role="anode", current=CURRENT)
-    session.add_patch("E1", (0.030, 0.020, 0.020), 0.012, pid=3)
+    session.add_patch("E1", (0.030, 0.020, 0.020), 0.012, pid=1)  # 上面は皮膚
     session.add_electrode("E2", role="cathode", current=CURRENT)
     session.add_patch("E2", (0.030, 0.020, 0.000), 0.012)
 
@@ -119,7 +128,7 @@ def test_patches_survive_a_case_file_round_trip(session, tmp_path):
     patch = reopened.study.electrodes[0].patches[0]
     assert patch.center == pytest.approx((0.030, 0.020, 0.020))
     assert patch.radius == pytest.approx(0.012)
-    assert patch.pid == 3
+    assert patch.pid == 1
     assert reopened.study.electrodes[1].patches[0].pid is None
     # 同じ面が選ばれる
     assert reopened.electrode_info()[0]["area"] == session.electrode_info()[0]["area"]
@@ -205,8 +214,8 @@ def test_the_pid_filter_offers_the_exposed_regions(window):
     labels = [page.patch_pid.itemText(i) for i in range(page.patch_pid.count())]
     assert labels[0] == "制限しない"
     assert any("PID 3" in text for text in labels)
-    # 既定はいちばん広い領域（人体モデルなら皮膚）
-    assert page.patch_pid.currentData() == 3
+    # スラブには外表面の大半を占める領域が無いので、既定は「制限しない」
+    assert page.patch_pid.currentData() is None
 
 
 def test_removing_a_patch(window):

@@ -38,15 +38,52 @@ __all__ = ["SweepDialog", "parameter_choices"]
 
 
 def parameter_choices(study: Study) -> list[tuple[str, str]]:
-    """このケースで振れるパラメータの `(表示名, 指定子)` 一覧。"""
-    out: list[tuple[str, str]] = [("刺激電流（全電極） [A]", "current")]
+    """このケースで振れるパラメータの `(表示名, 指定子)` 一覧。
+
+    電流は **mA** で入れる（電極のページと同じ単位）。以前はここだけ A で、
+    電極のページの感覚で「2」と打つと 2 A（1000 倍）になった。`gfem.sweep` には
+    `display_scale` で A に直して渡す。
+    """
+    out: list[tuple[str, str]] = [("刺激電流（全電極） [mA]", "current")]
     for m in study.materials:
         label = f"σ: PID {m.pid}" + (f"（{m.name}）" if m.name else "")
         out.append((f"{label} [S/m]", f"sigma.{m.pid}"))
     for e in study.electrodes:
-        out.append((f"電極 {e.name} の電流 [A]", f"electrode.{e.name}.current"))
+        out.append((f"電極 {e.name} の電流 [mA]", f"electrode.{e.name}.current"))
     out.append(("収束判定（相対残差）", "solver.tolerance"))
     return out
+
+
+def display_scale(key: str) -> float:
+    """入力欄・表の値に掛けると SI になる係数（電流は mA で扱うので 1e-3）。"""
+    if key == "current" or (key.startswith("electrode.") and key.endswith(".current")):
+        return 1e-3
+    return 1.0
+
+
+#: 入力欄の例（振るものごと。表示の単位で書く）
+VALUE_EXAMPLES = {
+    "current": "1, 2, 4  または  1:4:1",
+    "sigma": "0.02, 0.04, 0.08  または  0.02:0.08:0.02",
+    "solver.tolerance": "1e-8, 1e-10, 1e-12",
+}
+
+#: 結果の列の見出し（表示用）。CSV の列名は ASCII のまま（SPEC §5.5）
+RESULT_HEADINGS = {
+    "impedance_ohm": "等価抵抗 R [Ω]",
+    "voltage_V": "電極間電位差 [V]",
+    "power_W": "消費電力 [W]",
+    "j_max_A_per_m2": "|J| 最大 [A/m²]",
+    "e_max_V_per_m": "|E| 最大 [V/m]",
+    "phi_min_V": "φ 最小 [V]",
+    "phi_max_V": "φ 最大 [V]",
+    "iterations": "反復回数",
+    "residual": "相対残差",
+    "backend": "バックエンド",
+    "preconditioner": "前処理",
+    "energy_relative_error": "エネルギー収支の相対誤差",
+    "conservation_warnings": "保存則の警告",
+}
 
 
 def parse_values(text: str) -> list[float]:
@@ -140,7 +177,8 @@ class SweepDialog(QDialog):
         for label, key in parameter_choices(study):
             self.parameter.addItem(label, key)
         self.values = QLineEdit()
-        self.values.setPlaceholderText("0.02, 0.04, 0.06  または  0.02:0.06:0.01")
+        self.parameter.currentIndexChanged.connect(self._show_example)
+        self._show_example()
         form.addRow("振るもの", self.parameter)
         form.addRow("値", self.values)
         layout.addLayout(form)
@@ -176,9 +214,17 @@ class SweepDialog(QDialog):
         buttons.addWidget(self.save_button)
         buttons.addStretch(1)
         box = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        # 標準のボタンは Qt の翻訳が無いと英語（Close）になる
+        box.button(QDialogButtonBox.StandardButton.Close).setText("閉じる")
         box.rejected.connect(self.reject)
         buttons.addWidget(box)
         layout.addLayout(buttons)
+
+    def _show_example(self, *_args) -> None:
+        """入力欄の例を、振るものに合わせて出す（表示の単位で）。"""
+        key = self.parameter.currentData() or ""
+        head = "sigma" if key.startswith("sigma.") else "current" if display_scale(key) != 1.0 else key
+        self.values.setPlaceholderText(VALUE_EXAMPLES.get(head, "0.02, 0.04  または  0.02:0.06:0.01"))
 
     # --- 実行 ---------------------------------------------------------------
 
@@ -193,6 +239,7 @@ class SweepDialog(QDialog):
             return
 
         key = self.parameter.currentData()
+        values = [v * display_scale(key) for v in values]  # 表示の単位 → SI
         self.run_button.setEnabled(False)
         self.save_button.setEnabled(False)
         self.progress.setVisible(True)
@@ -229,13 +276,22 @@ class SweepDialog(QDialog):
         self.window.log(note)
 
     def _fill(self, table: SweepTable) -> None:
+        """結果を表に並べる。見出しは日本語と単位、振った値は入力と同じ単位で出す。
+
+        以前は CSV の列名（`impedance_ohm` など）をそのまま見出しにしていた。
+        """
         columns = table.columns()
+        labels = {key: label for label, key in parameter_choices(self.window.session.study)}
         self.result_table.setColumnCount(len(columns))
-        self.result_table.setHorizontalHeaderLabels(columns)
+        self.result_table.setHorizontalHeaderLabels(
+            [labels.get(k) or RESULT_HEADINGS.get(k, k) for k in columns]
+        )
         self.result_table.setRowCount(len(table.rows))
         for r, row in enumerate(table.rows):
             for c, key in enumerate(columns):
                 value = row.get(key, "")
+                if key in table.parameters and isinstance(value, float):
+                    value /= display_scale(key)  # SI → 表示の単位
                 text = f"{value:.6g}" if isinstance(value, float) else str(value)
                 item = QTableWidgetItem(text)
                 item.setTextAlignment(
