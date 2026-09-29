@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QThread, Signal
@@ -60,14 +61,33 @@ def parse_values(text: str) -> list[float]:
         parts = body.split(":")
         if len(parts) != 3:
             raise ValueError("範囲は 始め:終わり:刻み の形で書いてください")
-        start, stop, step = (float(p) for p in parts)
+        start, stop, step = (_number(p) for p in parts)
         if step == 0.0:
             raise ValueError("刻みが 0 です")
         count = int(round((stop - start) / step)) + 1
         if count <= 0 or count > 1000:
             raise ValueError(f"ケース数が {count} 個になります（1〜1000 にしてください）")
         return [start + i * step for i in range(count)]
-    return [float(p) for p in body.split()]
+    return [_number(p) for p in body.split()]
+
+
+#: 値を読めなかったときの対処（どの書き方を受け付けるか）
+VALUES_HINT = "0.02, 0.04 のようにカンマか空白で区切るか、始め:終わり:刻み（0.02:0.06:0.01）で書いてください"
+
+
+def _number(text: str) -> float:
+    """数値 1 つを読む。読めなければ、どの値が読めないかと書き方を添えて `ValueError`。
+
+    以前は `float()` の例外をそのまま出していて、ダイアログに
+    `could not convert string to float: 'abc'` と英語の内部の言葉が出ていた。
+    """
+    try:
+        value = float(text)
+    except ValueError:
+        raise ValueError(f"「{text.strip()}」を数値として読めません。\n{VALUES_HINT}") from None
+    if not math.isfinite(value):
+        raise ValueError(f"「{text.strip()}」は有限の数値ではありません。\n{VALUES_HINT}")
+    return value
 
 
 class SweepThread(QThread):

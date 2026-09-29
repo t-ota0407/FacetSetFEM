@@ -91,4 +91,5 @@ def main_window(qt_app):
     except Exception as exc:  # noqa: BLE001
         pytest.skip(f"3D ビューを作成できません: {exc}")
     yield w
+    w.ask_before_closing = False  # 保存していない変更の確認ダイアログでテストを止めない
     w.close()

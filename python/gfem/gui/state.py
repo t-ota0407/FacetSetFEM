@@ -209,6 +209,12 @@ class Session:
         # 「どの編集を記録し忘れたか」を追う手間に見合わない
         self._undo: list[tuple[str, Study]] = []
         self._redo: list[tuple[str, Study]] = []
+        #: 最後に開いた・保存したときの解析条件の写し。閉じるときに、保存していない
+        #: 変更があるかをこれと比べて決める（Undo で戻せば「変更なし」に戻る）
+        self._saved_study: Study | None = None
+        #: メッシュを開くたびに増える番号。3D ビューはこれが変わったときだけ
+        #: 視点をモデル全体に合わせ直す（それ以外の描き直しでは利用者のズームを保つ）
+        self.mesh_serial = 0
 
     # --- Undo / Redo --------------------------------------------------------
 
@@ -282,6 +288,7 @@ class Session:
                 f"[内部エラー] 渡されたメッシュの単位 {mesh.length_unit} が {length_unit} と違います"
             )
         self.mesh = mesh
+        self.mesh_serial += 1
         self._forget_results()
         self.study = Study(
             mesh_file=path,
@@ -289,6 +296,7 @@ class Session:
             materials=[Material(pid=pid, sigma=0.0) for pid in self.mesh.solid_pids()],
         )
         # σ 未設定を 0 で表しておくと validate() が拾ってくれる
+        self._mark_saved()
         return self.study
 
     def open_case(self, path: str | Path) -> Study:
@@ -297,6 +305,7 @@ class Session:
         study = Study.load(path)
         self.study = study
         self.mesh = study.read_mesh()
+        self.mesh_serial += 1
         self._forget_results()
         # メッシュにあるのに YAML に無い PID を補う
         known = {m.pid for m in study.materials}
@@ -304,10 +313,22 @@ class Session:
             if pid not in known:
                 study.materials.append(Material(pid=pid, sigma=0.0))
         study.materials.sort(key=lambda m: m.pid)
+        self._mark_saved()
         return study
 
     def save_case(self, path: str | Path) -> None:
         self._require_study().save(path)
+        self._mark_saved()
+
+    def _mark_saved(self) -> None:
+        self._saved_study = copy.deepcopy(self.study)
+
+    def is_modified(self) -> bool:
+        """最後に開いた・保存したときから解析条件が変わっているか（閉じるときの確認に使う）。
+
+        編集の記録ではなく中身を比べるので、Undo で元に戻せば「変更なし」になる。
+        """
+        return self.study is not None and self.study != self._saved_study
 
     # --- 設定 ---------------------------------------------------------------
 
@@ -412,16 +433,22 @@ class Session:
         `name` を指定すると**その電極だけ**を見る。GUI は電極を 1 つずつ設定して
         いくので、まだ面を割り当てていない別の電極のせいで、いま編集している
         電極の面積が出せなくなるのを避けるため。
+
+        **σ が未設定の領域があっても出す。** 面積は電極面の形だけで決まり
+        （`assemble_load` は σ を見ない）、シェル要素の無いモデルでは σ を入れる前に
+        電極を置いていくことが多い。以前は σ の検査に引っかかって、面積の代わりに
+        「導電率が未設定」と出ていた。
         """
         study = self._require_study()
-        if name is None:
-            return self.build_case().electrode_info()
-        kept = study.electrodes
+        kept = (study.electrodes, study.materials)
         try:
-            study.electrodes = [e for e in kept if e.name == name]
-            return self.build_case().electrode_info()
+            if name is not None:
+                study.electrodes = [e for e in kept[0] if e.name == name]
+            # σ は荷重ベクトルに効かない。未設定（0）のまま渡すと Case が拒むので外す
+            study.materials = []
+            return study.build_case(self._require_mesh()).electrode_info()
         finally:
-            study.electrodes = kept
+            study.electrodes, study.materials = kept
 
     def prepare_solve(self) -> tuple[Case, Study]:
         """solve に渡すケースと、**その時点の解析条件の写し**を返す。
@@ -939,14 +966,18 @@ class Session:
             return (0.0, 1.0)
         return self.solution.value_range(quantity)
 
-    def iso_surface(self, quantity: str, level: float) -> pv.PolyData:
-        """等値面（Marching Tetrahedra、SPEC §6.3）。"""
+    def iso_surface(self, quantity: str, level: float, name: str | None = None) -> pv.PolyData:
+        """等値面（Marching Tetrahedra、SPEC §6.3）。
+
+        値は配列 `name`（省略すると `quantity`）に貼る。GUI は表示量の鍵
+        （`"|J| [A/m2]"` など）で貼り、全体表示と同じ見出し・同じ色の範囲で塗る。
+        """
         if self.solution is None:
             return pv.PolyData()
         points, triangles, scalars = self.solution.iso_surface(quantity, level)
         poly = self._polydata(points, triangles, {})
         if poly.n_cells:
-            poly.point_data[quantity] = scalars
+            poly.point_data[name or quantity] = scalars
         return poly
 
     def streamlines(self, seeds, direction: str = "forward") -> pv.PolyData:

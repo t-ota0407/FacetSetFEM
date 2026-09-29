@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
     QFormLayout,
+    QFrame,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -23,6 +24,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QPlainTextEdit,
     QPushButton,
+    QScrollArea,
     QSlider,
     QSpinBox,
     QVBoxLayout,
@@ -118,13 +120,32 @@ VIEW_MODES = [
 ]
 
 
-class MeshPage(QWidget):
+class ScrollPage(QScrollArea):
+    """プロパティパネルのページの土台。**縦に収まらなければスクロールする。**
+
+    以前はふつうのウィジェットで、中身がパネルの高さに収まらないと、Qt が欄を
+    押しつぶす（結果ページで「古い結果」の帯が出ると法線の欄が潰れた）か、
+    ウィンドウの最小の高さが中身に引っぱられて**ウィンドウが勝手に縦に伸びた**
+    （電極ページで矩形を選んでパッチを置くと 900 px を超え、1100 × 700 に
+    縮めようとしても 894 px より低くならなかった）。ページの中身は `body_layout` に並べる。
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setWidgetResizable(True)
+        self.setFrameShape(QFrame.Shape.NoFrame)
+        body = QWidget()
+        self.setWidget(body)
+        self.body_layout = QVBoxLayout(body)
+
+
+class MeshPage(ScrollPage):
     """メッシュの概要（SPEC §6.2 の手順 1 の読み込みレポート）。"""
 
     def __init__(self, window: MainWindow) -> None:
         super().__init__()
         self.window = window
-        layout = QVBoxLayout(self)
+        layout = self.body_layout
         layout.addWidget(QLabel("<b>メッシュ</b>"))
         self.text = QPlainTextEdit()
         self.text.setReadOnly(True)
@@ -137,7 +158,7 @@ class MeshPage(QWidget):
             self.text.setPlainText(self.window.session.mesh_summary())
 
 
-class RegionPage(QWidget):
+class RegionPage(ScrollPage):
     """領域（PID）への σ 割り当て（SPEC §6.2 の手順 2）。"""
 
     def __init__(self, window: MainWindow) -> None:
@@ -146,7 +167,7 @@ class RegionPage(QWidget):
         #: 編集している領域。ツリーで複数選ぶと 2 つ以上になり、σ をまとめて入れられる
         self.pids: list[int] = []
 
-        layout = QVBoxLayout(self)
+        layout = self.body_layout
         layout.addWidget(QLabel("<b>領域</b>"))
         form = QFormLayout()
         self.pid_label = QLabel("-")
@@ -241,7 +262,7 @@ class RegionPage(QWidget):
         self.window.refresh_tree()
 
 
-class ElectrodePage(QWidget):
+class ElectrodePage(ScrollPage):
     """電極の定義（SPEC §6.2 の手順 3）。
 
     面を選ぶたびに**合計面積と平均電流密度**を出す。
@@ -254,7 +275,7 @@ class ElectrodePage(QWidget):
         #: ホバー予告をいま出している面（同じ面の上では作り直さない）
         self._hover_at = None
 
-        layout = QVBoxLayout(self)
+        layout = self.body_layout
         layout.addWidget(QLabel("<b>電極</b>"))
         form = QFormLayout()
         self.name_edit = QLineEdit()
@@ -272,6 +293,11 @@ class ElectrodePage(QWidget):
         layout.addWidget(QLabel("電極面（シェル PID）"))
         self.pid_list = QListWidget()
         layout.addWidget(self.pid_list)
+        # シェル要素の無いモデル（人体モデルはふつうこれ）では一覧を畳んで理由を出す
+        self.no_shells = QLabel("このモデルにはシェル要素がありません。下の「体表面から選ぶ」で電極面を置いてください。")
+        self.no_shells.setWordWrap(True)
+        self.no_shells.setStyleSheet("color: #666;")
+        layout.addWidget(self.no_shells)
 
         # --- 体表面から選ぶ（SPEC §11.1）---
         # 人体モデルはソリッド要素だけで配られるのが普通で、その場合シェル PID の
@@ -395,6 +421,7 @@ class ElectrodePage(QWidget):
         self.summary.setWordWrap(True)
         self.summary.setStyleSheet("font-weight: bold;")
         layout.addWidget(self.summary)
+        layout.addStretch(1)
 
         self.name_edit.editingFinished.connect(self._commit)
         self.role_combo.currentTextChanged.connect(self._commit)
@@ -413,6 +440,7 @@ class ElectrodePage(QWidget):
             spin.valueChanged.connect(self._on_shape_changed)
         self.patch_list.currentRowChanged.connect(self._load_patch_shape)
         self._on_shape_changed()
+        self._fit_pid_list()
 
     def bind(self, name: str) -> None:
         # 体表面の索引づくり（外表面 87,812 面で 1.9 秒）が初回だけここで走る。
@@ -438,6 +466,7 @@ class ElectrodePage(QWidget):
                 Qt.CheckState.Checked if pid in spec.shell_pids else Qt.CheckState.Unchecked
             )
             self.pid_list.addItem(item)
+        self._fit_pid_list()
         scope.step("体表面の領域を調べています")
         self._reload_patch_pids()
         self.name = name
@@ -445,6 +474,33 @@ class ElectrodePage(QWidget):
         self._reload_hand_edits()
         scope.step("面積と電流密度を集計しています")
         self._update_summary()
+
+    #: シェル PID の一覧に一度に見せる行数の上限（それ以上はスクロール）
+    MAX_PID_ROWS = 6
+
+    def _fit_pid_list(self) -> None:
+        """シェル PID の一覧を行数ぶんの高さにする（空なら畳んで理由を出す）。
+
+        ページがスクロールするようになってから、一覧が余った高さを全部取り、
+        シェルの無いモデルでも空の大きな枠が「体表面から選ぶ」を下へ押し出していた。
+        """
+        count = self.pid_list.count()
+        self.pid_list.setVisible(count > 0)
+        self.no_shells.setVisible(count == 0)
+        if count:
+            rows = min(count, self.MAX_PID_ROWS)
+            height = self.pid_list.sizeHintForRow(0) * rows + 2 * self.pid_list.frameWidth()
+            self.pid_list.setFixedHeight(height)
+
+    def stop_picking(self) -> None:
+        """体表面のクリック選択を終える（掛かっていなければ何もしない）。"""
+        if self.pick_button.isChecked():
+            self.pick_button.setChecked(False)  # `_toggle_picking` が選択を外す
+
+    def unbind(self) -> None:
+        """どの電極も編集していない状態にする（編集していた電極が消えたとき）。"""
+        self.stop_picking()
+        self.name = None
 
     # --- 体表面から選ぶ（SPEC §11.1）----------------------------------------
 
@@ -805,7 +861,7 @@ class ElectrodePage(QWidget):
         )
 
 
-class SolverPage(QWidget):
+class SolverPage(ScrollPage):
     """ソルバ設定（SPEC §4.3）。"""
 
     def __init__(self, window: MainWindow) -> None:
@@ -813,7 +869,7 @@ class SolverPage(QWidget):
         self.window = window
         self._loading = False
 
-        layout = QVBoxLayout(self)
+        layout = self.body_layout
         layout.addWidget(QLabel("<b>ソルバ設定</b>"))
         form = QFormLayout()
         self.tolerance = QLineEdit()
@@ -894,7 +950,7 @@ class SolverPage(QWidget):
         self.window.refresh_result_status()
 
 
-class ResultPage(QWidget):
+class ResultPage(ScrollPage):
     """結果の表示設定（SPEC §6.2 の手順 6）。"""
 
     def __init__(self, window: MainWindow) -> None:
@@ -907,7 +963,7 @@ class ResultPage(QWidget):
         #: 覚えている間はボタンが「結果の表示に戻す」になる
         self._saved_view: dict | None = None
 
-        layout = QVBoxLayout(self)
+        layout = self.body_layout
         layout.addWidget(QLabel("<b>表示</b>"))
         # 結果を出したときから条件が変わっていたら、ページの先頭で知らせる
         self.stale_label = QLabel("")
@@ -964,6 +1020,10 @@ class ResultPage(QWidget):
         self.iso_level.setValue(50)
         iso_layout.addWidget(QLabel("しきい値（値域に対する割合）"))
         iso_layout.addWidget(self.iso_level)
+        # 等値面を出している間だけ、しきい値の実際の値を出す。以前はステータスバーに
+        # 出していて、全体表示に戻しても次のメッセージまで残っていた
+        self.iso_value = QLabel("")
+        iso_layout.addWidget(self.iso_value)
         layout.addWidget(iso_box)
 
         stream_box = QGroupBox("ストリームライン")
@@ -1057,6 +1117,10 @@ class ResultPage(QWidget):
             if index >= 0:
                 self.field.setCurrentIndex(index)
         self._update_shape_button()
+
+    def show_iso_level(self, text: str) -> None:
+        """等値面のしきい値の実際の値（等値面を出していないときは空）。"""
+        self.iso_value.setText(text)
 
     def show_staleness(self, changes: list[str]) -> None:
         """結果が古い条件のものなら帯を出す（`MainWindow.refresh_result_status` から）。"""

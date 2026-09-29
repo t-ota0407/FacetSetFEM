@@ -94,6 +94,26 @@ BACKGROUND_TOP = "#fdfdfe"
 #: 1.5 万節点なら 0.05 秒。10 万節点あたりが「待たされたと感じる」境目にあたる。
 BIG_MODEL_NODES = 100_000
 
+#: 流線を重ねている間の外表面の不透明度。流線は体の中を通るので、外表面が
+#: 不透明だと 1 本も見えない（以前は「重ねる」を入れても何も変わらなかった）
+STREAMLINE_SURFACE_OPACITY = 0.3
+
+
+def status_line(message: str, limit: int = 200) -> str:
+    """ステータスバーに出す 1 行（ログの複数行のメッセージから要点を取る）。
+
+    「エラー:」「求解失敗:」のように 1 行目が見出しだけのメッセージは、2 行目の
+    中身と続けて出す。以前は 1 行目だけを出していて、ステータスバーに
+    「エラー:」とだけ残り、何が起きたのか分からなかった。
+    """
+    lines = [line.strip() for line in message.splitlines() if line.strip()]
+    if not lines:
+        return ""
+    head = lines[0]
+    if head.endswith((":", "：")) and len(lines) > 1:
+        head = f"{head} {lines[1]}"
+    return head[:limit]
+
 
 
 class MainWindow(QMainWindow):
@@ -114,6 +134,10 @@ class MainWindow(QMainWindow):
         self._press_position = (0, 0)
         self._left_down = False
         self._rotating = False
+        #: 視点を合わせたメッシュ（`Session.mesh_serial`）。開き直したときだけ合わせ直す
+        self._framed_mesh: int | None = None
+        #: 閉じるときに、求解中・保存していない変更を確かめるか（テストでは切る）
+        self.ask_before_closing = True
 
         self.setWindowTitle("GenericFEM")
         self.resize(1400, 900)
@@ -292,9 +316,11 @@ class MainWindow(QMainWindow):
 
     # --- ログ ---------------------------------------------------------------
 
-    def log(self, message: str) -> None:
+    def log(self, message: str, status: bool = True) -> None:
+        """ログに足す。`status` が真ならステータスバーにも要点を 1 行で出す。"""
         self.log_view.appendPlainText(message)
-        self.statusBar().showMessage(message.splitlines()[0][:200])
+        if status:
+            self.statusBar().showMessage(status_line(message))
 
     def show_error(self, exc: Exception) -> None:
         text = str(exc)
@@ -355,7 +381,8 @@ class MainWindow(QMainWindow):
         self.convergence.clear()
         self.checks_view.clear()
         self.log(f"読み込み完了: {path}")
-        self.log(self.session.mesh_summary())
+        self.log(self.session.mesh_summary(), status=False)
+        self._leave_edited_item()
         self.refresh_all()
         self._refresh_history_actions()
 
@@ -379,7 +406,8 @@ class MainWindow(QMainWindow):
         self.convergence.clear()
         self.checks_view.clear()
         self.log(f"ケースを読み込みました: {path}")
-        self.log(self.session.mesh_summary())
+        self.log(self.session.mesh_summary(), status=False)
+        self._leave_edited_item()
         self.refresh_all()
         self._refresh_history_actions()
 
@@ -390,13 +418,15 @@ class MainWindow(QMainWindow):
         if path:
             self.save_case(path)
 
-    def save_case(self, path: str | Path) -> None:
+    def save_case(self, path: str | Path) -> bool:
+        """ケースを保存する。保存できたら True。"""
         try:
             self.session.save_case(path)
         except Exception as exc:  # noqa: BLE001
             self.show_error(exc)
-            return
+            return False
         self.log(f"ケースを保存しました: {path}")
+        return True
 
     def export_vtu_dialog(self) -> None:
         if self.session.solution is None:
@@ -743,17 +773,54 @@ class MainWindow(QMainWindow):
         label = self.session.undo()
         if not label:
             return
-        self.refresh_all()
-        self._refresh_history_actions()
+        self._refresh_after_history()
         self.log(f"元に戻しました: {label}")
 
     def redo(self) -> None:
         label = self.session.redo()
         if not label:
             return
-        self.refresh_all()
-        self._refresh_history_actions()
+        self._refresh_after_history()
         self.log(f"やり直しました: {label}")
+
+    def _refresh_after_history(self) -> None:
+        """Undo / Redo の後。ツリーと、開いているページを戻した条件で読み直す。
+
+        以前は `refresh_all` だけで、開いているページは戻す前の値を出したまま
+        （電流を戻しても欄は古い値）、戻した操作で消えた電極のページも出たままだった。
+        """
+        with self.busy("表示を作成しています"):
+            self.refresh_tree()
+            self.page_result.reload()
+            self.refresh_stats_table()
+            self._show_selection()
+        self._refresh_history_actions()
+
+    def _show_selection(self) -> None:
+        """ツリーでいま選ばれている項目のページを開き直し、3D ビューを描き直す。
+
+        選んでいた項目が無くなっていたら（削除した電極、Undo で消えた電極）、
+        メッシュのページに戻る。**消えた電極のページを出したままにしない**——以前は
+        削除した電極の名前と設定が右のパネルに残り、赤い強調表示も消えなかった。
+        """
+        if self.tree.selectedItems():
+            self._on_tree_selection_changed()
+            return
+        self._leave_edited_item()
+        self.refresh_view()
+
+    def _leave_edited_item(self) -> None:
+        """編集中の項目から離れてメッシュのページに戻る（項目が消えたとき・開き直したとき）。"""
+        # ツリーの選択も外す。残すと、開き直したモデルで同じ PID の項目が選ばれたまま
+        # （ページはメッシュなのにツリーは領域）になる
+        self.tree.blockSignals(True)
+        try:
+            self.tree.clearSelection()
+        finally:
+            self.tree.blockSignals(False)
+        self.page_electrode.unbind()
+        self.page_mesh.reload()
+        self.pages.setCurrentWidget(self.page_mesh)
 
     def checkpoint(self, label: str) -> None:
         """編集を始める前に呼ぶ。同じ名前の編集が続いている間はまとめられる。"""
@@ -795,6 +862,7 @@ class MainWindow(QMainWindow):
         self.checkpoint(f"電極 {name} を削除")
         self.session.remove_electrode(name)
         self.refresh_tree()
+        self._show_selection()  # 消した電極は選び直せないので、メッシュのページに戻る
         self.log(f"電極 {name} を削除しました")
 
     # --- 実行 ---------------------------------------------------------------
@@ -840,6 +908,7 @@ class MainWindow(QMainWindow):
         self.solver.progressed.connect(self._on_progress)
         self.solver.succeeded.connect(self._on_solved)
         self.solver.failed.connect(self._on_solve_failed)
+        self.solver.cancelled.connect(self._on_solve_cancelled)
         self.solver.finished.connect(lambda: self.action_cancel.setEnabled(False))
         self.solver.start()
 
@@ -880,6 +949,70 @@ class MainWindow(QMainWindow):
         self.log(f"求解失敗:\n{message}")
         QMessageBox.warning(self, "求解", message)
 
+    def _on_solve_cancelled(self) -> None:
+        """利用者が中断した。**失敗ではない**ので警告のダイアログは出さない。
+
+        以前は失敗と同じ扱いで、「求解失敗」とログに残り、警告のダイアログも出ていた。
+        """
+        kept = (
+            "前の結果はそのまま残っています"
+            if self.session.solution is not None
+            else "結果はありません"
+        )
+        self.log(f"求解を中断しました（{kept}）")
+
+    # --- 閉じる -------------------------------------------------------------
+
+    def closeEvent(self, event) -> None:  # noqa: N802 - Qt の規約
+        """求解中なら止めてから、保存していない変更があれば確かめてから閉じる。
+
+        以前は何も確かめずに閉じ、求解中だとスレッドが走ったままウィンドウが
+        破棄されてプロセスが異常終了していた（終了コード 127）。
+        """
+        if self.ask_before_closing and not self._confirm_close():
+            event.ignore()
+            return
+        self._stop_solver()
+        super().closeEvent(event)
+
+    def _confirm_close(self) -> bool:
+        """閉じてよいか利用者に確かめる。やめるなら False。"""
+        buttons = QMessageBox.StandardButton
+        if self.solver is not None and self.solver.isRunning():
+            answer = QMessageBox.question(
+                self,
+                "求解中",
+                "求解の途中です。計算を中断して終了しますか？",
+                buttons.Yes | buttons.No,
+                buttons.No,
+            )
+            if answer != buttons.Yes:
+                return False
+        if self.session.is_modified():
+            answer = QMessageBox.question(
+                self,
+                "保存していない変更",
+                "解析条件に保存していない変更があります。ケースファイルに保存しますか？",
+                buttons.Save | buttons.Discard | buttons.Cancel,
+                buttons.Save,
+            )
+            if answer == buttons.Cancel:
+                return False
+            if answer == buttons.Save:
+                path, _ = QFileDialog.getSaveFileName(
+                    self, "ケースを保存", "case.yaml", "ケースファイル (*.yaml)"
+                )
+                if not path or not self.save_case(path):
+                    return False
+        return True
+
+    def _stop_solver(self) -> None:
+        """走っている求解を止め、スレッドが終わるまで待つ（次の反復で止まる）。"""
+        if self.solver is None or not self.solver.isRunning():
+            return
+        self.solver.cancel()
+        self.run_busy("計算を止めています", self.solver.wait)
+
     # --- 表示 ---------------------------------------------------------------
 
     def refresh_all(self) -> None:
@@ -887,6 +1020,9 @@ class MainWindow(QMainWindow):
         # 途中で消えて出直すような瞬きが起きない
         with self.busy("表示を作成しています"):
             self.refresh_tree()
+            # 以前はメッシュページを読み直しておらず、起動直後と読み込み直後は
+            # 右のパネルが空のままだった（ツリーをクリックするまで何も出ない）
+            self.page_mesh.reload()
             self.page_result.reload()
             self.refresh_stats_table()
             self.refresh_view()
@@ -1045,6 +1181,7 @@ class MainWindow(QMainWindow):
                 self.tree.blockSignals(False)
         if kind == "region" and len(keep) > 1:
             pids = sorted(i.data(0, ROLE_KEY) for i in keep)  # 選んだ順ではなく PID 順
+            self.page_electrode.stop_picking()
             self.page_region.bind(pids)
             self.pages.setCurrentWidget(self.page_region)
             self.refresh_view(highlight_pid=pids)
@@ -1056,6 +1193,10 @@ class MainWindow(QMainWindow):
             return
         kind = current.data(0, ROLE_KIND)
         key = current.data(0, ROLE_KEY)
+        if kind != "electrode":
+            # 電極のページを離れたら、体表面のクリック選択も終える。掛けたままだと、
+            # 領域を見ている間の 3D ビューのクリックが、見えていない電極にパッチを足す
+            self.page_electrode.stop_picking()
         if kind == "region":
             self.page_region.bind(key)
             self.pages.setCurrentWidget(self.page_region)
@@ -1092,6 +1233,21 @@ class MainWindow(QMainWindow):
         with self.busy("メッシュを展開しています") as scope:
             self._draw_view(scope, highlight_pid, highlight_electrode)
 
+    def _frame_new_mesh(self) -> None:
+        """新しいメッシュを開いた直後だけ、視点をモデル全体に合わせる。
+
+        以前は描き直すたびに `reset_camera()` を呼んでいて、ツリーで項目を選ぶ・
+        カラーマップや稜線を切り替える・断面のスライダーを動かすたびに、
+        **拡大して見ていたところからモデル全体の表示に戻されていた**（向きは保たれる）。
+        全体に戻したいときは 3D ビューで r キーを押す（pyvista の既定）。
+        """
+        if self._framed_mesh == self.session.mesh_serial:
+            # 表示するものが変わる（等値面・断面など）ので、手前と奥の切り取りだけ合わせ直す
+            self.plotter.renderer.reset_camera_clipping_range()
+            return
+        self._framed_mesh = self.session.mesh_serial
+        self.plotter.reset_camera()
+
     def _draw_view(self, scope, highlight_pid, highlight_electrode) -> None:
         self.plotter.clear()
         # **clear() は光源も消す。** 置き直さないと以降ずっと陰影が付かず、
@@ -1106,6 +1262,7 @@ class MainWindow(QMainWindow):
         # 断面・クリップ・等値面が空だったときの代わりの表示もこれで足りる
         surface = self.session.display_surface(scalars)
         target = surface
+        iso_text = ""
         if mode in ("slice", "clip"):
             # 切り口は Rust 側で作る。体積メッシュは組み立てない（SPEC §6.3）
             scope.step("断面を切り出しています")
@@ -1120,9 +1277,13 @@ class MainWindow(QMainWindow):
             else:
                 lo, hi = self.session.value_range(quantity)
                 level = lo + (hi - lo) * options["iso_level"]
-                target = self.session.iso_surface(quantity, level)
-                scalars = quantity
-                self.statusBar().showMessage(f"等値面 {quantity} = {level:.4g}")
+                # **表示量の鍵で貼る。** 見出しと色の範囲（モデル全体の値域）が全体表示と
+                # 同じになり、等値面の色が「値域のどこを切ったか」を示す。以前は内部名
+                # （`j_magnitude`）で貼っていたので色の範囲を引けず、範囲が等値面の値
+                # ＝しきい値 1 点に潰れて、カラーバーの目盛りが全部同じ数字になっていた
+                target = self.session.iso_surface(quantity, level, name=scalars)
+                iso_text = f"いまのしきい値: {level:.4g}（{field.label}）"
+        self.page_result.show_iso_level(iso_text)
         if target.n_cells == 0:
             target = surface
             scalars = options["field"]
@@ -1148,8 +1309,26 @@ class MainWindow(QMainWindow):
             if region.n_cells:
                 regions.append(region)
 
+        # 流線は先に引いておく。引けたら外表面を透かす（流線は体の中を通るので、
+        # 外表面が不透明だと 1 本も見えない）。断面は板なので透かさなくても見える
+        lines = None
+        if options["streamlines"] and self.session.solution is not None:
+            scope.step("流線を追跡しています")
+            try:
+                seeds = self.session.default_seed_points(options["n_seeds"])
+                lines = self.session.streamlines(seeds)
+            except Exception as exc:  # noqa: BLE001
+                self.log(f"ストリームラインを引けませんでした: {exc}")
+        see_through = lines is not None and lines.n_cells > 0 and mode in ("volume", "clip")
+        opacity = (
+            BURIED_OPACITY if buried else STREAMLINE_SURFACE_OPACITY if see_through else 1.0
+        )
+
         scope.step("表示を作成しています")
         edges = options["edges"]
+        # **視点は利用者のものとして保つ。** pyvista の add_mesh は既定で視点を
+        # 合わせ直すことがあるので、どれも reset_camera=False で足し、モデル全体に
+        # 合わせ直すのは新しいメッシュを開いたときだけにする（下の `_frame_new_mesh`）
         if scalars is None:
             # 色分けなし。形は**陰影と稜線**で見せる（SPEC §6.3）
             self.plotter.add_mesh(
@@ -1161,7 +1340,8 @@ class MainWindow(QMainWindow):
                 specular=0.25,
                 specular_power=18,
                 smooth_shading=False,
-                opacity=BURIED_OPACITY if buried else 1.0,
+                opacity=opacity,
+                reset_camera=False,
             )
         else:
             self.plotter.add_mesh(
@@ -1173,7 +1353,8 @@ class MainWindow(QMainWindow):
                 clim=self.session.field_range(scalars),
                 scalar_bar_args=SCALAR_BAR,
                 categories=scalars == "PID",
-                opacity=BURIED_OPACITY if buried else 1.0,
+                opacity=opacity,
+                reset_camera=False,
             )
         if options["nodes"]:
             self.plotter.add_mesh(
@@ -1183,31 +1364,24 @@ class MainWindow(QMainWindow):
                 point_size=NODE_SIZE,
                 render_points_as_spheres=True,
                 lighting=False,
+                reset_camera=False,
             )
-
-        if options["streamlines"] and self.session.solution is not None:
-            scope.step("流線を追跡しています")
-            try:
-                seeds = self.session.default_seed_points(options["n_seeds"])
-                lines = self.session.streamlines(seeds)
-                if lines.n_cells:
-                    self.plotter.add_mesh(lines, color="black", line_width=2)
-            except Exception as exc:  # noqa: BLE001
-                self.log(f"ストリームラインを引けませんでした: {exc}")
+        if lines is not None and lines.n_cells:
+            self.plotter.add_mesh(lines, color="black", line_width=2, reset_camera=False)
 
         for region in regions:
             self.plotter.add_mesh(
-                region, color=REGION_COLOR, show_edges=False, pickable=False
+                region, color=REGION_COLOR, show_edges=False, pickable=False, reset_camera=False
             )
         if highlight_electrode is not None:
             scope.step("電極の面を取り出しています")
             faces = self.session.electrode_polydata(highlight_electrode)
             if faces.n_cells:
-                self.plotter.add_mesh(faces, color="red", opacity=1.0)
+                self.plotter.add_mesh(faces, color="red", opacity=1.0, reset_camera=False)
 
         scope.step("描画しています")
         self.plotter.add_axes()
-        self.plotter.reset_camera()
+        self._frame_new_mesh()
         self.plotter.render()
         # clear() でピッキングも外れるので、選択中なら掛け直す
         self._arm_picking()

@@ -28,8 +28,10 @@ class SolverThread(QThread):
     progressed = Signal(int, float)
     #: 成功したときの `gfem.Solution`
     succeeded = Signal(object)
-    #: 失敗・中断したときのメッセージ
+    #: 失敗したときのメッセージ
     failed = Signal(str)
+    #: 利用者が中断した（失敗ではないので別のシグナルにする。警告のダイアログを出さない）
+    cancelled = Signal()
 
     def __init__(self, case: Case, study: Study, parent=None) -> None:
         super().__init__(parent)
@@ -47,7 +49,7 @@ class SolverThread(QThread):
         try:
             result = self._case.solve(progress=self._on_iteration)
         except SolverCancelled:
-            self.failed.emit("計算を中断しました。")
+            self.cancelled.emit()
         except Exception as exc:  # noqa: BLE001 - GUI に出すため全部拾う
             self.failed.emit(str(exc))
         else:
