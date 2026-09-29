@@ -1237,9 +1237,12 @@ class ResultPage(ScrollPage):
 
     def _face_section(self, *_args) -> None:
         mode = self.mode.currentData()
-        if self._loading or mode not in ("slice", "clip"):
+        if self._loading:
             return
-        self.window.view_section(mode, self.slice_normal.currentText())
+        if mode in ("slice", "clip"):
+            self.window.view_section(mode, self.slice_normal.currentText())
+        else:
+            self.window.leave_section()
 
     def _forget_saved_view(self, *_args) -> None:
         if self._loading:

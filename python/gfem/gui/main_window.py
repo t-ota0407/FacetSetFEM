@@ -135,6 +135,26 @@ SECTION_CONTEXT_OPACITY = 0.12
 STREAMLINE_SURFACE_OPACITY = 0.3
 
 
+def draw_on_top(actor) -> None:
+    """体表面にぴったり重ねる面（電極・予告）を、奥行きの比較で必ず手前に出す。
+
+    同じ高さの面どうしはどちらが描かれるかが決まらず（z-fighting）、塗りの予告が
+    上面では体表面に負けて見えず、側面でだけ見えていた（2026-09 に実機で見つけた）。
+    """
+    mapper = actor.GetMapper()
+    mapper.SetResolveCoincidentTopologyToPolygonOffset()
+    mapper.SetRelativeCoincidentTopologyPolygonOffsetParameters(-2.0, -2.0)
+
+
+#: 編集メニューの「元に戻す: …」に出す操作名の長さの上限（文字数）。全文はツールチップに出す
+HISTORY_LABEL_LIMIT = 24
+
+
+def elide(text: str, limit: int) -> str:
+    """`limit` 文字を超えたら末尾を「…」にして切る。"""
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
 def status_line(message: str, limit: int = 200) -> str:
     """ステータスバーに出す 1 行（ログの複数行のメッセージから要点を取る）。
 
@@ -175,6 +195,8 @@ class MainWindow(QMainWindow):
         #: 合わせたときの描画領域と視点。帯の出入りで合わせ直してよいかの判断に使う
         self._framed_viewport: tuple | None = None
         self._framed_camera: tuple | None = None
+        #: 断面・クリップを選ぶ前の視点（やめたときに戻す）
+        self._camera_before_section: tuple | None = None
         #: 閉じるときに、求解中・保存していない変更を確かめるか（テストでは切る）
         self.ask_before_closing = True
 
@@ -341,6 +363,8 @@ class MainWindow(QMainWindow):
         self._add_action(file_menu, "終了", self.close)
 
         edit_menu = self.menuBar().addMenu("編集(&E)")
+        # 「元に戻す: …」は長いと切って出すので、全文はツールチップで見せる
+        edit_menu.setToolTipsVisible(True)
         self.action_undo = self._add_action(edit_menu, "元に戻す", self.undo, "Ctrl+Z")
         self.action_redo = self._add_action(edit_menu, "やり直す", self.redo, "Ctrl+Y")
         self._refresh_history_actions()
@@ -601,7 +625,7 @@ class MainWindow(QMainWindow):
         self.plotter.remove_actor(self.ELECTRODE_ACTOR, render=False)
         faces = self.session.electrode_polydata(name) if name else None
         if faces is not None and faces.n_cells:
-            self.plotter.add_mesh(
+            actor = self.plotter.add_mesh(
                 faces,
                 color="red",
                 opacity=1.0,
@@ -609,6 +633,7 @@ class MainWindow(QMainWindow):
                 reset_camera=False,
                 pickable=False,
             )
+            draw_on_top(actor)
         self.plotter.render()
 
     def begin_patch_picking(self, callback, preview=None, stroke_end=None) -> None:
@@ -786,13 +811,15 @@ class MainWindow(QMainWindow):
         if polydata is None or not polydata.n_cells:
             self.clear_paint_preview()
             return
-        self.plotter.add_mesh(
-            polydata,
-            color="#2a5adb" if erase else "#ff8c1a",
-            opacity=0.55,
-            name=self.PREVIEW_ACTOR,
-            reset_camera=False,
-            pickable=False,
+        draw_on_top(
+            self.plotter.add_mesh(
+                polydata,
+                color="#2a5adb" if erase else "#ff8c1a",
+                opacity=0.55,
+                name=self.PREVIEW_ACTOR,
+                reset_camera=False,
+                pickable=False,
+            )
         )
         if outline is not None and outline.n_points:
             self.plotter.add_mesh(
@@ -883,12 +910,20 @@ class MainWindow(QMainWindow):
         undo, redo = self.session.can_undo(), self.session.can_redo()
         self.action_undo.setEnabled(undo)
         self.action_redo.setEnabled(redo)
-        self.action_undo.setText(
-            f"元に戻す: {self.session.undo_label()}" if undo else "元に戻す"
-        )
-        self.action_redo.setText(
-            f"やり直す: {self.session.redo_label()}" if redo else "やり直す"
-        )
+        for action, verb, enabled, label in (
+            (self.action_undo, "元に戻す", undo, self.session.undo_label()),
+            (self.action_redo, "やり直す", redo, self.session.redo_label()),
+        ):
+            # **操作名は切って出す。** 記録の名前には選んだ PID が全部入る（62 領域を
+            # まとめて選ぶと「領域 1, 2, 3, …, 62 の設定を変更」）ので、そのまま出すと
+            # メニューが際限なく横に伸びた。記録の名前そのものは短くしない（同じ名前の
+            # 編集を 1 手にまとめる判定に使っている）。全文はツールチップとステータスバーに
+            full = f"{verb}: {label}" if enabled else verb
+            action.setText(
+                f"{verb}: {elide(label, HISTORY_LABEL_LIMIT)}" if enabled else verb
+            )
+            action.setToolTip(full)
+            action.setStatusTip(full if enabled else "")
 
     # --- 電極 ---------------------------------------------------------------
 
@@ -1318,8 +1353,22 @@ class MainWindow(QMainWindow):
         """
         if self.session.mesh is None:
             return
+        if highlight_pid is None and highlight_electrode is None:
+            # 何も指定されなければ、ツリーで選んでいる項目の強調を保つ。以前は結果の
+            # 取り込みや表示の設定の変更で描き直すたびに、選んでいる電極・領域の強調が
+            # 消えていた（ツリーでは選ばれたまま）
+            highlight_pid, highlight_electrode = self._selected_highlight()
         with self.busy("メッシュを展開しています") as scope:
             self._draw_view(scope, highlight_pid, highlight_electrode)
+
+    def _selected_highlight(self) -> tuple[list[int] | None, str | None]:
+        """ツリーで選んでいる領域（複数可）か電極。"""
+        items = self.tree.selectedItems()
+        pids = [i.data(0, ROLE_KEY) for i in items if i.data(0, ROLE_KIND) == "region"]
+        names = [i.data(0, ROLE_KEY) for i in items if i.data(0, ROLE_KIND) == "electrode"]
+        if names and self.session.electrode(names[0]) is not None:
+            return None, names[0]
+        return (sorted(pids) or None), None
 
     def _frame_new_mesh(self) -> None:
         """新しいメッシュを開いた直後だけ、視点をモデル全体に合わせる。
@@ -1340,6 +1389,8 @@ class MainWindow(QMainWindow):
             # 表示するものが変わる（等値面・断面など）ので、手前と奥の切り取りだけ合わせ直す
             self.plotter.renderer.reset_camera_clipping_range()
             return
+        if self._framed_mesh != self.session.mesh_serial:
+            self._camera_before_section = None  # 前のモデルの視点には戻さない
         self._framed_mesh = self.session.mesh_serial
         self._framed_viewport = viewport
         self.plotter.reset_camera()
@@ -1353,15 +1404,37 @@ class MainWindow(QMainWindow):
         """
         if self.session.mesh is None:
             return
+        camera = self.plotter.renderer.GetActiveCamera()
+        if self._camera_before_section is None:
+            self._camera_before_section = self._camera_state(camera)
         toward, up = Session.section_view(kind, axis)
         lo, hi = self.session.model_box()
         centre = 0.5 * (lo + hi)
-        camera = self.plotter.renderer.GetActiveCamera()
         camera.SetFocalPoint(*centre)
         camera.SetPosition(*(centre + float(np.linalg.norm(hi - lo)) * np.asarray(toward)))
         camera.SetViewUp(*up)
         self.plotter.reset_camera(bounds=[lo[0], hi[0], lo[1], hi[1], lo[2], hi[2]])
         self._framed_viewport = tuple(self.plotter.renderer.GetViewport())
+        self._framed_camera = self._camera_state(camera)
+        self.plotter.render()
+
+    def leave_section(self) -> None:
+        """断面・クリップをやめた。断面を選ぶ前の視点に戻す。
+
+        断面用の視点（真上から・真横から）のまま全体表示に戻ると、体を見る向きとして
+        不自然だった。断面を見ている間に利用者が視点を動かしていたら、その視点を保つ。
+        """
+        saved, self._camera_before_section = self._camera_before_section, None
+        camera = self.plotter.renderer.GetActiveCamera()
+        if saved is None or self._camera_state(camera) != self._framed_camera:
+            return
+        position, focal, up, angle, scale = saved
+        camera.SetPosition(*position)
+        camera.SetFocalPoint(*focal)
+        camera.SetViewUp(*up)
+        camera.SetViewAngle(angle)
+        camera.SetParallelScale(scale)
+        self.plotter.renderer.reset_camera_clipping_range()
         self._framed_camera = self._camera_state(camera)
         self.plotter.render()
 
@@ -1545,8 +1618,10 @@ class MainWindow(QMainWindow):
             )
 
         for region in regions:
-            self.plotter.add_mesh(
-                region, color=REGION_COLOR, show_edges=False, pickable=False, reset_camera=False
+            draw_on_top(
+                self.plotter.add_mesh(
+                    region, color=REGION_COLOR, show_edges=False, pickable=False, reset_camera=False
+                )
             )
         # ほかの電極の位置も見えるように、縁を役割の色で描く（選んでいる電極は下で面を塗る）
         for spec in self.session.study.electrodes:
@@ -1566,7 +1641,9 @@ class MainWindow(QMainWindow):
             scope.step("電極の面を取り出しています")
             faces = self.session.electrode_polydata(highlight_electrode)
             if faces.n_cells:
-                self.plotter.add_mesh(faces, color="red", opacity=1.0, reset_camera=False)
+                draw_on_top(
+                    self.plotter.add_mesh(faces, color="red", opacity=1.0, reset_camera=False)
+                )
 
         scope.step("描画しています")
         self.plotter.add_axes()

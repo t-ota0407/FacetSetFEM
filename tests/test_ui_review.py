@@ -426,3 +426,76 @@ def test_the_sample_model_has_skin_under_the_electrodes(sample_bdf):
     pick = s.pick_patch((0.030, 0.020, 0.020), 0.001)
     assert pick["n_faces"] > 0
     assert s.pick_patch((0.030, 0.020, 0.020), 0.001, pid=1)["n_faces"] == pick["n_faces"]
+
+
+# --- コミット後の見直しで見つけたもの -----------------------------------------
+
+
+def test_overlays_on_the_surface_are_drawn_in_front(window, qt_app):
+    """電極の面は体表面と同じ高さなので、奥行きの比較で手前に出す（z-fighting を避ける）。"""
+    window.select_item("electrode", "E1")
+    def offset(actor):
+        from vtkmodules.vtkCommonCore import reference
+
+        factor, units = reference(0.0), reference(0.0)
+        actor.GetMapper().GetRelativeCoincidentTopologyPolygonOffsetParameters(factor, units)
+        return float(units)
+
+    overlays = [
+        actor
+        for actor in window.plotter.renderer.actors.values()
+        if hasattr(actor.GetMapper(), "GetResolveCoincidentTopology")
+        and actor.GetMapper().GetResolveCoincidentTopology() != 0
+        and offset(actor) < 0
+    ]
+    assert overlays, "電極の面が手前に出されていない"
+
+
+def test_redrawing_keeps_the_selected_electrode_highlighted(window, qt_app):
+    """結果の取り込みや表示の設定の変更で描き直しても、選んでいる電極の強調は残る。"""
+    from pyvista import Color
+
+    def has_red_face():
+        red = Color("red").float_rgb
+        return any(
+            tuple(a.GetProperty().GetColor()) == pytest.approx(red)
+            and a.GetMapper().GetInput().GetNumberOfPolys() > 0
+            for a in window.plotter.renderer.actors.values()
+            if hasattr(a, "GetMapper") and hasattr(a.GetProperty(), "GetAmbient")
+        )
+
+    window.select_item("electrode", "E2")
+    assert has_red_face()
+    _solve(window, qt_app)
+    assert has_red_face(), "求解の後で強調が消えた"
+    window.page_result.cmap.setCurrentText("plasma")
+    assert has_red_face(), "カラーマップを変えたら強調が消えた"
+
+
+def test_leaving_a_section_restores_the_previous_view(window, qt_app):
+    _solve(window, qt_app)
+    camera = window.plotter.renderer.GetActiveCamera()
+    before = window._camera_state(camera)
+    page = window.page_result
+    page.mode.setCurrentIndex(page.mode.findData("slice"))
+    assert window._camera_state(camera) != before
+    page.mode.setCurrentIndex(page.mode.findData("volume"))
+    after = window._camera_state(camera)
+    for a, b in zip(after, before):
+        assert a == pytest.approx(b)
+
+
+def test_the_undo_menu_stays_narrow_with_a_long_label(window):
+    """操作名が長くても（領域をまとめて選んだときなど）、メニューは横に伸びない。全文はツールチップに。"""
+    from gfem.gui.main_window import HISTORY_LABEL_LIMIT
+
+    label = "領域 " + ", ".join(str(p) for p in range(1, 63)) + " の設定を変更"
+    window.checkpoint(label)
+    window.session.set_conductivity(1, 0.2)
+    window._refresh_history_actions()
+    text = window.action_undo.text()
+    assert text == "元に戻す: " + label[: HISTORY_LABEL_LIMIT - 1] + "…"
+    assert window.action_undo.toolTip() == f"元に戻す: {label}"
+    window.undo()  # 記録の名前は切っていないので、そのまま戻せる
+    assert window.action_redo.toolTip() == f"やり直す: {label}"
+    assert window.action_redo.text() == "やり直す: " + label[: HISTORY_LABEL_LIMIT - 1] + "…"
