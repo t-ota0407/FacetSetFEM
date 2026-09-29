@@ -297,6 +297,10 @@ def test_hovering_shows_the_outline_of_the_electrode(window, qt_app):
     window.plotter.view_xy()
     window.show()
     qt_app.processEvents()
+    # ピックは描画済みの深度バッファを読むので、表示した直後の最初の描画を済ませておく
+    # （テスト全体の最初にウィンドウを出したとき、まれに描画前に読んで落ちていた）
+    window.plotter.render()
+    qt_app.processEvents()
     try:
         w, h = window.plotter.render_window.GetSize()
         if min(w, h) <= 1:

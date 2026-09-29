@@ -355,6 +355,8 @@ def test_a_real_mouse_click_selects_faces(window, qt_app):
     page.diameter_spin.setValue(16.0)
     window.show()
     qt_app.processEvents()
+    window.plotter.render()  # ピックは描画済みの深度バッファを読む
+    qt_app.processEvents()
     page.pick_button.setChecked(True)
     qt_app.processEvents()
 
@@ -405,6 +407,8 @@ def painting_window(window, qt_app):
     window.refresh_view()
     window.plotter.reset_camera()
     window.show()
+    qt_app.processEvents()
+    window.plotter.render()  # ピックは描画済みの深度バッファを読む
     qt_app.processEvents()
     if min(window.plotter.render_window.GetSize()) <= 1:
         pytest.skip("3D ビューを描画できない環境です")
