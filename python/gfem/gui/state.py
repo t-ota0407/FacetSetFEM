@@ -17,6 +17,7 @@ import pyvista as pv
 
 from .. import Case, GfemError, Mesh, Solution, Study, read_nastran
 from .._gfem import check_patch
+from ..i18n import N_, error_text, tr
 from ..study import ElectrodeSpec, Material, SurfacePatch
 from ..tissues import TISSUES
 
@@ -52,23 +53,30 @@ class DisplayField:
 #: という無い情報を描いてしまう（頭部モデルは 62 領域ある）。
 #: 形は陰影と稜線で見せ、色は物理量のためにとっておく。
 DISPLAY_FIELDS: list[DisplayField] = [
-    DisplayField(SHAPE_FIELD, "形状（色分けなし）", "none", needs_solution=False),
-    DisplayField("PID", "領域 (PID) で塗り分け", "cell", needs_solution=False),
-    DisplayField("phi [V]", "電位 φ [V]", "point", iso_quantity="phi"),
-    DisplayField("|E| [V/m]", "電界 |E| [V/m]（要素値）", "cell", iso_quantity="e_magnitude"),
-    DisplayField("|J| [A/m2]", "電流密度 |J| [A/m²]（要素値）", "cell", iso_quantity="j_magnitude"),
+    DisplayField(SHAPE_FIELD, N_("Shape (no colouring)"), "none", needs_solution=False),
+    DisplayField("PID", N_("Colour by region (PID)"), "cell", needs_solution=False),
+    DisplayField("phi [V]", N_("Potential φ [V]"), "point", iso_quantity="phi"),
+    DisplayField(
+        "|E| [V/m]", N_("Electric field |E| [V/m] (element)"), "cell", iso_quantity="e_magnitude"
+    ),
+    DisplayField(
+        "|J| [A/m2]", N_("Current density |J| [A/m²] (element)"), "cell", iso_quantity="j_magnitude"
+    ),
     DisplayField(
         "power density [W/m3]",
-        "電力密度 σ|E|² [W/m³]（要素値）",
+        N_("Power density σ|E|² [W/m³] (element)"),
         "cell",
         iso_quantity="power_density",
     ),
     DisplayField(
-        "|E| (nodal) [V/m]", "電界 |E| [V/m]（節点値・平滑化）", "point", iso_quantity="e_magnitude"
+        "|E| (nodal) [V/m]",
+        N_("Electric field |E| [V/m] (nodal, smoothed)"),
+        "point",
+        iso_quantity="e_magnitude",
     ),
     DisplayField(
         "|J| (nodal) [A/m2]",
-        "電流密度 |J| [A/m²]（節点値・平滑化）",
+        N_("Current density |J| [A/m²] (nodal, smoothed)"),
         "point",
         iso_quantity="j_magnitude",
     ),
@@ -98,32 +106,36 @@ def field_by_key(key: str) -> DisplayField | None:
     return None
 
 #: 領域統計の表の見出し（SPEC §5.2）
+#: 英語のまま持ち、表に出すときに `tr` を通す
 REGION_STATS_COLUMNS = [
     "PID",
-    "名前",
+    N_("Name"),
     "σ [S/m]",
-    "要素数",
-    "体積 [cm³]",
-    "電力 [mW]",
-    "|J| 最大 [A/m²]",
-    "|J| 平均 [A/m²]",
-    "|J| 中央 [A/m²]",
-    "|J| 99% [A/m²]",
-    "|E| 最大 [V/m]",
-    "|E| 99% [V/m]",
-    "ホットスポット EID",
+    N_("Elements"),
+    N_("Volume [cm³]"),
+    N_("Power [mW]"),
+    N_("|J| max [A/m²]"),
+    N_("|J| mean [A/m²]"),
+    N_("|J| median [A/m²]"),
+    N_("|J| 99% [A/m²]"),
+    N_("|E| max [V/m]"),
+    N_("|E| 99% [V/m]"),
+    N_("Hotspot EID"),
 ]
 
 #: 節点値は平滑化されているという注意（SPEC §5.1 で GUI 上に明示することになっている）
-NODAL_VALUE_WARNING = (
-    "節点値は体積重み平均で平滑化されています。最大値の評価には要素値を使ってください。"
+NODAL_VALUE_WARNING = N_(
+    "Nodal values are smoothed by volume-weighted averaging. Use element values to judge maxima."
 )
+
+#: 全領域の行の名前（`gfem_core::post::stats::ALL_REGIONS_NAME` と同じ。表示するときに訳す）
+ALL_REGIONS_NAME = N_("(all regions)")
 
 #: 電位の丸め誤差とみなす大きさ（電極間電位差に対する割合）。これ以下は 0 と書く
 POTENTIAL_ROUNDOFF = 1e-12
 
 #: 電位の基準の書き方（結果の要約に出す）
-REFERENCE_LABELS = {"cathode_mean": "陰極の平均", "zero_mean": "全節点の平均"}
+REFERENCE_LABELS = {"cathode_mean": N_("mean of the cathodes"), "zero_mean": N_("mean of all nodes")}
 
 #: 選ばれた面の面積が指定面積からこれ以上ずれたら警告する（相対値。SPEC §11.1）。
 #:
@@ -155,9 +167,10 @@ def stale_result_message(changes: list[str]) -> str:
     """結果が古いことの説明。`changes` は `Session.changes_since_solve()` の戻り値。"""
     if not changes:
         return ""
-    return (
-        "この結果は求解したときの条件のものです。その後に変わった条件: "
-        f"{'、'.join(changes)}。いまの条件の結果を見るには F5（実行 → 求解）で解き直してください。"
+    return tr(
+        "This result is for the conditions at the time of solving. Changed since then: {changes}. "
+        "Press F5 (Run → Solve) to solve again with the current conditions.",
+        changes=tr(", ").join(changes),
     )
 
 
@@ -170,31 +183,34 @@ def _electrode_changes(old: list[ElectrodeSpec], new: list[ElectrodeSpec]) -> li
     def parts(a: ElectrodeSpec, b: ElectrodeSpec) -> list[str]:
         what = []
         if a.role != b.role:
-            what.append("役割")
+            what.append(tr("role"))
         if a.current != b.current:
-            what.append("総電流")
+            what.append(tr("total current"))
         if a.to_dict()["faces"] != b.to_dict()["faces"]:
-            what.append("面")
+            what.append(tr("faces"))
         if a.distribution != b.distribution:
-            what.append("荷重の配り方")
+            what.append(tr("load distribution"))
         return what
+
+    def changed(name: str, what: list[str]) -> str:
+        return tr("{what} of electrode {name}", what=tr("/").join(what), name=name)
 
     out: list[str] = []
     if len(old) == len(new):
         for a, b in zip(old, new):
             what = parts(a, b)
             if a.name != b.name:
-                what.insert(0, f"名前（{a.name} → {b.name}）")
+                what.insert(0, tr("name ({old} → {new})", old=a.name, new=b.name))
             if what:
-                out.append(f"電極 {b.name} の{'・'.join(what)}")
+                out.append(changed(b.name, what))
         return out
     before = {e.name: e for e in old}
     after = {e.name: e for e in new}
-    out += [f"電極 {n} を削除" for n in before if n not in after]
-    out += [f"電極 {n} を追加" for n in after if n not in before]
+    out += [tr("electrode {name} removed", name=n) for n in before if n not in after]
+    out += [tr("electrode {name} added", name=n) for n in after if n not in before]
     for name in after:
         if name in before and (what := parts(before[name], after[name])):
-            out.append(f"電極 {name} の{'・'.join(what)}")
+            out.append(changed(name, what))
     return out
 
 
@@ -299,7 +315,13 @@ class Session:
             mesh = read_nastran(path, length_unit=length_unit)
         elif mesh.length_unit != length_unit:
             raise GfemError(
-                f"[内部エラー] 渡されたメッシュの単位 {mesh.length_unit} が {length_unit} と違います"
+                error_text(
+                    tr(
+                        "The mesh passed in is in {got}, not {want}",
+                        got=mesh.length_unit, want=length_unit,
+                    ),
+                    kind="internal",
+                )
             )
         self.mesh = mesh
         self.mesh_serial += 1
@@ -393,7 +415,7 @@ class Session:
         """
         spec = self.electrode(old)
         if spec is None:
-            raise GfemError(f"[設定エラー] 電極 {old} がありません")
+            raise GfemError(error_text(tr("There is no electrode {name}", name=old)))
         new = new.strip()
         if new == old:
             return spec
@@ -404,13 +426,20 @@ class Session:
     def _require_free_name(self, name: str) -> None:
         if not name.strip():
             raise GfemError(
-                "[設定エラー] 電極の名前が空です\n  対処: E1・E2 のような名前を付けてください"
+                error_text(
+                    tr("The electrode name is empty"),
+                    hint=tr("Give it a name such as E1 or E2"),
+                )
             )
         if self.electrode(name) is not None:
             raise GfemError(
-                f"[設定エラー] 電極 {name} はすでにあります"
-                "\n  対処: 電極ごとに違う名前を付けてください"
-                "（名前は結果とケースファイルで電極を指す鍵です）"
+                error_text(
+                    tr("Electrode {name} already exists", name=name),
+                    hint=tr(
+                        "Give each electrode a different name "
+                        "(the name identifies the electrode in results and case files)"
+                    ),
+                )
             )
 
     def remove_electrode(self, name: str) -> None:
@@ -431,9 +460,13 @@ class Session:
         missing = [m.pid for m in study.materials if m.sigma <= 0.0]
         if missing:
             raise GfemError(
-                "[設定エラー] 導電率が未設定の領域があります: PID="
-                + ", ".join(str(p) for p in missing)
-                + "\n  対処: モデルツリーの領域を選んで σ [S/m] を入力してください"
+                error_text(
+                    tr(
+                        "Some regions have no conductivity: PID={pids}",
+                        pids=", ".join(str(p) for p in missing),
+                    ),
+                    hint=tr("Select the region in the model tree and enter σ [S/m]"),
+                )
             )
         return study.build_case(self._require_mesh())
 
@@ -528,16 +561,16 @@ class Session:
         pids = sorted(p for p in old_sigma.keys() | new_sigma.keys()
                       if old_sigma.get(p) != new_sigma.get(p))
         if pids:
-            changes.append(f"σ（PID {', '.join(str(p) for p in pids)}）")
+            changes.append(tr("σ (PID {pids})", pids=", ".join(str(p) for p in pids)))
 
         changes.extend(_electrode_changes(old.electrodes, new.electrodes))
 
         if old.solver.tolerance != new.solver.tolerance:
-            changes.append("収束判定")
+            changes.append(tr("convergence tolerance"))
         if old.solver.max_iterations != new.solver.max_iterations:
-            changes.append("最大反復回数")
+            changes.append(tr("maximum iterations"))
         if old.output.reference_potential != new.output.reference_potential:
-            changes.append("電位の基準")
+            changes.append(tr("potential reference"))
         return changes
 
     def _forget_results(self) -> None:
@@ -825,7 +858,7 @@ class Session:
         """電極にパッチを 1 枚足す。形の指定は `pick_patch` と同じ。"""
         spec = self.electrode(name)
         if spec is None:
-            raise GfemError(f"[設定エラー] 電極 {name} がありません")
+            raise GfemError(error_text(tr("There is no electrode {name}", name=name)))
         if radius is not None:
             shape["radius"] = float(radius)
         data = {"center": [float(v) for v in center], **shape}
@@ -839,7 +872,9 @@ class Session:
         """置いてあるパッチの形だけを変える（中心と PID はそのまま）。"""
         spec = self.electrode(name)
         if spec is None or not 0 <= index < len(spec.patches):
-            raise GfemError(f"[設定エラー] 電極 {name} にパッチ {index + 1} がありません")
+            raise GfemError(
+                error_text(tr("Electrode {name} has no patch {n}", name=name, n=index + 1))
+            )
         old = spec.patches[index]
         data = {"center": list(old.center), **shape}
         if old.pid is not None:
@@ -867,7 +902,7 @@ class Session:
         """
         spec = self.electrode(name)
         if spec is None:
-            raise GfemError(f"[設定エラー] 電極 {name} がありません")
+            raise GfemError(error_text(tr("There is no electrode {name}", name=name)))
         refs = {
             (int(e), int(f))
             for e, f in self.pick_patch(center, radius, pid)["face_refs"]
@@ -1185,38 +1220,48 @@ class Session:
         from .. import describe_bounding_box
 
         mesh = self._require_mesh()
+        shells = ", ".join(str(p) for p in mesh.shell_pids()) or tr("(none)")
         lines = [
-            f"ファイル: {mesh.source}",
-            f"長さ単位: {mesh.length_unit}",
-            f"寸法: {describe_bounding_box(mesh)}",
-            f"節点数: {mesh.n_nodes:,}",
-            f"要素数: {mesh.n_elements:,}"
-            + "（"
-            + ", ".join(f"{k} {n:,}" for k, n in mesh.element_counts())
-            + "）",
-            f"領域 (PSOLID): {', '.join(str(p) for p in mesh.solid_pids())}",
-            f"電極候補面 (PSHELL): {', '.join(str(p) for p in mesh.shell_pids())}",
+            tr("File: {path}", path=mesh.source),
+            tr("Length unit: {unit}", unit=mesh.length_unit),
+            tr("Size: {size}", size=describe_bounding_box(mesh)),
+            tr("Nodes: {n:,}", n=mesh.n_nodes),
+            tr(
+                "Elements: {n:,} ({counts})",
+                n=mesh.n_elements,
+                counts=", ".join(f"{k} {n:,}" for k, n in mesh.element_counts()),
+            ),
+            tr("Regions (PSOLID): {pids}", pids=", ".join(str(p) for p in mesh.solid_pids())),
+            tr("Electrode candidate faces (PSHELL): {pids}", pids=shells),
         ]
         report = mesh.report
         for name, count, line in report.unsupported:
-            lines.append(f"[未対応] {name} {count} 件（最初の出現: {line} 行目）")
+            lines.append(
+                tr(
+                    "[Unsupported] {name}: {count} (first at line {line})",
+                    name=name, count=count, line=line,
+                )
+            )
         for w in report.warnings:
-            lines.append(f"[警告] {w}")
+            lines.append(tr("[Warning] {text}", text=w))
         return "\n".join(lines)
 
     def result_summary(self) -> str:
         """結果と保存則チェックの要約（SPEC §5.3 / §5.4）。"""
         result = self.solution
         if result is None:
-            return "（まだ解いていません）"
+            return tr("(not solved yet)")
         c = result.conservation
         lines = [
-            f"反復回数: {result.iterations}（相対残差 {result.residual:.3e}, {result.backend}）",
-            f"電極間電位差 ΔV: {result.voltage:.6g} V",
-            f"等価抵抗 R: {result.impedance:.6g} Ω",
-            f"消費電力 P: {result.power:.6g} W",
+            tr(
+                "Iterations: {n} (relative residual {r:.3e}, {backend})",
+                n=result.iterations, r=result.residual, backend=result.backend,
+            ),
+            tr("Voltage between electrodes ΔV: {v:.6g} V", v=result.voltage),
+            tr("Equivalent resistance R: {r:.6g} Ω", r=result.impedance),
+            tr("Power P: {p:.6g} W", p=result.power),
             "",
-            "電極の平均電位:",
+            tr("Mean potential of each electrode:"),
         ]
         # 基準に選んだ電位（陰極の平均など）は理屈の上で 0 だが、丸め誤差で
         # 「-5.3e-17 V」と出ていた。電位差に比べて無視できる値は 0 と書く
@@ -1229,27 +1274,30 @@ class Session:
             self.solved_study.output.reference_potential if self.solved_study else "", ""
         )
         if reference:
-            lines.append(f"  （電位の基準: {reference} = 0 V）")
+            lines.append("  " + tr("(potential reference: {what} = 0 V)", what=tr(reference)))
         lines += [
             "",
-            "保存則チェック（SPEC §5.4）:",
+            tr("Conservation checks (SPEC §5.4):"),
             # 総注入電流 I で割る（M2 で max|f| から変更。SPEC §2.2 (a)）
-            f"  電流保存 1ᵀf/I: {c['current_balance']:.3e}",
-            f"  エネルギー収支の相対誤差: {c['energy_relative_error']:.3e}",
-            f"  離散残差 ‖Kφ−f‖/‖f‖: {c['discrete_residual']:.3e}",
+            "  " + tr("Current balance 1ᵀf/I: {v:.3e}", v=c["current_balance"]),
+            "  " + tr("Energy balance relative error: {v:.3e}", v=c["energy_relative_error"]),
+            "  " + tr("Discrete residual ‖Kφ−f‖/‖f‖: {v:.3e}", v=c["discrete_residual"]),
         ]
         warnings = list(c["warnings"]) + [
             w for w in result.warnings if w not in c["warnings"]
         ]
         if warnings:
             lines.append("")
-            lines += [f"[警告] {w}" for w in warnings]
+            lines += [tr("[Warning] {text}", text=w) for w in warnings]
         else:
-            lines.append("  → すべて許容範囲内")
+            lines.append("  " + tr("→ all within tolerance"))
         timings = result.timings
         lines += [
             "",
-            "所要時間 [秒]: " + ", ".join(f"{k} {v:.3f}" for k, v in timings.items()),
+            tr(
+                "Time [s]: {times}",
+                times=", ".join(f"{k} {v:.3f}" for k, v in timings.items()),
+            ),
         ]
         return "\n".join(lines)
 
@@ -1261,7 +1309,8 @@ class Session:
             rows.append(
                 [
                     str(s["pid"]),
-                    s["name"],
+                    # 全領域の行の名前はコアが言語に依らず付ける（CSV に出るため）。表示で訳す
+                    tr(s["name"]) if s["name"] == ALL_REGIONS_NAME else s["name"],
                     f"{s['sigma']:.4g}",
                     f"{s['n_elements']:,}",
                     # m³ → cm³（見出しの単位と必ず揃える。以前は ×1e6 のまま mm³ と書いていた）
@@ -1283,23 +1332,29 @@ class Session:
     def _require_solution(self) -> Solution:
         if self.solution is None:
             raise GfemError(
-                "[設定エラー] まだ求解していません"
-                "\n  対処: 「実行 → 求解」（F5）で計算してから書き出してください"
+                error_text(
+                    tr("Nothing has been solved yet"),
+                    hint=tr("Solve with Run → Solve (F5) before exporting"),
+                )
             )
         return self.solution
 
     def _require_mesh(self) -> Mesh:
         if self.mesh is None:
             raise GfemError(
-                "[設定エラー] メッシュが読み込まれていません"
-                "\n  対処: 「ファイル → モデルを開く」で .bdf / .nas を選んでください"
+                error_text(
+                    tr("No mesh is loaded"),
+                    hint=tr("Choose a .bdf / .nas file with File → Open model"),
+                )
             )
         return self.mesh
 
     def _require_study(self) -> Study:
         if self.study is None:
             raise GfemError(
-                "[設定エラー] モデルが開かれていません"
-                "\n  対処: 「ファイル → モデルを開く」で .bdf / .nas を選んでください"
+                error_text(
+                    tr("No model is open"),
+                    hint=tr("Choose a .bdf / .nas file with File → Open model"),
+                )
             )
         return self.study

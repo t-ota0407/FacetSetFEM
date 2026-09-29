@@ -164,17 +164,25 @@ fn resolve_one(
     if stack.contains(&cid) {
         stack.push(cid);
         let chain: Vec<String> = stack.iter().map(|c| c.to_string()).collect();
-        return Err(GfemError::model(format!(
+        return Err(GfemError::model(crate::tr!(
+            "Coordinate system references form a cycle: CID {}",
             "座標系の参照が循環しています: CID {}",
             chain.join(" → ")
         ))
-        .with_hint("CORD2* の RID がたどって自分自身に戻らないように直してください"));
+        .with_hint(crate::tr!(
+            "Fix the RIDs of CORD2* so that following them never leads back to the same system",
+            "CORD2* の RID がたどって自分自身に戻らないように直してください"
+        )));
     }
     let Some(definition) = definitions.get(&cid) else {
-        return Err(GfemError::model(format!(
+        return Err(GfemError::model(crate::tr!(
+            "The referenced coordinate system CID={cid} is not defined",
             "参照されている座標系 CID={cid} が定義されていません"
         ))
-        .with_hint("CORD2R / CORD2C / CORD2S でその CID を定義してください"));
+        .with_hint(crate::tr!(
+            "Define that CID with CORD2R / CORD2C / CORD2S",
+            "CORD2R / CORD2C / CORD2S でその CID を定義してください"
+        )));
     };
 
     stack.push(cid);
@@ -203,28 +211,38 @@ fn build(
     b: [f64; 3],
     c: [f64; 3],
 ) -> Result<CoordSystem> {
-    let fail = |what: &str, hint: &str| {
-        GfemError::model(format!(
+    let fail = |what: String, hint: String| {
+        GfemError::model(crate::tr!(
+            "The definition of {} is degenerate: {what}",
             "{} の定義が退化しています: {what}",
             definition.kind.card_name()
         ))
         .with_line(definition.line)
         .with_card(definition.kind.card_name())
         .with_entity(format!("CID={}", definition.cid))
-        .with_hint(hint.to_string())
+        .with_hint(hint)
     };
 
     let ez = normalize(sub(b, a)).ok_or_else(|| {
         fail(
-            "点 A と点 B が同じ位置にあります",
-            "B は原点 A から見た +z 軸上の点です。A と別の位置を指定してください",
+            crate::tr!(
+                "points A and B are at the same position",
+                "点 A と点 B が同じ位置にあります"
+            ),
+            crate::tr!(
+                "B is a point on the +z axis seen from the origin A. Give it a position different from A",
+                "B は原点 A から見た +z 軸上の点です。A と別の位置を指定してください"
+            ),
         )
     })?;
     let ac = sub(c, a);
     let ey = normalize(cross(ez, ac)).ok_or_else(|| {
         fail(
-            "点 C が z 軸上にあります",
-            "C は xz 平面の +x 側を決める点なので、A と B を結ぶ直線から外れている必要があります",
+            crate::tr!("point C lies on the z axis", "点 C が z 軸上にあります"),
+            crate::tr!(
+                "C fixes the +x side of the xz plane, so it must lie off the line through A and B",
+                "C は xz 平面の +x 側を決める点なので、A と B を結ぶ直線から外れている必要があります"
+            ),
         )
     })?;
     let ex = cross(ey, ez);

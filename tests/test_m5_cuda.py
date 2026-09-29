@@ -175,7 +175,8 @@ def test_falling_back_to_the_cpu_is_never_silent(sample_bdf):
     **GPU を隠した別プロセスで必ず走らせる**（`CUDA_VISIBLE_DEVICES=-1`。
     Windows では空文字の環境変数は未設定と同じになるので -1 を使う）。
     """
-    env = dict(os.environ, CUDA_VISIBLE_DEVICES="-1", PYTHONUTF8="1")
+    # テストは日本語の表示で回す（conftest.py）。子プロセスにも引き継ぐ
+    env = dict(os.environ, CUDA_VISIBLE_DEVICES="-1", PYTHONUTF8="1", GFEM_LANG="ja")
     done = subprocess.run(
         [sys.executable, "-c", _FALLBACK_SCRIPT, str(sample_bdf)],
         env=env,

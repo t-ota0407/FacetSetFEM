@@ -37,18 +37,19 @@ pub enum ErrorKind {
 }
 
 impl ErrorKind {
-    /// メッセージ先頭に出す日本語ラベル。
-    pub const fn label(self) -> &'static str {
-        match self {
-            ErrorKind::Io => "入出力エラー",
-            ErrorKind::Syntax => "構文エラー",
-            ErrorKind::Model => "モデルエラー",
-            ErrorKind::Unsupported => "未対応",
-            ErrorKind::Case => "設定エラー",
-            ErrorKind::Convergence => "収束エラー",
-            ErrorKind::Cancelled => "中断",
-            ErrorKind::Internal => "内部エラー",
-        }
+    /// メッセージ先頭に出すラベル（いまの表示言語で。SPEC §6.6）。
+    pub fn label(self) -> &'static str {
+        let (en, ja) = match self {
+            ErrorKind::Io => ("I/O error", "入出力エラー"),
+            ErrorKind::Syntax => ("Syntax error", "構文エラー"),
+            ErrorKind::Model => ("Model error", "モデルエラー"),
+            ErrorKind::Unsupported => ("Unsupported", "未対応"),
+            ErrorKind::Case => ("Setup error", "設定エラー"),
+            ErrorKind::Convergence => ("Convergence error", "収束エラー"),
+            ErrorKind::Cancelled => ("Cancelled", "中断"),
+            ErrorKind::Internal => ("Internal error", "内部エラー"),
+        };
+        if crate::i18n::is_ja() { ja } else { en }
     }
 }
 
@@ -84,14 +85,14 @@ impl fmt::Display for Location {
         match (&self.file, self.line) {
             (Some(p), Some(l)) => parts.push(format!("{}:{}", p.display(), l)),
             (Some(p), None) => parts.push(p.display().to_string()),
-            (None, Some(l)) => parts.push(format!("{l} 行目")),
+            (None, Some(l)) => parts.push(crate::tr!("line {l}", "{l} 行目")),
             (None, None) => {}
         }
         if let Some(c) = &self.card {
-            parts.push(format!("{c} カード"));
+            parts.push(crate::tr!("{c} card", "{c} カード"));
         }
         if let Some(i) = self.field {
-            parts.push(format!("フィールド {i}"));
+            parts.push(crate::tr!("field {i}", "フィールド {i}"));
         }
         if let Some(e) = &self.entity {
             parts.push(e.clone());
@@ -228,15 +229,19 @@ impl GfemError {
 
 impl fmt::Display for GfemError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let ja = crate::i18n::is_ja();
         write!(f, "[{}] {}", self.0.kind.label(), self.0.message)?;
         if !self.0.location.is_empty() {
-            write!(f, "\n  場所: {}", self.0.location)?;
+            let head = if ja { "場所" } else { "Where" };
+            write!(f, "\n  {head}: {}", self.0.location)?;
         }
         if let Some(h) = &self.0.hint {
-            write!(f, "\n  対処: {h}")?;
+            let head = if ja { "対処" } else { "Fix" };
+            write!(f, "\n  {head}: {h}")?;
         }
         if let Some(s) = &self.0.source {
-            write!(f, "\n  原因: {s}")?;
+            let head = if ja { "原因" } else { "Cause" };
+            write!(f, "\n  {head}: {s}")?;
         }
         Ok(())
     }
@@ -258,7 +263,8 @@ pub fn format_sample_list(items: &[String], limit: usize) -> String {
     if items.len() <= limit {
         items.join(", ")
     } else {
-        format!(
+        crate::tr!(
+            "{} ... and {} more ({} in total)",
             "{} ... 他 {} 件（全 {} 件）",
             items[..limit].join(", "),
             items.len() - limit,

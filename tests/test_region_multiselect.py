@@ -8,6 +8,8 @@
 from __future__ import annotations
 
 import pytest
+
+from gfem.i18n import tr
 from PySide6.QtCore import QItemSelectionModel, Qt
 from PySide6.QtTest import QTest
 
@@ -53,7 +55,7 @@ def test_several_regions_can_be_selected_and_share_one_sigma(window):
     assert "2 領域を選択中（1, 3）" in page.pid_label.text()
     # σ がばらばらなら「値がそろっていません」
     assert page.sigma_spin.is_mixed
-    assert page.sigma_spin.text() == MixedValueSpinBox.MIXED_TEXT
+    assert page.sigma_spin.text() == tr(MixedValueSpinBox.MIXED_TEXT)
     # 名前は複数選択の間は変えられない（まとめて同じ名前にすると見分けられない）
     assert not page.name_edit.isEnabled()
 

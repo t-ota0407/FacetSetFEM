@@ -108,15 +108,23 @@ pub fn region_stats(mesh: &Mesh, case: &Case, fields: &FieldResult) -> Result<Ve
 /// **パーセンタイルは全要素の値から求め直す。** 領域ごとの統計の要約からは
 /// 全体の中央値・p95・p99 は決まらない（以前は先頭の領域の値を写していた）。
 /// `pid` は 0、`sigma` は NaN（領域をまたぐので 1 つに決まらない）。
+/// 名前は [`ALL_REGIONS_NAME`]。**表示言語に依らない**——領域統計の CSV と実行サマリの
+/// JSON に出るので、後から読むスクリプトが言語で迷わないようにする（GUI が表示で訳す）。
+/// 全領域の行の名前（言語に依らない。SPEC §6.6）。
+pub const ALL_REGIONS_NAME: &str = "(all regions)";
+
 pub fn total_stats(mesh: &Mesh, fields: &FieldResult) -> Result<RegionStats> {
     check_lengths(mesh, fields)?;
     if fields.n_elements == 0 {
-        return Err(GfemError::model("ソリッド要素が 1 つもありません"));
+        return Err(GfemError::model(crate::tr!(
+            "There are no solid elements",
+            "ソリッド要素が 1 つもありません"
+        )));
     }
     let all: Vec<usize> = (0..fields.n_elements).collect();
     Ok(RegionStats {
         pid: 0,
-        name: "（全領域）".to_string(),
+        name: ALL_REGIONS_NAME.to_string(),
         sigma: f64::NAN,
         ..summarise_elements(mesh, fields, &all)
     })
@@ -124,7 +132,8 @@ pub fn total_stats(mesh: &Mesh, fields: &FieldResult) -> Result<RegionStats> {
 
 fn check_lengths(mesh: &Mesh, fields: &FieldResult) -> Result<()> {
     if fields.n_elements != mesh.n_solid_elements() {
-        return Err(GfemError::internal(format!(
+        return Err(GfemError::internal(crate::tr!(
+            "The number of element values does not match the mesh: {} given, but there are {} solid elements",
             "要素値の個数がメッシュと合いません: {} 個ですがソリッド要素は {} 個です",
             fields.n_elements,
             mesh.n_solid_elements()
@@ -230,12 +239,30 @@ pub fn write_region_stats_csv(
     use std::io::Write;
     let path = path.as_ref();
     let file = std::fs::File::create(path).map_err(|e| {
-        GfemError::io(path, "領域統計 CSV を作成できません", e)
-            .with_hint("出力先のディレクトリが存在し、書き込み権限があるかを確認してください")
+        GfemError::io(
+            path,
+            crate::tr!(
+                "Cannot create the region statistics CSV",
+                "領域統計 CSV を作成できません"
+            ),
+            e,
+        )
+        .with_hint(crate::tr!(
+            "Check that the output directory exists and that you have write permission",
+            "出力先のディレクトリが存在し、書き込み権限があるかを確認してください"
+        ))
     })?;
     let mut w = std::io::BufWriter::new(file);
-    let io_err =
-        |e: std::io::Error| GfemError::io(path, "領域統計 CSV の書き込みに失敗しました", e);
+    let io_err = |e: std::io::Error| {
+        GfemError::io(
+            path,
+            crate::tr!(
+                "Failed to write the region statistics CSV",
+                "領域統計 CSV の書き込みに失敗しました"
+            ),
+            e,
+        )
+    };
 
     writeln!(
         w,
@@ -283,11 +310,27 @@ pub fn write_region_stats_csv(
 pub fn write_convergence_csv(path: impl AsRef<std::path::Path>, history: &[f64]) -> Result<()> {
     use std::io::Write;
     let path = path.as_ref();
-    let file = std::fs::File::create(path)
-        .map_err(|e| GfemError::io(path, "収束履歴 CSV を作成できません", e))?;
+    let file = std::fs::File::create(path).map_err(|e| {
+        GfemError::io(
+            path,
+            crate::tr!(
+                "Cannot create the convergence history CSV",
+                "収束履歴 CSV を作成できません"
+            ),
+            e,
+        )
+    })?;
     let mut w = std::io::BufWriter::new(file);
-    let io_err =
-        |e: std::io::Error| GfemError::io(path, "収束履歴 CSV の書き込みに失敗しました", e);
+    let io_err = |e: std::io::Error| {
+        GfemError::io(
+            path,
+            crate::tr!(
+                "Failed to write the convergence history CSV",
+                "収束履歴 CSV の書き込みに失敗しました"
+            ),
+            e,
+        )
+    };
     writeln!(w, "iteration,relative_residual").map_err(io_err)?;
     for (i, r) in history.iter().enumerate() {
         writeln!(w, "{i},{r:.9e}").map_err(io_err)?;

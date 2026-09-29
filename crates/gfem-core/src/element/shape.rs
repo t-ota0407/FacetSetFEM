@@ -181,10 +181,16 @@ pub fn electric_field<E: ShapeFunctions>(
 }
 
 fn negative_jacobian(det: f64) -> GfemError {
-    GfemError::model(format!("ヤコビアンが正ではありません: det J = {det:.6e}")).with_hint(
+    GfemError::model(crate::tr!(
+        "The Jacobian is not positive: det J = {det:.6e}",
+        "ヤコビアンが正ではありません: det J = {det:.6e}"
+    ))
+    .with_hint(crate::tr!(
+        "The node order is reversed or the element is collapsed. Check the Nastran node order \
+         (for CHEXA, G1..G4 are the bottom face and G5..G8 the top face)",
         "節点の並び順が反転しているか、要素が潰れています。\
-         Nastran の節点順序（CHEXA は G1..G4 が底面、G5..G8 が上面）を確認してください",
-    )
+         Nastran の節点順序（CHEXA は G1..G4 が底面、G5..G8 が上面）を確認してください"
+    ))
 }
 
 #[cfg(test)]

@@ -302,18 +302,22 @@ pub fn require_connected(matrix: &CsrMatrix) -> Result<()> {
     let mut listed: Vec<String> = sizes
         .iter()
         .enumerate()
-        .map(|(i, s)| format!("成分{}: {s} 節点", i + 1))
+        .map(|(i, s)| crate::tr!("component {}: {s} nodes", "成分{}: {s} 節点", i + 1))
         .collect();
     listed.truncate(10);
-    Err(GfemError::model(format!(
+    Err(GfemError::model(crate::tr!(
+        "The mesh is split into {count} connected components ({})",
         "メッシュが {count} 個の連結成分に分かれています（{}）",
         listed.join(", ")
     ))
-    .with_hint(
+    .with_hint(crate::tr!(
+        "With an all-Neumann current field, each connected component gets its own independent \
+         potential reference, so the solution is not unique (SPEC §2.2). Check that the model is \
+         not split apart by missing elements or duplicated nodes",
         "全 Neumann 境界の電流場では、連結成分ごとに電位の基準が独立に決まってしまい解が\
          一意になりません（SPEC §2.2）。要素の抜けや節点の重複でモデルが分断されていないか\
-         確認してください",
-    ))
+         確認してください"
+    )))
 }
 
 #[cfg(test)]

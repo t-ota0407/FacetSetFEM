@@ -39,7 +39,9 @@ from ._gfem import (
     preconditioner_choices,
     read_nastran,
 )
+from . import i18n
 from .study import ElectrodeSpec, Material, OutputSpec, SolverSpec, Study, SurfacePatch
+from .i18n import tr
 from .sweep import SweepTable, sweep
 from .tissues import TISSUES, Tissue, load_library, tissue, tissue_names
 
@@ -67,6 +69,7 @@ __all__ = [
     "describe_bounding_box",
     "describe_extent",
     "describe_gpus",
+    "i18n",
     "length_units",
     "load_library",
     "metres_per_unit",
@@ -86,7 +89,7 @@ def describe_bounding_box(mesh: Mesh, unit: str | None = None) -> str:
     """
     box = mesh.bounding_box()
     if box is None:
-        return "（節点がありません）"
+        return tr("(no nodes)")
     lo, hi = box
     return describe_extent([h - l for l, h in zip(lo, hi)], unit or mesh.length_unit)
 
@@ -116,16 +119,20 @@ def describe_gpus() -> str:
     規模ごとの判定は :func:`cuda_check` を使う。
     """
     if not cuda_available():
-        return "このビルドには CUDA バックエンドが入っていません（CPU のみ）"
+        return tr("This build has no CUDA backend (CPU only)")
     devices = cuda_devices()
     if not devices:
-        return "CUDA が使える GPU が見つかりません（CPU で解きます）"
+        return tr("No CUDA-capable GPU found (solving on the CPU)")
     lines = []
     for d in devices:
         major, minor = d["compute_capability"]
-        state = "" if d["usable"] else "（倍精度に使えません: CC 6.0 未満）"
+        state = "" if d["usable"] else tr(" (not usable for double precision: CC below 6.0)")
         lines.append(
-            f"GPU {d['ordinal']}: {d['name']} / CC {major}.{minor} / "
-            f"VRAM {d['free_memory'] / 1e9:.1f} GB 空き（全 {d['total_memory'] / 1e9:.1f} GB）{state}"
+            tr(
+                "GPU {ordinal}: {name} / CC {major}.{minor} / VRAM {free:.1f} GB free "
+                "(of {total:.1f} GB){state}",
+                ordinal=d["ordinal"], name=d["name"], major=major, minor=minor,
+                free=d["free_memory"] / 1e9, total=d["total_memory"] / 1e9, state=state,
+            )
         )
     return "\n".join(lines)

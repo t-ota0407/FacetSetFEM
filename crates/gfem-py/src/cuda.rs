@@ -52,11 +52,12 @@ pub fn pick(
     if backend == Backend::Cuda {
         return (
             Some(cpu_fallback(n_nodes)),
-            Some(
+            Some(gfem_core::tr!(
+                "This build has no CUDA backend (built without the cuda feature). \
+                 Solving on the CPU",
                 "このビルドには CUDA バックエンドが入っていません（cuda フィーチャ無し）。\
                  CPU で解きます"
-                    .to_string(),
-            ),
+            )),
         );
     }
     (None, None)
@@ -86,7 +87,10 @@ pub fn check(
     _nnz: Option<usize>,
     _preconditioner: Preconditioner,
 ) -> Option<String> {
-    Some("このビルドには CUDA バックエンドが入っていません".to_string())
+    Some(gfem_core::tr!(
+        "This build has no CUDA backend",
+        "このビルドには CUDA バックエンドが入っていません"
+    ))
 }
 
 /// 見えている GPU の一覧（Python へ返す用）。

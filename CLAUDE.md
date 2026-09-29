@@ -32,6 +32,11 @@
 - **Rust を変えたら `maturin develop` してから pytest を回す。コミットした後も同じ。**
   実行サマリにはビルド時の Git の状態が埋め込まれるので、古いままだと
   `test_the_git_state_describes_this_build` が落ちる（SPEC §5.5）
+- **画面に出る文言は英語と日本語の両方を書く**（既定は英語。SPEC §6.6）。Rust は
+  `tr!("English", "日本語")` で並べて書き、Python は `gfem.i18n.tr("English")` を通して
+  `python/gfem/locale_ja.py` に訳を足す（読み込み時に決まる定数は `N_("...")`）。
+  `tests/test_i18n.py` が訳漏れと日本語の直書きを検出する。テストは日本語の表示で回している
+  （`tests/conftest.py` と `.cargo/config.toml`）ので、既存のテストの日本語の文言は変えないこと
 - **同じものを 2 か所に書かない。** 長さ単位の換算表・バックエンドと前処理の選択肢と別名は
   Rust 側だけに置き、Python は `gfem.metres_per_unit` / `gfem.backend_choices()` などで引く
   （SPEC §6.5）。テスト用のメッシュは、ユニットテストなら `crate::testing::kuhn_box`、

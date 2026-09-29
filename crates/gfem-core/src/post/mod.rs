@@ -154,7 +154,11 @@ fn element_field(
     let Some(sigma) = conductivity.get(&e.pid) else {
         return Err(GfemError::new(
             crate::error::ErrorKind::Case,
-            format!("PID={} に導電率が設定されていません", e.pid),
+            crate::tr!(
+                "No conductivity is set for PID={}",
+                "PID={} に導電率が設定されていません",
+                e.pid
+            ),
         ));
     };
     let n = e.conn.len();
@@ -183,7 +187,8 @@ fn element_field(
             shape::volume::<Penta6>(&points[..n])?,
         ),
         other => {
-            return Err(GfemError::unsupported(format!(
+            return Err(GfemError::unsupported(crate::tr!(
+                "{} cannot be treated as a solid element",
                 "{} はソリッド要素として扱えません",
                 other.card_name()
             )));
@@ -312,7 +317,9 @@ pub fn check_conservation(
     };
     let current_balance = if scale > 0.0 { sum_f / scale } else { 0.0 };
     if current_balance.abs() > CURRENT_BALANCE_TOLERANCE {
-        warnings.push(format!(
+        warnings.push(crate::tr!(
+            "The current conservation residual is too large: 1ᵀf/I = {current_balance:.3e} \
+             (tolerance {CURRENT_BALANCE_TOLERANCE:.0e})",
             "電流保存の残差が大きすぎます: 1ᵀf/I = {current_balance:.3e}（許容 {CURRENT_BALANCE_TOLERANCE:.0e}）"
         ));
     }
@@ -327,7 +334,9 @@ pub fn check_conservation(
         0.0
     };
     if energy_relative_error > ENERGY_TOLERANCE {
-        warnings.push(format!(
+        warnings.push(crate::tr!(
+            "The energy balance does not match: ∫σ|E|²dΩ = {power_from_field:.6e} W, fᵀφ = {power_from_load:.6e} W, \
+             relative error {energy_relative_error:.3e} (tolerance {ENERGY_TOLERANCE:.0e})",
             "エネルギー収支が合いません: ∫σ|E|²dΩ = {power_from_field:.6e} W, fᵀφ = {power_from_load:.6e} W, \
              相対誤差 {energy_relative_error:.3e}（許容 {ENERGY_TOLERANCE:.0e}）"
         ));
@@ -345,8 +354,14 @@ pub fn check_conservation(
     };
     let residual_limit = (DISCRETE_RESIDUAL_FACTOR * tolerance).max(DISCRETE_RESIDUAL_FLOOR);
     if discrete_residual > residual_limit {
-        warnings.push(format!(
-            "離散残差 ‖Kφ−f‖/‖f‖ = {discrete_residual:.3e} が、収束判定 {tolerance:.0e} から             見込まれる大きさ（{residual_limit:.0e} 以下）を超えています。CG の残差の更新に             丸めが積もっている可能性があるので、収束判定を緩めるか前処理を変えて解き直してください"
+        warnings.push(crate::tr!(
+            "The discrete residual ‖Kφ−f‖/‖f‖ = {discrete_residual:.3e} exceeds what the convergence \
+             tolerance {tolerance:.0e} leads one to expect (at most {residual_limit:.0e}). Rounding errors \
+             may have accumulated in the CG residual updates, so solve again with a looser tolerance \
+             or a different preconditioner",
+            "離散残差 ‖Kφ−f‖/‖f‖ = {discrete_residual:.3e} が、収束判定 {tolerance:.0e} から\
+             見込まれる大きさ（{residual_limit:.0e} 以下）を超えています。CG の残差の更新に\
+             丸めが積もっている可能性があるので、収束判定を緩めるか前処理を変えて解き直してください"
         ));
     }
 

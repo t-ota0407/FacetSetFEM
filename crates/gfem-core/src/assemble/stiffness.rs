@@ -28,10 +28,17 @@ pub fn assemble_stiffness(
         let Some(sigma) = conductivity.get(&e.pid) else {
             return Err(GfemError::new(
                 crate::error::ErrorKind::Case,
-                format!("PID={} に導電率が設定されていません", e.pid),
+                crate::tr!(
+                    "No conductivity is set for PID={}",
+                    "PID={} に導電率が設定されていません",
+                    e.pid
+                ),
             )
-            .with_entity(format!("要素 EID={}", e.id))
-            .with_hint("ケースの materials に該当 PID の σ [S/m] を追加してください"));
+            .with_entity(crate::tr!("element EID={}", "要素 EID={}", e.id))
+            .with_hint(crate::tr!(
+                "Add σ [S/m] for this PID to the case's materials",
+                "ケースの materials に該当 PID の σ [S/m] を追加してください"
+            )));
         };
 
         element_stiffness(mesh, &e, sigma, &mut local)?;
@@ -61,10 +68,16 @@ pub(crate) fn tet4_row(
 
 /// 体積がゼロ以下の四面体のエラー。
 fn degenerate_tet(e: &ElementRef<'_>) -> GfemError {
-    GfemError::model("体積がゼロの要素があります")
-        .with_card("CTETRA")
-        .with_entity(format!("要素 EID={}", e.id))
-        .with_hint("退化した四面体です。メッシュ生成側で修正してください")
+    GfemError::model(crate::tr!(
+        "An element has zero volume",
+        "体積がゼロの要素があります"
+    ))
+    .with_card("CTETRA")
+    .with_entity(crate::tr!("element EID={}", "要素 EID={}", e.id))
+    .with_hint(crate::tr!(
+        "This is a degenerate tetrahedron. Fix it in the mesh generator",
+        "退化した四面体です。メッシュ生成側で修正してください"
+    ))
 }
 
 /// 1 要素分の剛性行列を `local` に書く。
@@ -109,12 +122,16 @@ pub(crate) fn element_stiffness(
                 .map_err(|e2| with_element(e2, e))?;
         }
         other => {
-            return Err(GfemError::unsupported(format!(
+            return Err(GfemError::unsupported(crate::tr!(
+                "{} cannot be used in the analysis",
                 "{} は解析に使えません",
                 other.card_name()
             ))
-            .with_entity(format!("要素 EID={}", e.id))
-            .with_hint("ソリッド要素は CTETRA / CHEXA / CPENTA に対応しています"));
+            .with_entity(crate::tr!("element EID={}", "要素 EID={}", e.id))
+            .with_hint(crate::tr!(
+                "Supported solid elements are CTETRA / CHEXA / CPENTA",
+                "ソリッド要素は CTETRA / CHEXA / CPENTA に対応しています"
+            )));
         }
     }
     Ok(())
@@ -122,9 +139,11 @@ pub(crate) fn element_stiffness(
 
 /// エラーに要素の情報を足す。
 fn with_element(error: GfemError, e: &ElementRef<'_>) -> GfemError {
-    error
-        .with_card(e.kind.card_name())
-        .with_entity(format!("要素 EID={}", e.id))
+    error.with_card(e.kind.card_name()).with_entity(crate::tr!(
+        "element EID={}",
+        "要素 EID={}",
+        e.id
+    ))
 }
 
 /// 要素行列を CSR に足し込む。
@@ -136,10 +155,14 @@ fn scatter(
     for (i, &row) in conn.iter().enumerate() {
         for (j, &col) in conn.iter().enumerate() {
             let Some(k) = matrix.position(row as usize, col) else {
-                return Err(GfemError::internal(format!(
+                return Err(GfemError::internal(crate::tr!(
+                    "The CSR structure has no entry ({row}, {col})",
                     "CSR 構造に成分 ({row}, {col}) がありません"
                 ))
-                .with_hint("非ゼロ構造の構築とアセンブリで要素の集合が食い違っています"));
+                .with_hint(crate::tr!(
+                    "The sparsity pattern and the assembly disagree on the set of elements",
+                    "非ゼロ構造の構築とアセンブリで要素の集合が食い違っています"
+                )));
             };
             matrix.values_mut()[k] += ke[i][j];
         }

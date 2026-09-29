@@ -154,9 +154,10 @@ pub fn assemble_stiffness_parallel(
 ) -> Result<()> {
     let n = matrix.n_rows();
     if adjacency.len() != n {
-        return Err(GfemError::internal(
-            "節点 → 要素の表がメッシュと合っていません",
-        ));
+        return Err(GfemError::internal(crate::tr!(
+            "The node-to-element table does not match the mesh",
+            "節点 → 要素の表がメッシュと合っていません"
+        )));
     }
     let (row_ptr, col_idx, values) = matrix.parts_mut();
 
@@ -193,12 +194,21 @@ pub fn assemble_stiffness_parallel(
                             let Some(sigma) = conductivity.get(&reference.pid) else {
                                 return Err(GfemError::new(
                                     ErrorKind::Case,
-                                    format!("PID={} に導電率が設定されていません", reference.pid),
+                                    crate::tr!(
+                                        "No conductivity is set for PID={}",
+                                        "PID={} に導電率が設定されていません",
+                                        reference.pid
+                                    ),
                                 )
-                                .with_entity(format!("要素 EID={}", reference.id))
-                                .with_hint(
-                                    "ケースの materials に該当 PID の σ [S/m] を追加してください",
-                                ));
+                                .with_entity(crate::tr!(
+                                    "element EID={}",
+                                    "要素 EID={}",
+                                    reference.id
+                                ))
+                                .with_hint(crate::tr!(
+                                    "Add σ [S/m] for this PID to the case's materials",
+                                    "ケースの materials に該当 PID の σ [S/m] を追加してください"
+                                )));
                             };
                             last = Some((reference.pid, sigma));
                             sigma
@@ -226,7 +236,8 @@ pub fn assemble_stiffness_parallel(
                     }
                     for (j, &column) in reference.conn.iter().enumerate() {
                         let Ok(k) = columns.binary_search(&column) else {
-                            return Err(GfemError::internal(format!(
+                            return Err(GfemError::internal(crate::tr!(
+                                "The CSR structure has no entry ({i}, {column})",
                                 "CSR 構造に成分 ({i}, {column}) がありません"
                             )));
                         };

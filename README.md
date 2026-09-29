@@ -37,6 +37,11 @@ GUI:
 .venv/Scripts/python.exe -m gfem.gui tests/models/slab_3layer.bdf --unit mm # 単位を明示する
 ```
 
+表示は**英語が既定**で、日本語にも切り替えられる（SPEC §6.6）。メニューの
+「View → Language」で選ぶと保存され、次に起動したときから効く。起動時に指定するなら
+`--lang ja`（または環境変数 `GFEM_LANG=ja`）。Python API のエラーの言語は
+`gfem.i18n.set_language("ja")` で変えられる。
+
 Nastran には単位情報が無いので、**単位を黙って決めることはない**（SPEC §3.2）。
 Python API の `read_nastran` も `length_unit` を省略するとエラーになる。
 
@@ -179,6 +184,7 @@ library = gfem.load_library("my_tissues.yaml")   # 自前の表に差し替え�
 | パラメータスタディ（Python API と GUI） | ✔ |
 | 組織物性プリセット | ✔ |
 | 複数の領域に σ をまとめて入れる（ツリーで Ctrl / Shift + クリック） | ✔ |
+| 表示言語の切り替え（英語が既定・日本語。GUI とコアのエラー・警告・レポートすべて） | ✔ |
 
 ### 規模と速度
 

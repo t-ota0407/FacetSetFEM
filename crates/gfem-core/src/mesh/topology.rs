@@ -277,15 +277,18 @@ fn surface_from_sorted(mesh: &Mesh, entries: Vec<FaceEntry>) -> Result<Surface> 
     }
 
     if !non_manifold.is_empty() {
-        return Err(GfemError::model(format!(
+        return Err(GfemError::model(crate::tr!(
+            "Some faces are shared by three or more elements (non-manifold mesh, {} places): {}",
             "3 個以上の要素に共有される面があります（非多様体メッシュ、{} 箇所）: {}",
             non_manifold.len(),
             format_sample_list(&non_manifold, 20)
         ))
-        .with_hint(
+        .with_hint(crate::tr!(
+            "Elements are defined more than once, or the mesh intersects itself. \
+             Fix it in the mesh generator",
             "要素が重複して定義されているか、メッシュが自己交差しています。\
-             メッシュ生成側で修正してください",
-        ));
+             メッシュ生成側で修正してください"
+        )));
     }
 
     Ok(Surface { faces, keys })
@@ -361,7 +364,8 @@ fn scan_surface(mesh: &Mesh, entries: &[FaceEntry]) -> Scan {
                 .iter()
                 .map(|&(_, elem, _)| mesh.solid(elem as usize).id.to_string())
                 .collect();
-            out.non_manifold.push(format!("要素 EID={}", ids.join("/")));
+            out.non_manifold
+                .push(crate::tr!("elements EID={}", "要素 EID={}", ids.join("/")));
         }
         i = j;
     }

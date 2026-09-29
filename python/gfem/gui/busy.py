@@ -33,6 +33,8 @@ from PySide6.QtCore import QEvent, QEventLoop, QPoint, QRectF, Qt, QThread, QTim
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen
 from PySide6.QtWidgets import QApplication, QWidget
 
+from ..i18n import tr
+
 __all__ = ["BusyOverlay", "BusyScope", "busy_scope", "run_in_thread"]
 
 #: これより短い処理ではローディングを出さない [ms]
@@ -202,8 +204,8 @@ class BusyOverlay(QWidget):
         message, detail = self._stack[-1]
         elapsed = time.monotonic() - self._started
         if elapsed >= ELAPSED_AFTER_S:
-            suffix = f"経過 {elapsed:.0f} 秒"
-            detail = f"{detail}　{suffix}" if detail else suffix
+            suffix = tr("{seconds:.0f} s elapsed", seconds=elapsed)
+            detail = tr("{detail}   {suffix}", detail=detail, suffix=suffix) if detail else suffix
 
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)

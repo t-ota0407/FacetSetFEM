@@ -89,7 +89,10 @@ pub fn build<'h, B: LinearBackend>(
         }
         Preconditioner::Amg => {
             let h = hierarchy.ok_or_else(|| {
-                GfemError::internal("AMG の階層が組み立てられていません".to_string())
+                GfemError::internal(crate::tr!(
+                    "The AMG hierarchy has not been built",
+                    "AMG の階層が組み立てられていません"
+                ))
             })?;
             Ok(DevicePreconditioner::Amg(Box::new(DeviceHierarchy::new(
                 backend, h,
@@ -106,10 +109,14 @@ fn inverse_diagonal(matrix: &CsrMatrix) -> Result<Vec<f64>> {
         .enumerate()
         .find(|&(_, &d)| d <= 0.0 || d.is_nan())
     {
-        return Err(GfemError::internal(format!(
+        return Err(GfemError::internal(crate::tr!(
+            "A diagonal entry of the stiffness matrix is not positive: {d} in row {i}",
             "剛性行列の対角成分が正ではありません: 行 {i} で {d}"
         ))
-        .with_hint("退化要素か、導電率がゼロ以下の領域が残っている可能性があります"));
+        .with_hint(crate::tr!(
+            "There may be degenerate elements or regions with zero or negative conductivity",
+            "退化要素か、導電率がゼロ以下の領域が残っている可能性があります"
+        )));
     }
     Ok(diag.iter().map(|d| 1.0 / d).collect())
 }

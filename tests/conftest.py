@@ -11,6 +11,13 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
+# テストは日本語の表示で回す（SPEC §6.6）。表示言語の既定は英語だが、既存のテストの
+# 多くは日本語の文言を確かめている。英語の文言は tests/test_i18n.py などで言語を
+# 切り替えて確かめる（Rust のテストは .cargo/config.toml で同じようにしている）
+import gfem.i18n  # noqa: E402
+
+gfem.i18n.set_language("ja")
+
 
 def _load_script(name: str) -> ModuleType:
     """`scripts/` 以下のスクリプトをモジュールとして読み込む。"""

@@ -41,17 +41,29 @@ impl Plane {
         if origin.iter().any(|v| !v.is_finite()) {
             return Err(GfemError::new(
                 ErrorKind::Case,
-                format!("切断面の位置が数値になっていません: {origin:?}"),
+                crate::tr!(
+                    "The position of the section plane is not a number: {origin:?}",
+                    "切断面の位置が数値になっていません: {origin:?}"
+                ),
             )
-            .with_hint("平面の位置は m 単位の有限な座標で指定してください"));
+            .with_hint(crate::tr!(
+                "Give the plane position as finite coordinates in m",
+                "平面の位置は m 単位の有限な座標で指定してください"
+            )));
         }
         let length = norm(normal);
         if !length.is_finite() || length == 0.0 {
             return Err(GfemError::new(
                 ErrorKind::Case,
-                format!("切断面の法線が不正です: {normal:?}"),
+                crate::tr!(
+                    "Invalid normal of the section plane: {normal:?}",
+                    "切断面の法線が不正です: {normal:?}"
+                ),
             )
-            .with_hint("法線は長さが 0 でない有限なベクトルで指定してください（例: [0, 0, 1]）"));
+            .with_hint(crate::tr!(
+                "Give the normal as a finite vector of nonzero length (e.g. [0, 0, 1])",
+                "法線は長さが 0 でない有限なベクトルで指定してください（例: [0, 0, 1]）"
+            )));
         }
         Ok(Self {
             origin,

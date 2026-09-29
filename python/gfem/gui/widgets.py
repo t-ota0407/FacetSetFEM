@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
 )
 
 from .. import describe_extent, length_units, metres_per_unit
+from ..i18n import N_, tr
 
 
 class ConvergencePlot(QWidget):
@@ -71,7 +72,9 @@ class ConvergencePlot(QWidget):
         if len(values) < 2:
             painter.setPen(QColor(120, 120, 120))
             painter.drawText(
-                self.rect(), Qt.AlignmentFlag.AlignCenter, "収束曲線（求解すると表示されます）"
+                self.rect(),
+                Qt.AlignmentFlag.AlignCenter,
+                tr("Convergence curve (appears when you solve)"),
             )
             return
 
@@ -111,7 +114,11 @@ class ConvergencePlot(QWidget):
         painter.setPen(QColor(60, 60, 60))
         painter.drawText(
             QPointF(left, self.height() - 4),
-            f"反復 {len(self._history) - 1}　相対残差 {self._history[-1]:.3e}",
+            tr(
+                "Iteration {n}   relative residual {r:.3e}",
+                n=len(self._history) - 1,
+                r=self._history[-1],
+            ),
         )
 
 
@@ -132,7 +139,7 @@ class MixedValueSpinBox(QDoubleSpinBox):
     数値は末尾の 0 を落として出す（小数 6 桁の欄で 0.04 が「0.040000」と出ていた）。
     """
 
-    MIXED_TEXT = "（値がそろっていません）"
+    MIXED_TEXT = N_("(values differ)")
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -175,7 +182,7 @@ class MixedValueSpinBox(QDoubleSpinBox):
         self.blockSignals(True)
         self._mixed = True
         super().setRange(self._floor - 1.0, self.maximum())
-        self.setSpecialValueText(self.MIXED_TEXT)
+        self.setSpecialValueText(tr(self.MIXED_TEXT))
         self.setValue(self._floor - 1.0)
         self.blockSignals(False)
 
@@ -219,12 +226,12 @@ class UnitSelector(QDialog):
 
     def __init__(self, raw_extent: tuple[float, float, float], parent=None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("長さ単位の選択")
+        self.setWindowTitle(tr("Choose the length unit"))
         self._raw = raw_extent
 
         layout = QVBoxLayout(self)
         layout.addWidget(
-            QLabel("Nastran ファイルには単位情報がありません。座標値の単位を選んでください。")
+            QLabel(tr("Nastran files carry no unit information. Choose the unit of the coordinates."))
         )
         self.combo = QComboBox()
         self.combo.addItems(length_units())
@@ -235,7 +242,7 @@ class UnitSelector(QDialog):
         self.preview.setStyleSheet("font-weight: bold;")
         layout.addWidget(self.preview)
         layout.addWidget(
-            QLabel("寸法が想定と桁違いなら、単位の選択を見直してください。")
+            QLabel(tr("If the size is off by orders of magnitude, check the unit."))
         )
 
         buttons = QDialogButtonBox(

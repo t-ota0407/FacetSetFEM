@@ -364,11 +364,15 @@ impl Mesh {
     /// m 以外の単位で読んだメッシュに使うとエラー（割り戻しで丸めが入るため）。
     pub fn reinterpret_length_unit(&self, unit: LengthUnit) -> crate::error::Result<Mesh> {
         if self.length_unit != LengthUnit::Meter {
-            return Err(crate::error::GfemError::internal(format!(
+            return Err(crate::error::GfemError::internal(crate::tr!(
+                "Only a mesh read in m can have its length unit reinterpreted (this mesh is in {})",
                 "単位を付け替えられるのは m として読んだメッシュだけです（このメッシュは {}）",
                 self.length_unit.symbol()
             ))
-            .with_hint("選んだ単位で read_nastran し直してください"));
+            .with_hint(crate::tr!(
+                "Read the file again with read_nastran in the chosen unit",
+                "選んだ単位で read_nastran し直してください"
+            )));
         }
         let mut mesh = self.clone();
         let scale = unit.to_meters();

@@ -26,12 +26,17 @@ impl Conductivity {
         if !sigma.is_finite() || sigma <= 0.0 {
             return Err(GfemError::new(
                 ErrorKind::Case,
-                format!("導電率は正の有限値でなければなりません: σ = {sigma}"),
+                crate::tr!(
+                    "The conductivity must be a positive finite value: σ = {sigma}",
+                    "導電率は正の有限値でなければなりません: σ = {sigma}"
+                ),
             )
-            .with_hint(
+            .with_hint(crate::tr!(
+                "Conductivities of biological tissue are roughly 0.01–2 S/m (bone 0.02, fat 0.04, \
+                 skin 0.1, muscle 0.35, etc.). Check that the unit is S/m",
                 "生体組織の導電率は概ね 0.01〜2 S/m の範囲です（骨 0.02、脂肪 0.04、\
-                 皮膚 0.1、筋 0.35 など）。単位が S/m になっているか確認してください",
-            ));
+                 皮膚 0.1、筋 0.35 など）。単位が S/m になっているか確認してください"
+            )));
         }
         Ok(Conductivity::Isotropic(sigma))
     }

@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
+from ..i18n import N_, tr
 from ..study import Study
 from ..sweep import SweepTable, sweep
 
@@ -44,13 +45,13 @@ def parameter_choices(study: Study) -> list[tuple[str, str]]:
     電極のページの感覚で「2」と打つと 2 A（1000 倍）になった。`gfem.sweep` には
     `display_scale` で A に直して渡す。
     """
-    out: list[tuple[str, str]] = [("刺激電流（全電極） [mA]", "current")]
+    out: list[tuple[str, str]] = [(tr("Stimulation current (all electrodes) [mA]"), "current")]
     for m in study.materials:
-        label = f"σ: PID {m.pid}" + (f"（{m.name}）" if m.name else "")
+        label = f"σ: PID {m.pid}" + (tr(" ({name})", name=m.name) if m.name else "")
         out.append((f"{label} [S/m]", f"sigma.{m.pid}"))
     for e in study.electrodes:
-        out.append((f"電極 {e.name} の電流 [mA]", f"electrode.{e.name}.current"))
-    out.append(("収束判定（相対残差）", "solver.tolerance"))
+        out.append((tr("Current of electrode {name} [mA]", name=e.name), f"electrode.{e.name}.current"))
+    out.append((tr("Convergence tolerance (relative residual)"), "solver.tolerance"))
     return out
 
 
@@ -63,26 +64,26 @@ def display_scale(key: str) -> float:
 
 #: 入力欄の例（振るものごと。表示の単位で書く）
 VALUE_EXAMPLES = {
-    "current": "1, 2, 4  または  1:4:1",
-    "sigma": "0.02, 0.04, 0.08  または  0.02:0.08:0.02",
+    "current": N_("1, 2, 4  or  1:4:1"),
+    "sigma": N_("0.02, 0.04, 0.08  or  0.02:0.08:0.02"),
     "solver.tolerance": "1e-8, 1e-10, 1e-12",
 }
 
 #: 結果の列の見出し（表示用）。CSV の列名は ASCII のまま（SPEC §5.5）
 RESULT_HEADINGS = {
-    "impedance_ohm": "等価抵抗 R [Ω]",
-    "voltage_V": "電極間電位差 [V]",
-    "power_W": "消費電力 [W]",
-    "j_max_A_per_m2": "|J| 最大 [A/m²]",
-    "e_max_V_per_m": "|E| 最大 [V/m]",
-    "phi_min_V": "φ 最小 [V]",
-    "phi_max_V": "φ 最大 [V]",
-    "iterations": "反復回数",
-    "residual": "相対残差",
-    "backend": "バックエンド",
-    "preconditioner": "前処理",
-    "energy_relative_error": "エネルギー収支の相対誤差",
-    "conservation_warnings": "保存則の警告",
+    "impedance_ohm": N_("Resistance R [Ω]"),
+    "voltage_V": N_("Voltage between electrodes [V]"),
+    "power_W": N_("Power [W]"),
+    "j_max_A_per_m2": N_("|J| max [A/m²]"),
+    "e_max_V_per_m": N_("|E| max [V/m]"),
+    "phi_min_V": N_("φ min [V]"),
+    "phi_max_V": N_("φ max [V]"),
+    "iterations": N_("Iterations"),
+    "residual": N_("Relative residual"),
+    "backend": N_("Backend"),
+    "preconditioner": N_("Preconditioner"),
+    "energy_relative_error": N_("Energy balance relative error"),
+    "conservation_warnings": N_("Conservation warnings"),
 }
 
 
@@ -93,23 +94,25 @@ def parse_values(text: str) -> list[float]:
     """
     body = text.replace(",", " ").strip()
     if not body:
-        raise ValueError("値が入力されていません")
+        raise ValueError(tr("No values entered"))
     if ":" in body:
         parts = body.split(":")
         if len(parts) != 3:
-            raise ValueError("範囲は 始め:終わり:刻み の形で書いてください")
+            raise ValueError(tr("Write a range as start:stop:step"))
         start, stop, step = (_number(p) for p in parts)
         if step == 0.0:
-            raise ValueError("刻みが 0 です")
+            raise ValueError(tr("The step is 0"))
         count = int(round((stop - start) / step)) + 1
         if count <= 0 or count > 1000:
-            raise ValueError(f"ケース数が {count} 個になります（1〜1000 にしてください）")
+            raise ValueError(tr("That makes {count} cases (use 1 to 1000)", count=count))
         return [start + i * step for i in range(count)]
     return [_number(p) for p in body.split()]
 
 
 #: 値を読めなかったときの対処（どの書き方を受け付けるか）
-VALUES_HINT = "0.02, 0.04 のようにカンマか空白で区切るか、始め:終わり:刻み（0.02:0.06:0.01）で書いてください"
+VALUES_HINT = N_(
+    "Separate values with commas or spaces (0.02, 0.04), or write start:stop:step (0.02:0.06:0.01)"
+)
 
 
 def _number(text: str) -> float:
@@ -121,9 +124,13 @@ def _number(text: str) -> float:
     try:
         value = float(text)
     except ValueError:
-        raise ValueError(f"「{text.strip()}」を数値として読めません。\n{VALUES_HINT}") from None
+        raise ValueError(
+            tr("Cannot read \"{text}\" as a number.", text=text.strip()) + "\n" + tr(VALUES_HINT)
+        ) from None
     if not math.isfinite(value):
-        raise ValueError(f"「{text.strip()}」は有限の数値ではありません。\n{VALUES_HINT}")
+        raise ValueError(
+            tr("\"{text}\" is not a finite number.", text=text.strip()) + "\n" + tr(VALUES_HINT)
+        )
     return value
 
 
@@ -167,7 +174,7 @@ class SweepDialog(QDialog):
         self.table: SweepTable | None = None
         self._thread: SweepThread | None = None
 
-        self.setWindowTitle("パラメータスタディ")
+        self.setWindowTitle(tr("Parameter study"))
         self.resize(900, 600)
         layout = QVBoxLayout(self)
 
@@ -179,13 +186,15 @@ class SweepDialog(QDialog):
         self.values = QLineEdit()
         self.parameter.currentIndexChanged.connect(self._show_example)
         self._show_example()
-        form.addRow("振るもの", self.parameter)
-        form.addRow("値", self.values)
+        form.addRow(tr("Parameter"), self.parameter)
+        form.addRow(tr("Values"), self.values)
         layout.addLayout(form)
         layout.addWidget(
             QLabel(
-                "元のケースは書き換えません。メッシュは 1 度だけ読んで全ケースで使い回します。\n"
-                "解けなかったケースは飛ばして続け、下に理由を出します。"
+                tr(
+                    "The original case is not modified. The mesh is read once and reused for every case.\n"
+                    "Cases that fail are skipped; the reason is shown below."
+                )
             )
         )
 
@@ -205,9 +214,9 @@ class SweepDialog(QDialog):
         layout.addWidget(self.message)
 
         buttons = QHBoxLayout()
-        self.run_button = QPushButton("実行")
+        self.run_button = QPushButton(tr("Run"))
         self.run_button.clicked.connect(self.start)
-        self.save_button = QPushButton("CSV に保存...")
+        self.save_button = QPushButton(tr("Save as CSV..."))
         self.save_button.setEnabled(False)
         self.save_button.clicked.connect(self.save_csv)
         buttons.addWidget(self.run_button)
@@ -215,7 +224,7 @@ class SweepDialog(QDialog):
         buttons.addStretch(1)
         box = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         # 標準のボタンは Qt の翻訳が無いと英語（Close）になる
-        box.button(QDialogButtonBox.StandardButton.Close).setText("閉じる")
+        box.button(QDialogButtonBox.StandardButton.Close).setText(tr("Close"))
         box.rejected.connect(self.reject)
         buttons.addWidget(box)
         layout.addLayout(buttons)
@@ -224,7 +233,9 @@ class SweepDialog(QDialog):
         """入力欄の例を、振るものに合わせて出す（表示の単位で）。"""
         key = self.parameter.currentData() or ""
         head = "sigma" if key.startswith("sigma.") else "current" if display_scale(key) != 1.0 else key
-        self.values.setPlaceholderText(VALUE_EXAMPLES.get(head, "0.02, 0.04  または  0.02:0.06:0.01"))
+        self.values.setPlaceholderText(
+            tr(VALUE_EXAMPLES.get(head, N_("0.02, 0.04  or  0.02:0.06:0.01")))
+        )
 
     # --- 実行 ---------------------------------------------------------------
 
@@ -235,7 +246,7 @@ class SweepDialog(QDialog):
         try:
             values = parse_values(self.values.text())
         except ValueError as exc:
-            QMessageBox.warning(self, "値を読めません", str(exc))
+            QMessageBox.warning(self, tr("Cannot read the values"), str(exc))
             return
 
         key = self.parameter.currentData()
@@ -245,7 +256,7 @@ class SweepDialog(QDialog):
         self.progress.setVisible(True)
         self.progress.setRange(0, len(values))
         self.progress.setValue(0)
-        self.message.setText(f"{len(values)} ケースを実行中...")
+        self.message.setText(tr("Running {n} cases...", n=len(values)))
 
         self._thread = SweepThread(session.study, {key: values}, session.mesh, self)
         self._thread.progressed.connect(self._on_progress)
@@ -261,17 +272,17 @@ class SweepDialog(QDialog):
     def _on_failed(self, message: str) -> None:
         self.progress.setVisible(False)
         self.message.setText(message)
-        self.window.log(f"パラメータスタディに失敗しました: {message}")
+        self.window.log(tr("The parameter study failed: {message}", message=message))
 
     def _on_done(self, table: SweepTable) -> None:
         self.progress.setVisible(False)
         self.table = table
         self._fill(table)
         self.save_button.setEnabled(bool(table.rows))
-        note = f"{len(table)} ケースが完了しました。"
+        note = tr("{n} cases finished.", n=len(table))
         if table.failures:
             first = table.failures[0][1].splitlines()[0]
-            note += f" 解けなかったケースが {len(table.failures)} 件あります: {first}"
+            note += tr(" {n} cases could not be solved: {first}", n=len(table.failures), first=first)
         self.message.setText(note)
         self.window.log(note)
 
@@ -284,7 +295,7 @@ class SweepDialog(QDialog):
         labels = {key: label for label, key in parameter_choices(self.window.session.study)}
         self.result_table.setColumnCount(len(columns))
         self.result_table.setHorizontalHeaderLabels(
-            [labels.get(k) or RESULT_HEADINGS.get(k, k) for k in columns]
+            [labels.get(k) or tr(RESULT_HEADINGS.get(k, k)) for k in columns]
         )
         self.result_table.setRowCount(len(table.rows))
         for r, row in enumerate(table.rows):
@@ -304,9 +315,9 @@ class SweepDialog(QDialog):
         if self.table is None:
             return
         path, _ = QFileDialog.getSaveFileName(
-            self, "パラメータスタディの結果を保存", "sweep.csv", "CSV (*.csv)"
+            self, tr("Save the parameter study results"), "sweep.csv", "CSV (*.csv)"
         )
         if not path:
             return
         self.table.write_csv(Path(path))
-        self.window.log(f"パラメータスタディの結果を書き出しました: {path}")
+        self.window.log(tr("Wrote the parameter study results: {path}", path=path))

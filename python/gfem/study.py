@@ -38,6 +38,7 @@ from ._gfem import (
     preconditioner_choices,
     read_nastran,
 )
+from .i18n import error_text, tr
 
 __all__ = [
     "ElectrodeSpec",
@@ -57,12 +58,17 @@ _SUPPORTED_DISTRIBUTIONS = {"uniform_current_density"}
 
 def _error(what: str, where_: str, hint: str) -> GfemError:
     """「何が」「どこで」「どうすれば直るか」を揃えたエラーを作る（設計原則 6）。"""
-    return GfemError(f"[設定エラー] {what}\n  場所: {where_}\n  対処: {hint}")
+    return GfemError(error_text(what, where_, hint))
+
+
+def _in(where_: str, part: str) -> str:
+    """「<場所> の <項目>」（英語は "<項目> in <場所>"）。"""
+    return tr("{part} in {where}", part=part, where=where_)
 
 
 def _require(mapping: Any, key: str, where_: str, hint: str) -> Any:
     if not isinstance(mapping, dict) or key not in mapping:
-        raise _error(f"必須の項目 {key} がありません", where_, hint)
+        raise _error(tr("The required item {key} is missing", key=key), where_, hint)
     return mapping[key]
 
 
@@ -149,10 +155,10 @@ class SurfacePatch:
     def describe(self) -> str:
         """一覧に出す短い説明（例: 「矩形 20×20 mm 角R2 30°」「円 直径 50 mm」）。"""
         if not self.is_rect:
-            return f"円 直径 {2e3 * self.radius:.3g} mm"
-        text = f"矩形 {self.width * 1e3:.3g}×{self.height * 1e3:.3g} mm"
+            return tr("Circle, diameter {d:.3g} mm", d=2e3 * self.radius)
+        text = tr("Rectangle {w:.3g}×{h:.3g} mm", w=self.width * 1e3, h=self.height * 1e3)
         if self.corner_radius:
-            text += f" 角R{self.corner_radius * 1e3:.3g}"
+            text += tr(" corner R{r:.3g}", r=self.corner_radius * 1e3)
         if self.angle:
             text += f" {self.angle:.3g}°"
         return text
@@ -284,66 +290,66 @@ class Study:
             text = path.read_text(encoding="utf-8")
         except OSError as exc:
             raise _error(
-                f"ケースファイルを開けません: {exc}",
+                tr("Cannot open the case file: {error}", error=exc),
                 str(path),
-                "パスが正しいか、読み取り権限があるかを確認してください",
+                tr("Check that the path is right and that the file is readable"),
             ) from exc
         try:
             data = yaml.safe_load(text)
         except yaml.YAMLError as exc:
             raise _error(
-                f"YAML として読めません: {exc}",
+                tr("Cannot read as YAML: {error}", error=exc),
                 str(path),
-                "インデントと引用符を確認してください",
+                tr("Check the indentation and quotes"),
             ) from exc
         return cls.from_dict(data, path=path)
 
     @classmethod
     def from_dict(cls, data: Any, path: Path | None = None) -> Study:
         """辞書（YAML をパースした結果）から作る。"""
-        where = str(path) if path else "<ケース定義>"
+        where = str(path) if path else tr("<case definition>")
         if not isinstance(data, dict):
             raise _error(
-                "ケースファイルの中身がマッピングではありません",
+                tr("The case file does not contain a mapping"),
                 where,
-                "SPEC §3.3 の例を参考に、version / mesh / materials / electrodes を書いてください",
+                tr("Write version / mesh / materials / electrodes following the example in SPEC §3.3"),
             )
 
         version = data.get("version", CASE_VERSION)
         if version != CASE_VERSION:
             raise _error(
-                f"対応していないケースファイル形式です: version={version}",
-                f"{where} の version",
-                f"このバージョンの gfem が読めるのは version: {CASE_VERSION} です",
+                tr("Unsupported case file format: version={version}", version=version),
+                _in(where, "version"),
+                tr("This version of gfem reads version: {v}", v=CASE_VERSION),
             )
 
         mesh = _require(
             data,
             "mesh",
             where,
-            "mesh: file と length_unit を書いてください",
+            tr("Write mesh: with file and length_unit"),
         )
         mesh_file = _require(
-            mesh, "file", f"{where} の mesh", "解析するメッシュファイルのパスを書いてください"
+            mesh, "file", _in(where, "mesh"), tr("Write the path of the mesh file to analyse")
         )
         length_unit = _require(
             mesh,
             "length_unit",
-            f"{where} の mesh",
-            "mm / cm / m / inch のいずれかを書いてください（Nastran には単位情報が無いため必須）",
+            _in(where, "mesh"),
+            tr("Write one of mm / cm / m / inch (required because Nastran carries no unit information)"),
         )
 
         materials = [
-            _material_from(m, f"{where} の materials[{i}]")
+            _material_from(m, _in(where, f"materials[{i}]"))
             for i, m in enumerate(data.get("materials") or [])
         ]
         electrodes = [
-            _electrode_from(e, f"{where} の electrodes[{i}]")
+            _electrode_from(e, _in(where, f"electrodes[{i}]"))
             for i, e in enumerate(data.get("electrodes") or [])
         ]
         _require_unique_names(electrodes, where)
-        solver = _solver_from(data.get("solver") or {}, f"{where} の solver")
-        output = _output_from(data.get("output") or {}, f"{where} の output")
+        solver = _solver_from(data.get("solver") or {}, _in(where, "solver"))
+        output = _output_from(data.get("output") or {}, _in(where, "output"))
 
         return cls(
             mesh_file=Path(mesh_file),
@@ -471,60 +477,62 @@ class Study:
 
 
 def _material_from(data: Any, where_: str) -> Material:
-    pid = _require(data, "pid", where_, "PSOLID の PID を書いてください")
+    pid = _require(data, "pid", where_, tr("Write the PSOLID PID"))
     sigma = _require(
-        data, "sigma", where_, "導電率を S/m で書いてください（例: 筋 0.35）"
+        data, "sigma", where_, tr("Write the conductivity in S/m (e.g. muscle 0.35)")
     )
     try:
         return Material(pid=int(pid), sigma=float(sigma), name=str(data.get("name", "")))
     except (TypeError, ValueError) as exc:
         raise _error(
-            f"pid / sigma を数値として読めません: {exc}",
+            tr("Cannot read pid / sigma as numbers: {error}", error=exc),
             where_,
-            "pid は整数、sigma は実数（S/m）で書いてください",
+            tr("Write pid as an integer and sigma as a real number (S/m)"),
         ) from exc
 
 
 def _electrode_from(data: Any, where_: str) -> ElectrodeSpec:
-    name = _require(data, "name", where_, "電極の名前を書いてください")
-    role = _require(data, "role", where_, "anode か cathode を書いてください")
-    current = _require(data, "current", where_, "総電流を A で書いてください（例: 2.0e-3）")
+    name = _require(data, "name", where_, tr("Write the electrode name"))
+    role = _require(data, "role", where_, tr("Write anode or cathode"))
+    current = _require(data, "current", where_, tr("Write the total current in A (e.g. 2.0e-3)"))
     distribution = str(data.get("distribution", "uniform_current_density"))
     if distribution not in _SUPPORTED_DISTRIBUTIONS:
         raise _error(
-            f"未対応の電流分布です: {distribution}",
-            f"{where_} の distribution",
-            "v1.0 は uniform_current_density（面積按分）のみ対応です（SPEC §2.4）",
+            tr("Unsupported current distribution: {d}", d=distribution),
+            _in(where_, "distribution"),
+            tr("v1.0 supports only uniform_current_density (area-weighted) (SPEC §2.4)"),
         )
     faces = data.get("faces") or {}
     if not isinstance(faces, dict):
         raise _error(
-            "faces がマッピングではありません",
-            f"{where_} の faces",
-            "shell_pids と element_ids のリストを書いてください",
+            tr("faces is not a mapping"),
+            _in(where_, "faces"),
+            tr("Write lists of shell_pids and element_ids"),
         )
     shell_pids = [int(p) for p in (faces.get("shell_pids") or [])]
     element_ids = [int(i) for i in (faces.get("element_ids") or [])]
     patches = [
-        _patch_from(p, f"{where_} の faces.patches[{i}]")
+        _patch_from(p, _in(where_, f"faces.patches[{i}]"))
         for i, p in enumerate(faces.get("patches") or [])
     ]
-    added = _face_refs_from(faces.get("added"), f"{where_} の faces.added")
-    removed = _face_refs_from(faces.get("removed"), f"{where_} の faces.removed")
+    added = _face_refs_from(faces.get("added"), _in(where_, "faces.added"))
+    removed = _face_refs_from(faces.get("removed"), _in(where_, "faces.removed"))
     if not shell_pids and not element_ids and not patches and not added:
         raise _error(
-            f"電極 {name} に面が指定されていません",
-            f"{where_} の faces",
-            "shell_pids / element_ids / patches のいずれかは必要です"
-            "（シェル要素の無いモデルは patches を使ってください。SPEC §11.1）",
+            tr("Electrode {name} has no faces", name=name),
+            _in(where_, "faces"),
+            tr(
+                "One of shell_pids / element_ids / patches is needed "
+                "(use patches for models without shell elements; SPEC §11.1)"
+            ),
         )
     try:
         current = float(current)
     except (TypeError, ValueError) as exc:
         raise _error(
-            f"current を数値として読めません: {current!r}",
+            tr("Cannot read current as a number: {value}", value=repr(current)),
             where_,
-            "総電流を A で書いてください（例: 2.0e-3）",
+            tr("Write the total current in A (e.g. 2.0e-3)"),
         ) from exc
     return ElectrodeSpec(
         name=str(name),
@@ -550,9 +558,15 @@ def _require_unique_names(electrodes: list[ElectrodeSpec], where_: str) -> None:
     for i, e in enumerate(electrodes):
         if e.name in first:
             raise _error(
-                f"電極の名前 {e.name} が重複しています",
-                f"{where_} の electrodes[{i}]（electrodes[{first[e.name]}] と同じ名前）",
-                "電極名は結果とケースファイルで電極を指す鍵なので、電極ごとに違う名前にしてください",
+                tr("The electrode name {name} is duplicated", name=e.name),
+                tr(
+                    "{where} (same name as electrodes[{first}])",
+                    where=_in(where_, f"electrodes[{i}]"), first=first[e.name],
+                ),
+                tr(
+                    "The electrode name identifies the electrode in results and case files, "
+                    "so give each electrode a different name"
+                ),
             )
         first[e.name] = i
 
@@ -568,15 +582,15 @@ def _face_refs_from(data: Any, where_: str) -> list[tuple[int, int]]:
             eid, face = int(eid), int(face)
         except (TypeError, ValueError) as exc:
             raise _error(
-                f"面の指定を読めません: {item!r}",
+                tr("Cannot read the face: {value}", value=repr(item)),
                 f"{where_}[{i}]",
-                "[要素 EID, 面番号] の 2 個組で書いてください（面番号は 1 始まり）",
+                tr("Write pairs of [element EID, face number] (face numbers start at 1)"),
             ) from exc
         if face < 1:
             raise _error(
-                f"面番号が {face} です",
+                tr("The face number is {face}", face=face),
                 f"{where_}[{i}]",
-                "面番号は 1 始まりで書いてください（EID={} の第 1 面なら 1）".format(eid),
+                tr("Face numbers start at 1 (1 for the first face of EID={eid})", eid=eid),
             )
         out.append((eid, face))
     return out
@@ -590,19 +604,22 @@ def _patch_from(data: Any, where_: str) -> SurfacePatch:
     """
     if not isinstance(data, dict):
         raise _error(
-            "パッチがマッピングではありません",
+            tr("The patch is not a mapping"),
             where_,
-            "center: [x, y, z] と radius: r（m）、矩形なら shape: rect と width / height / axis"
-            " を書いてください（SPEC §3.3）",
+            tr(
+                "Write center: [x, y, z] and radius: r (m); for a rectangle, shape: rect with "
+                "width / height / axis (SPEC §3.3)"
+            ),
         )
     try:
         normalized = check_patch(data)
     except GfemError as exc:
         # コアのエラーは「[設定エラー] 何が\n  対処: どうすれば」。場所を間に差し込む
-        text = str(exc).removeprefix("[設定エラー] ")
-        what, _, hint = text.partition("\n  対処: ")
+        # （見出しはいまの表示言語。SPEC §6.6）
+        text = str(exc).removeprefix(f"[{tr('Setup error')}] ")
+        what, _, hint = text.partition("\n  " + tr("Fix: {hint}", hint=""))
         raise _error(
-            what.strip(), where_, hint.strip() or "SPEC §3.3 のパッチの書き方を参照してください"
+            what.strip(), where_, hint.strip() or tr("See how to write patches in SPEC §3.3")
         ) from None
     return SurfacePatch.from_dict(normalized)
 
@@ -610,7 +627,7 @@ def _patch_from(data: Any, where_: str) -> SurfacePatch:
 def _solver_from(data: Any, where_: str) -> SolverSpec:
     spec = SolverSpec()
     if not isinstance(data, dict):
-        raise _error("solver がマッピングではありません", where_, "SPEC §3.3 の例を参照してください")
+        raise _error(tr("solver is not a mapping"), where_, tr("See the example in SPEC §3.3"))
     spec.backend = str(data.get("backend", spec.backend))
     spec.method = str(data.get("method", spec.method))
     spec.preconditioner = str(data.get("preconditioner", spec.preconditioner))
@@ -620,29 +637,34 @@ def _solver_from(data: Any, where_: str) -> SolverSpec:
 
     if spec.method != "cg":
         raise _error(
-            f"未対応の解法です: {spec.method}",
-            f"{where_} の method",
-            "v1.0 は cg（共役勾配法）のみです（SPEC §4.3）",
+            tr("Unsupported method: {m}", m=spec.method),
+            _in(where_, "method"),
+            tr("v1.0 supports only cg (conjugate gradient) (SPEC §4.3)"),
         )
     if spec.gauge != "mean_zero":
         raise _error(
-            f"未対応のゲージ固定です: {spec.gauge}",
-            f"{where_} の gauge",
-            "射影による mean_zero のみです。1 節点ピン留めは採用しません（SPEC §2.2）",
+            tr("Unsupported gauge fixing: {g}", g=spec.gauge),
+            _in(where_, "gauge"),
+            tr("Only mean_zero by projection is supported. Pinning a single node is not used (SPEC §2.2)"),
         )
     if not _parses(parse_backend, spec.backend):
         raise _error(
-            f"このビルドでは使えないバックエンドです: {spec.backend}",
-            f"{where_} の backend",
-            f"{' / '.join(backend_choices())} のいずれかです。"
-            "cuda が使えるかは gfem.describe_gpus() で確認できます",
+            tr("This build cannot use the backend: {b}", b=spec.backend),
+            _in(where_, "backend"),
+            tr(
+                "Use one of {choices}. Check whether cuda is available with gfem.describe_gpus()",
+                choices=" / ".join(backend_choices()),
+            ),
         )
     if not _parses(parse_preconditioner, spec.preconditioner):
         raise _error(
-            f"未知の前処理です: {spec.preconditioner}",
-            f"{where_} の preconditioner",
-            f"{' / '.join(preconditioner_choices())} のいずれかです。amg は反復回数が"
-            "メッシュの細かさにほとんど依存しなくなります（SPEC §4.5）",
+            tr("Unknown preconditioner: {p}", p=spec.preconditioner),
+            _in(where_, "preconditioner"),
+            tr(
+                "Use one of {choices}. With amg the iteration count hardly depends on mesh fineness "
+                "(SPEC §4.5)",
+                choices=" / ".join(preconditioner_choices()),
+            ),
         )
     return spec
 
@@ -658,7 +680,7 @@ def _parses(parse: Callable[[str], str], value: str) -> bool:
 
 def _output_from(data: Any, where_: str) -> OutputSpec:
     if not isinstance(data, dict):
-        raise _error("output がマッピングではありません", where_, "SPEC §3.3 の例を参照してください")
+        raise _error(tr("output is not a mapping"), where_, tr("See the example in SPEC §3.3"))
     return OutputSpec(
         vtu=data.get("vtu"),
         region_stats=data.get("region_stats"),

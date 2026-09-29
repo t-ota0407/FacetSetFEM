@@ -160,6 +160,7 @@ def _solve(window, qt_app):
 def test_the_same_button_goes_back_to_the_result(window, qt_app, monkeypatch):
     """ボタン 1 つで形状表示と結果の表示を行き来できること。解き直さない。"""
     from gfem.gui.pages import SHOW_RESULT_LABEL, SHOW_SHAPE_LABEL
+    from gfem.i18n import tr
 
     page = window.page_result
     _solve(window, qt_app)
@@ -169,7 +170,7 @@ def test_the_same_button_goes_back_to_the_result(window, qt_app, monkeypatch):
     solution = window.session.solution
 
     page.shape_button.click()
-    assert page.shape_button.text() == SHOW_RESULT_LABEL
+    assert page.shape_button.text() == tr(SHOW_RESULT_LABEL)
     assert page.shape_button.isEnabled()
 
     draws = []
@@ -186,7 +187,7 @@ def test_the_same_button_goes_back_to_the_result(window, qt_app, monkeypatch):
     assert "|E| [V/m]" in window.plotter.scalar_bars.keys()
     assert len(draws) == 1, "3 つの設定を戻しても描き直しは 1 回"
     assert not solves and window.session.solution is solution, "解き直していない"
-    assert page.shape_button.text() == SHOW_SHAPE_LABEL
+    assert page.shape_button.text() == tr(SHOW_SHAPE_LABEL)
 
 
 def test_choosing_another_view_by_hand_forgets_the_saved_one(window, qt_app):
@@ -196,6 +197,7 @@ def test_choosing_another_view_by_hand_forgets_the_saved_one(window, qt_app):
     いま選んだ見方が上書きされてしまう。稜線の切り替えは見方に含めない。
     """
     from gfem.gui.pages import SHOW_RESULT_LABEL, SHOW_SHAPE_LABEL
+    from gfem.i18n import tr
 
     page = window.page_result
     _solve(window, qt_app)
@@ -203,10 +205,10 @@ def test_choosing_another_view_by_hand_forgets_the_saved_one(window, qt_app):
     edges = page.edges.isChecked()
     page.edges.setChecked(not edges)
     page.edges.setChecked(edges)  # MainWindow は共有なので元に戻しておく
-    assert page.shape_button.text() == SHOW_RESULT_LABEL, "稜線の切り替えでは忘れない"
+    assert page.shape_button.text() == tr(SHOW_RESULT_LABEL), "稜線の切り替えでは忘れない"
 
     page.field.setCurrentIndex(page.field.findData("phi [V]"))
-    assert page.shape_button.text() == SHOW_SHAPE_LABEL
+    assert page.shape_button.text() == tr(SHOW_SHAPE_LABEL)
     page.shape_button.click()
     page.shape_button.click()
     assert page.field.currentData() == "phi [V]", "選び直した見方に戻る"
@@ -215,6 +217,7 @@ def test_choosing_another_view_by_hand_forgets_the_saved_one(window, qt_app):
 def test_a_new_solve_forgets_the_view_of_the_old_result(window, qt_app):
     """形状表示のまま解き直したら、新しい結果の |J| を出し、古い見方は忘れる。"""
     from gfem.gui.pages import SHOW_SHAPE_LABEL
+    from gfem.i18n import tr
 
     page = window.page_result
     _solve(window, qt_app)
@@ -222,7 +225,7 @@ def test_a_new_solve_forgets_the_view_of_the_old_result(window, qt_app):
     page.shape_button.click()
     _solve(window, qt_app)
     assert page.field.currentData() == DEFAULT_RESULT_FIELD
-    assert page.shape_button.text() == SHOW_SHAPE_LABEL
+    assert page.shape_button.text() == tr(SHOW_SHAPE_LABEL)
 
 
 def test_the_button_is_disabled_when_there_is_nothing_to_change(window):

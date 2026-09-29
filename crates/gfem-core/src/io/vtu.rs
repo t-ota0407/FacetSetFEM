@@ -175,10 +175,10 @@ pub fn write_vtu(
     let n_cells = mesh.n_elements();
 
     for a in &data.point_data {
-        check_array(a, n_points, "節点")?;
+        check_array(a, n_points, &crate::tr!("nodes", "節点"))?;
     }
     for a in &data.cell_data {
-        check_array(a, n_cells, "要素")?;
+        check_array(a, n_cells, &crate::tr!("elements", "要素"))?;
     }
 
     // --- セル情報を VTK の並びに変換する ---
@@ -224,14 +224,31 @@ pub fn write_vtu(
     }
 
     let file = File::create(path).map_err(|e| {
-        GfemError::io(path, "VTU ファイルを作成できません", e)
-            .with_hint("出力先のディレクトリが存在し、書き込み権限があるかを確認してください")
+        GfemError::io(
+            path,
+            crate::tr!("Cannot create the VTU file", "VTU ファイルを作成できません"),
+            e,
+        )
+        .with_hint(crate::tr!(
+            "Check that the output directory exists and that you have write permission",
+            "出力先のディレクトリが存在し、書き込み権限があるかを確認してください"
+        ))
     })?;
     let mut out = Out::new(BufWriter::with_capacity(1 << 20, file));
 
     let io_err = |e: std::io::Error| {
-        GfemError::io(path, "VTU ファイルの書き込みに失敗しました", e)
-            .with_hint("ディスクの空き容量を確認してください")
+        GfemError::io(
+            path,
+            crate::tr!(
+                "Failed to write the VTU file",
+                "VTU ファイルの書き込みに失敗しました"
+            ),
+            e,
+        )
+        .with_hint(crate::tr!(
+            "Check the free disk space",
+            "ディスクの空き容量を確認してください"
+        ))
     };
 
     // --- XML ヘッダ ---
@@ -492,7 +509,9 @@ fn zlib_compress(input: &[u8], level: u32) -> Vec<u8> {
 fn check_array(a: &DataArray<'_>, n: usize, what: &str) -> Result<()> {
     let expected = n * a.n_components;
     if a.values.len() != expected {
-        return Err(GfemError::internal(format!(
+        return Err(GfemError::internal(crate::tr!(
+            "The array \"{0}\" to write to VTU has the wrong length: it has {1} values, but should have \
+             {3} {2} × {4} components = {5}",
             "VTU に書く配列 \"{}\" の長さが合いません: {} 個ありますが、{}数 {} × 成分数 {} = {} 個であるべきです",
             a.name,
             a.values.len(),

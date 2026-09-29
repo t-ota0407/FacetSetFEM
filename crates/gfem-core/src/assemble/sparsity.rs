@@ -30,12 +30,16 @@ pub fn build_sparsity(mesh: &Mesh) -> Result<CsrMatrix> {
 pub fn build_sparsity_with(mesh: &Mesh, adjacency: &NodeElements) -> Result<CsrMatrix> {
     let n = mesh.nodes.len();
     if n == 0 {
-        return Err(GfemError::model("節点がありません"));
+        return Err(GfemError::model(crate::tr!(
+            "There are no nodes",
+            "節点がありません"
+        )));
     }
     if adjacency.len() != n {
-        return Err(GfemError::internal(
-            "節点 → 要素の表がメッシュと合っていません",
-        ));
+        return Err(GfemError::internal(crate::tr!(
+            "The node-to-element table does not match the mesh",
+            "節点 → 要素の表がメッシュと合っていません"
+        )));
     }
 
     // 孤立節点の検出
@@ -44,15 +48,18 @@ pub fn build_sparsity_with(mesh: &Mesh, adjacency: &NodeElements) -> Result<CsrM
         .map(|i| mesh.nodes.id(i as u32).to_string())
         .collect();
     if !orphans.is_empty() {
-        return Err(GfemError::model(format!(
+        return Err(GfemError::model(crate::tr!(
+            "Some nodes are not referenced by any element ({}): ID={}",
             "どの要素からも参照されていない節点があります（{} 件）: ID={}",
             orphans.len(),
             format_sample_list(&orphans, SAMPLE_LIMIT)
         ))
-        .with_hint(
+        .with_hint(crate::tr!(
+            "The potential at an isolated node is not determined by the equations, so the \
+             solution is not unique. Remove such nodes from the mesh before solving",
             "孤立節点の電位は方程式から決まらないため、解が一意になりません。\
-             メッシュから取り除いてから解いてください",
-        ));
+             メッシュから取り除いてから解いてください"
+        )));
     }
 
     // 1. 行の塊ごとに、接する要素の全節点を集めて並べ、重複を詰める。塊の手元に溜めておき、

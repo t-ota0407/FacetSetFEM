@@ -49,6 +49,7 @@ from typing import Any
 import yaml
 
 from ._gfem import GfemError
+from .i18n import N_, error_text, tr
 
 __all__ = [
     "Tissue",
@@ -73,7 +74,7 @@ class Tissue:
     source: str = ""
     #: 使うときの注意
     note: str = ""
-    #: 日本語名（GUI の表示用）
+    #: 表示名（同梱のプリセットは英語で持ち、表示するときに `gfem.i18n.tr` を通す）
     label: str = ""
 
     def to_dict(self) -> dict[str, Any]:
@@ -90,8 +91,8 @@ def _t(name: str, label: str, sigma: float, note: str = "") -> Tissue:
         name=name,
         label=label,
         sigma=sigma,
-        frequency="DC〜数 kHz（経皮電気刺激の帯域）",
-        source="低周波帯で広く使われる代表値。文献値の範囲は広いので要確認",
+        frequency=N_("DC to a few kHz (the band of transcutaneous stimulation)"),
+        source=N_("Representative value widely used at low frequency. Literature values vary widely; check them"),
         note=note,
     )
 
@@ -100,20 +101,20 @@ def _t(name: str, label: str, sigma: float, note: str = "") -> Tissue:
 TISSUES: dict[str, Tissue] = {
     t.name: t
     for t in [
-        _t("skin", "皮膚", 0.10, "角質層の状態と電極の湿り具合で桁が動く。乾燥時はもっと低い"),
-        _t("fat", "脂肪", 0.04, "皮下脂肪。組織の中では低いほう"),
-        _t("muscle", "筋（繊維方向）", 0.35, "繊維方向。直交方向は 1/4 程度まで下がる"),
-        _t("muscle_transverse", "筋（繊維直交方向）", 0.08, "異方性は M7 時点では未対応（SPEC §9）"),
-        _t("bone_cortical", "皮質骨", 0.02, "組織の中で最も低い部類。電流を大きく迂回させる"),
-        _t("bone_cancellous", "海綿骨", 0.08, "骨髄を含むぶん皮質骨より高い"),
-        _t("blood", "血液", 0.70, "ヘマトクリット値に依存する"),
-        _t("csf", "脳脊髄液", 1.80, "生体組織の中で最も高い"),
-        _t("grey_matter", "灰白質", 0.10),
-        _t("white_matter", "白質", 0.06, "線維方向に異方性がある"),
-        _t("nerve", "末梢神経", 0.03, "束の走行方向に異方性がある"),
-        _t("tendon", "腱", 0.04),
-        _t("saline_0_9", "生理食塩水 0.9%", 1.40, "電極ゲルの代用として使うことがある"),
-        _t("electrode_gel", "電極ゲル", 0.50, "製品ごとに大きく違う。仕様書の値を使うこと"),
+        _t("skin", N_("Skin"), 0.10, N_("Varies by orders of magnitude with the stratum corneum and electrode wetness; lower when dry")),
+        _t("fat", N_("Fat"), 0.04, N_("Subcutaneous fat. Low among tissues")),
+        _t("muscle", N_("Muscle (along fibres)"), 0.35, N_("Along the fibres. Across them it drops to about 1/4")),
+        _t("muscle_transverse", N_("Muscle (across fibres)"), 0.08, N_("Anisotropy is not supported yet (SPEC §9)")),
+        _t("bone_cortical", N_("Cortical bone"), 0.02, N_("Among the lowest of all tissues; diverts current strongly")),
+        _t("bone_cancellous", N_("Cancellous bone"), 0.08, N_("Higher than cortical bone because it contains marrow")),
+        _t("blood", N_("Blood"), 0.70, N_("Depends on the haematocrit")),
+        _t("csf", N_("CSF"), 1.80, N_("The highest of all body tissues")),
+        _t("grey_matter", N_("Grey matter"), 0.10),
+        _t("white_matter", N_("White matter"), 0.06, N_("Anisotropic along the fibre tracts")),
+        _t("nerve", N_("Peripheral nerve"), 0.03, N_("Anisotropic along the fascicles")),
+        _t("tendon", N_("Tendon"), 0.04),
+        _t("saline_0_9", N_("Saline 0.9%"), 1.40, N_("Sometimes used in place of electrode gel")),
+        _t("electrode_gel", N_("Electrode gel"), 0.50, N_("Differs a lot between products; use the datasheet value")),
     ]
 }
 
@@ -132,10 +133,14 @@ def tissue(name: str, library: dict[str, Tissue] | None = None) -> Tissue:
     # 打ち間違いを拾うために、前方一致するものを候補として出す
     close = [n for n in sorted(table) if n.startswith(key[:3])] or sorted(table)
     raise GfemError(
-        f"[設定エラー] 知らない組織名です: {name!r}\n"
-        f"  場所: 組織プリセット\n"
-        f"  対処: {', '.join(close[:10])} などから選ぶか、"
-        f"gfem.load_library() で自前の表を読み込んでください"
+        error_text(
+            tr("Unknown tissue name: {name}", name=repr(name)),
+            tr("tissue presets"),
+            tr(
+                "Choose from {names} and so on, or read your own table with gfem.load_library()",
+                names=", ".join(close[:10]),
+            ),
+        )
     )
 
 
@@ -150,49 +155,61 @@ def load_library(path: str | Path) -> dict[str, Tissue]:
         text = path.read_text(encoding="utf-8")
     except OSError as exc:
         raise GfemError(
-            f"[設定エラー] 組織表を開けません: {exc}\n"
-            f"  場所: {path}\n"
-            f"  対処: パスが正しいか、読み取り権限があるかを確認してください"
+            error_text(
+                tr("Cannot open the tissue table: {error}", error=exc),
+                str(path),
+                tr("Check that the path is right and that the file is readable"),
+            )
         ) from exc
     try:
         data = yaml.safe_load(text)
     except yaml.YAMLError as exc:
         raise GfemError(
-            f"[設定エラー] 組織表を YAML として読めません: {exc}\n"
-            f"  場所: {path}\n"
-            f"  対処: インデントと引用符を確認してください"
+            error_text(
+                tr("Cannot read the tissue table as YAML: {error}", error=exc),
+                str(path),
+                tr("Check the indentation and quotes"),
+            )
         ) from exc
     if not isinstance(data, dict):
         raise GfemError(
-            f"[設定エラー] 組織表がマッピングではありません\n"
-            f"  場所: {path}\n"
-            f"  対処: 「組織名: {{sigma: 値}}」の形で書いてください"
+            error_text(
+                tr("The tissue table is not a mapping"),
+                str(path),
+                tr('Write entries as "tissue_name: {sigma: value}"'),
+            )
         )
 
     out: dict[str, Tissue] = {}
     for name, entry in data.items():
-        where = f"{path} の {name}"
+        where = tr("{part} in {where}", part=name, where=path)
         if isinstance(entry, (int, float)):
             entry = {"sigma": float(entry)}
         if not isinstance(entry, dict) or "sigma" not in entry:
             raise GfemError(
-                f"[設定エラー] sigma がありません\n"
-                f"  場所: {where}\n"
-                f"  対処: 「{name}: {{sigma: 0.35}}」のように書いてください"
+                error_text(
+                    tr("sigma is missing"),
+                    where,
+                    tr('Write it like "{name}: {{sigma: 0.35}}"', name=name),
+                )
             )
         try:
             sigma = float(entry["sigma"])
         except (TypeError, ValueError) as exc:
             raise GfemError(
-                f"[設定エラー] sigma が数値ではありません: {entry['sigma']!r}\n"
-                f"  場所: {where}\n"
-                f"  対処: S/m の値を数値で書いてください"
+                error_text(
+                    tr("sigma is not a number: {value}", value=repr(entry["sigma"])),
+                    where,
+                    tr("Write the value in S/m as a number"),
+                )
             ) from exc
         if not sigma > 0.0:
             raise GfemError(
-                f"[設定エラー] sigma が正ではありません: {sigma}\n"
-                f"  場所: {where}\n"
-                f"  対処: 導電率は正の値でなければなりません（SPEC §2.1）"
+                error_text(
+                    tr("sigma is not positive: {value}", value=sigma),
+                    where,
+                    tr("The conductivity must be positive (SPEC §2.1)"),
+                )
             )
         key = str(name).strip().lower().replace(" ", "_").replace("-", "_")
         out[key] = Tissue(

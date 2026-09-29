@@ -81,11 +81,15 @@ impl TetView {
                     split_solid(e.kind, e.conn, e.index as u32, &mut conn, &mut parent);
                 }
                 other => {
-                    return Err(GfemError::unsupported(format!(
+                    return Err(GfemError::unsupported(crate::tr!(
+                        "{} cannot be treated as a solid element, so it cannot be split into tetrahedra",
                         "{} はソリッド要素として扱えないため四面体に分割できません",
                         other.card_name()
                     ))
-                    .with_hint("CTETRA / CHEXA / CPENTA のいずれかを使ってください"));
+                    .with_hint(crate::tr!(
+                        "Use CTETRA, CHEXA or CPENTA",
+                        "CTETRA / CHEXA / CPENTA のいずれかを使ってください"
+                    )));
                 }
             }
             offsets.push(parent.len() as u32);

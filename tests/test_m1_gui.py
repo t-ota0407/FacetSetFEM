@@ -112,7 +112,7 @@ def test_region_stats_table_volume_is_in_the_unit_of_its_heading(session):
     from gfem.gui.state import REGION_STATS_COLUMNS
 
     session.solve()
-    column = REGION_STATS_COLUMNS.index("体積 [cm³]")
+    column = REGION_STATS_COLUMNS.index("Volume [cm³]")
     total = sum(float(row[column]) for row in session.region_stats_rows())
     assert total == pytest.approx(48.0, rel=1e-3)
 

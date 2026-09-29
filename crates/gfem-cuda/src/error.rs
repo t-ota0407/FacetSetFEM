@@ -8,5 +8,5 @@ use gfem_core::error::GfemError;
 
 /// CUDA ドライバのエラーを、文脈つきの [`GfemError`] にする。
 pub(crate) fn cuda_error(what: impl std::fmt::Display, e: &DriverError) -> GfemError {
-    GfemError::internal(format!("{what}（CUDA: {e}）"))
+    GfemError::internal(gfem_core::tr!("{what} (CUDA: {e})", "{what}（CUDA: {e}）"))
 }

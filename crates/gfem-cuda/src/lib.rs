@@ -113,7 +113,10 @@ pub fn can_use_gpu(
 
     let all = devices();
     if all.is_empty() {
-        return Err("CUDA が使える GPU が見つかりませんでした".to_string());
+        return Err(gfem_core::tr!(
+            "No CUDA-capable GPU was found",
+            "CUDA が使える GPU が見つかりませんでした"
+        ));
     }
     let usable: Vec<&DeviceInfo> = all.iter().filter(|d| d.supports_f64()).collect();
     let Some(&best) = usable
@@ -123,13 +126,16 @@ pub fn can_use_gpu(
         .as_ref()
     else {
         let (major, minor) = MIN_COMPUTE_CAPABILITY;
-        return Err(format!(
+        return Err(gfem_core::tr!(
+            "Every GPU found has Compute Capability below {major}.{minor} and cannot be used \
+             for double-precision arithmetic",
             "見つかった GPU はどれも Compute Capability {major}.{minor} 未満で、\
              倍精度演算に使えません"
         ));
     };
     if !fits(needed, best.free_memory) {
-        return Err(format!(
+        return Err(gfem_core::tr!(
+            "Not enough VRAM: {:.1} GB is needed, but GPU {} has {:.1} GB free",
             "VRAM が足りません: {:.1} GB 必要ですが、GPU {} の空きは {:.1} GB です",
             needed as f64 / 1e9,
             best.ordinal,
@@ -152,14 +158,21 @@ pub fn solver_or_fallback(
     let info = match can_use_gpu(n_nodes, nnz, preconditioner) {
         Ok(info) => info,
         Err(reason) => {
-            return (None, Some(format!("{reason}。CPU で解きます")));
+            return (
+                None,
+                Some(gfem_core::tr!(
+                    "{reason}. Solving on the CPU",
+                    "{reason}。CPU で解きます"
+                )),
+            );
         }
     };
     match CudaBackend::new(info.ordinal) {
         Ok(backend) => (Some(Box::new(BackendSolver(backend))), None),
         Err(e) => (
             None,
-            Some(format!(
+            Some(gfem_core::tr!(
+                "Could not initialize the GPU ({e}). Solving on the CPU",
                 "GPU を初期化できませんでした（{e}）。CPU で解きます"
             )),
         ),

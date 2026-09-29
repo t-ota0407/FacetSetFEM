@@ -137,8 +137,13 @@ impl Provenance {
     /// ケースファイルのパスと全文を記録する。
     pub fn with_case_file(mut self, path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
-        let text = std::fs::read_to_string(path)
-            .map_err(|e| GfemError::io(path, "ケースファイルを読めません", e))?;
+        let text = std::fs::read_to_string(path).map_err(|e| {
+            GfemError::io(
+                path,
+                crate::tr!("Cannot read the case file", "ケースファイルを読めません"),
+                e,
+            )
+        })?;
         self.case_file = Some(path.display().to_string());
         self.case_text = Some(text);
         Ok(self)
@@ -177,8 +182,12 @@ impl Provenance {
             if self.source_matches_build() == Some(false) {
                 t.set(
                     "note",
-                    "拡張モジュールのビルド後にコミットが進んでいます。Rust 側は古いソースのまま\
-                     動いている可能性があるので、maturin develop でビルドし直してください",
+                    crate::tr!(
+                        "New commits were made after the extension module was built. The Rust side \
+                         may be running old sources, so rebuild with maturin develop",
+                        "拡張モジュールのビルド後にコミットが進んでいます。Rust 側は古いソースのまま\
+                         動いている可能性があるので、maturin develop でビルドし直してください"
+                    ),
                 );
             }
             json.set("source_tree", t);
@@ -198,15 +207,30 @@ impl Provenance {
 pub fn sha256_file(path: impl AsRef<Path>) -> Result<String> {
     use std::io::Read;
     let path = path.as_ref();
-    let mut file = std::fs::File::open(path)
-        .map_err(|e| GfemError::io(path, "ハッシュを取るためにファイルを開けません", e))?;
+    let mut file = std::fs::File::open(path).map_err(|e| {
+        GfemError::io(
+            path,
+            crate::tr!(
+                "Cannot open the file to compute its hash",
+                "ハッシュを取るためにファイルを開けません"
+            ),
+            e,
+        )
+    })?;
     let mut hasher = Sha256::new();
     // 1000 万節点のファイルでも一度に読み込まないよう、チャンクで流す
     let mut buffer = vec![0u8; 1 << 20];
     loop {
-        let n = file
-            .read(&mut buffer)
-            .map_err(|e| GfemError::io(path, "ハッシュの計算中に読み取りに失敗しました", e))?;
+        let n = file.read(&mut buffer).map_err(|e| {
+            GfemError::io(
+                path,
+                crate::tr!(
+                    "Failed to read the file while computing its hash",
+                    "ハッシュの計算中に読み取りに失敗しました"
+                ),
+                e,
+            )
+        })?;
         if n == 0 {
             break;
         }

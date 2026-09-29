@@ -119,13 +119,23 @@ impl SurfacePatch {
     /// エラーメッセージ用の形の説明（例: 「半径 0.025 m」「矩形 0.02 m × 0.02 m」）。
     pub fn describe_shape(&self) -> String {
         match &self.shape {
-            PatchShape::Circle { radius } => format!("半径 {radius} m"),
+            PatchShape::Circle { radius } => crate::tr!("radius {radius} m", "半径 {radius} m"),
             PatchShape::Rect(r) => {
-                let mut s = format!("矩形 {} m × {} m", r.width, r.height);
+                let mut s = crate::tr!(
+                    "rectangle {} m × {} m",
+                    "矩形 {} m × {} m",
+                    r.width,
+                    r.height
+                );
                 if r.corner_radius > 0.0 {
-                    s += &format!("・角の半径 {} m", r.corner_radius);
+                    s += &crate::tr!(", corner radius {} m", "・角の半径 {} m", r.corner_radius);
                 }
-                s += &format!("・向き {:?} から {}°", r.axis, r.angle);
+                s += &crate::tr!(
+                    ", turned {1}° from {0:?}",
+                    "・向き {:?} から {}°",
+                    r.axis,
+                    r.angle
+                );
                 s
             }
         }
@@ -167,9 +177,15 @@ impl SurfacePatch {
                 if !radius.is_finite() || *radius < 0.0 {
                     return Err(GfemError::new(
                         ErrorKind::Case,
-                        format!("パッチの半径が不正です: {radius} m"),
+                        crate::tr!(
+                            "Invalid patch radius: {radius} m",
+                            "パッチの半径が不正です: {radius} m"
+                        ),
                     )
-                    .with_hint("半径は 0 以上の有限値で指定してください（単位は m）"));
+                    .with_hint(crate::tr!(
+                        "Give the radius as a finite value of 0 or more (in m)",
+                        "半径は 0 以上の有限値で指定してください（単位は m）"
+                    )));
                 }
             }
             PatchShape::Rect(rect) => rect.check()?,
@@ -177,12 +193,18 @@ impl SurfacePatch {
         if self.center.iter().any(|v| !v.is_finite()) {
             return Err(GfemError::new(
                 ErrorKind::Case,
-                format!("パッチの中心が数値になっていません: {:?}", self.center),
+                crate::tr!(
+                    "The patch center is not a number: {:?}",
+                    "パッチの中心が数値になっていません: {:?}",
+                    self.center
+                ),
             )
-            .with_hint(
+            .with_hint(crate::tr!(
+                "Picking in the 3D view may have failed. Click on the body surface again \
+                 (in a case file, give a point on the body surface in m)",
                 "3D ビューのピックに失敗した可能性があります。体表面の上をもう一度クリック\
-                 してください（ケースファイルでは、体表面上の点を m で書いてください）",
-            ));
+                 してください（ケースファイルでは、体表面上の点を m で書いてください）"
+            )));
         }
         Ok(())
     }
@@ -357,13 +379,18 @@ impl Preconditioner {
             "none" => Ok(Preconditioner::None),
             "jacobi" | "diagonal" => Ok(Preconditioner::Jacobi),
             "amg" | "smoothed_aggregation" | "sa" => Ok(Preconditioner::Amg),
-            other => Err(
-                GfemError::new(ErrorKind::Case, format!("未知の前処理です: \"{other}\""))
-                    .with_hint(format!(
-                        "{} のいずれかを指定してください",
-                        Self::CHOICES.join(" / ")
-                    )),
-            ),
+            other => Err(GfemError::new(
+                ErrorKind::Case,
+                crate::tr!(
+                    "Unknown preconditioner: \"{other}\"",
+                    "未知の前処理です: \"{other}\""
+                ),
+            )
+            .with_hint(crate::tr!(
+                "Specify one of {}",
+                "{} のいずれかを指定してください",
+                Self::CHOICES.join(" / ")
+            ))),
         }
     }
 }
@@ -416,9 +443,13 @@ impl Backend {
             "cuda" | "gpu" => Ok(Backend::Cuda),
             other => Err(GfemError::new(
                 ErrorKind::Case,
-                format!("このビルドでは使えないバックエンドです: \"{other}\""),
+                crate::tr!(
+                    "Backend not available in this build: \"{other}\"",
+                    "このビルドでは使えないバックエンドです: \"{other}\""
+                ),
             )
-            .with_hint(format!(
+            .with_hint(crate::tr!(
+                "Specify one of {}",
                 "{} のいずれかを指定してください",
                 Self::CHOICES.join(" / ")
             ))),
@@ -596,18 +627,23 @@ impl Case {
             problems.push(
                 GfemError::new(
                     ErrorKind::Case,
-                    format!(
+                    crate::tr!(
+                        "Some regions have no conductivity ({}): PID={}",
                         "導電率が未設定の領域があります（{} 件）: PID={}",
                         missing.len(),
                         format_sample_list(&missing, SAMPLE_LIMIT)
                     ),
                 )
-                .with_hint("全ての PSOLID の PID に σ [S/m] を割り当ててください"),
+                .with_hint(crate::tr!(
+                    "Assign a conductivity σ [S/m] to every PSOLID PID",
+                    "全ての PSOLID の PID に σ [S/m] を割り当ててください"
+                )),
             );
         }
         for pid in self.conductivity.keys() {
             if !region_pids.contains(pid) {
-                warnings.push(format!(
+                warnings.push(crate::tr!(
+                    "A conductivity is set for PID={pid}, but there are no solid elements with that PID",
                     "PID={pid} に導電率が設定されていますが、その PID のソリッド要素はありません"
                 ));
             }
@@ -616,8 +652,14 @@ impl Case {
         // --- 電極の有無 ---
         if self.electrodes.is_empty() {
             problems.push(
-                GfemError::new(ErrorKind::Case, "電極が定義されていません")
-                    .with_hint("陽極（anode）と陰極（cathode）を最低 1 つずつ定義してください"),
+                GfemError::new(
+                    ErrorKind::Case,
+                    crate::tr!("No electrodes are defined", "電極が定義されていません"),
+                )
+                .with_hint(crate::tr!(
+                    "Define at least one anode and one cathode",
+                    "陽極（anode）と陰極（cathode）を最低 1 つずつ定義してください"
+                )),
             );
         } else {
             self.electrode_problems(lookup, surface, &mut problems);
@@ -628,15 +670,31 @@ impl Case {
             problems.push(
                 GfemError::new(
                     ErrorKind::Case,
-                    format!("収束判定しきい値が範囲外です: {}", self.solver.tolerance),
+                    crate::tr!(
+                        "The convergence tolerance is out of range: {}",
+                        "収束判定しきい値が範囲外です: {}",
+                        self.solver.tolerance
+                    ),
                 )
-                .with_hint("0 < tolerance < 1 の相対残差で指定してください（既定 1e-10）"),
+                .with_hint(crate::tr!(
+                    "Give a relative residual with 0 < tolerance < 1 (default 1e-10)",
+                    "0 < tolerance < 1 の相対残差で指定してください（既定 1e-10）"
+                )),
             );
         }
         if self.solver.max_iterations == 0 {
             problems.push(
-                GfemError::new(ErrorKind::Case, "最大反復回数が 0 です")
-                    .with_hint("1 以上を指定してください（既定 50000）"),
+                GfemError::new(
+                    ErrorKind::Case,
+                    crate::tr!(
+                        "The maximum number of iterations is 0",
+                        "最大反復回数が 0 です"
+                    ),
+                )
+                .with_hint(crate::tr!(
+                    "Specify 1 or more (default 50000)",
+                    "1 以上を指定してください（既定 50000）"
+                )),
             );
         }
 
@@ -657,9 +715,12 @@ impl Case {
                 problems.push(
                     GfemError::new(
                         ErrorKind::Case,
-                        format!("{} が定義されていません", role.label()),
+                        crate::tr!("No {} is defined", "{} が定義されていません", role.label()),
                     )
-                    .with_hint("電流の流入口と流出口の両方が必要です"),
+                    .with_hint(crate::tr!(
+                        "Both a current inlet and a current outlet are required",
+                        "電流の流入口と流出口の両方が必要です"
+                    )),
                 );
             }
         }
@@ -678,8 +739,14 @@ impl Case {
         }
         if blank_name {
             problems.push(
-                GfemError::new(ErrorKind::Case, "名前が空の電極があります")
-                    .with_hint("電極には E1・E2 のような名前を付けてください"),
+                GfemError::new(
+                    ErrorKind::Case,
+                    crate::tr!("An electrode has an empty name", "名前が空の電極があります"),
+                )
+                .with_hint(crate::tr!(
+                    "Give each electrode a name such as E1 or E2",
+                    "電極には E1・E2 のような名前を付けてください"
+                )),
             );
         }
         if !duplicated.is_empty() {
@@ -687,14 +754,17 @@ impl Case {
             problems.push(
                 GfemError::new(
                     ErrorKind::Case,
-                    format!(
+                    crate::tr!(
+                        "Several electrodes have the same name: {}",
                         "同じ名前の電極が複数あります: {}",
                         format_sample_list(&names, SAMPLE_LIMIT)
                     ),
                 )
-                .with_hint(
-                    "電極名は結果とケースファイルで電極を指す鍵なので、電極ごとに違う名前にしてください",
-                ),
+                .with_hint(crate::tr!(
+                    "Electrode names identify electrodes in the results and the case file, \
+                     so give each electrode a different name",
+                    "電極名は結果とケースファイルで電極を指す鍵なので、電極ごとに違う名前にしてください"
+                )),
             );
         }
         let mut currents_valid = true;
@@ -704,14 +774,18 @@ impl Case {
                 problems.push(
                     GfemError::new(
                         ErrorKind::Case,
-                        format!(
+                        crate::tr!(
+                            "The total current of electrode {} is not a positive finite value: {} A",
                             "電極 {} の総電流が正の有限値ではありません: {} A",
-                            e.name, e.current
+                            e.name,
+                            e.current
                         ),
                     )
-                    .with_hint(
-                        "総電流は正の値で指定し、向きは role（anode / cathode）で表してください",
-                    ),
+                    .with_hint(crate::tr!(
+                        "Give the total current as a positive value and express its direction \
+                         with role (anode / cathode)",
+                        "総電流は正の値で指定し、向きは role（anode / cathode）で表してください"
+                    )),
                 );
             }
         }
@@ -728,12 +802,17 @@ impl Case {
             problems.push(
                 GfemError::new(
                     ErrorKind::Case,
-                    format!("総流入電流と総流出電流が一致しません: 陽極 {anode} A / 陰極 {cathode} A"),
+                    crate::tr!(
+                        "Total inflow and outflow currents do not match: anodes {anode} A / cathodes {cathode} A",
+                        "総流入電流と総流出電流が一致しません: 陽極 {anode} A / 陰極 {cathode} A"
+                    ),
                 )
-                .with_hint(
+                .with_hint(crate::tr!(
+                    "This is an all-Neumann problem, so no solution exists unless Σ I_k = 0 \
+                     (SPEC §2.2). Review the electrode currents",
                     "全 Neumann 境界の問題なので、Σ I_k = 0 でなければ解が存在しません（SPEC §2.2）。\
-                     電極の電流値を見直してください",
-                ),
+                     電極の電流値を見直してください"
+                )),
             );
         }
 
@@ -766,14 +845,18 @@ impl Case {
                     problems.push(
                         GfemError::new(
                             ErrorKind::Case,
-                            format!(
+                            crate::tr!(
+                                "{} belongs to both electrode {} and electrode {}",
                                 "{} が電極 {} と {} の両方に含まれています",
                                 lookup.label(face),
                                 self.electrodes[other].name,
                                 e.name
                             ),
                         )
-                        .with_hint("1 つの面を 2 つの電極に割り当てることはできません"),
+                        .with_hint(crate::tr!(
+                            "A face cannot be assigned to two electrodes",
+                            "1 つの面を 2 つの電極に割り当てることはできません"
+                        )),
                     );
                 }
             }
@@ -782,17 +865,21 @@ impl Case {
                 problems.push(
                     GfemError::new(
                         ErrorKind::Case,
-                        format!(
+                        crate::tr!(
+                            "{1} face(s) of electrode {0} do not lie on the body surface (outer surface): {2}",
                             "電極 {} の面のうち {} 枚が体表面（外表面）に載っていません: {}",
                             e.name,
                             off_surface.len(),
                             format_sample_list(&off_surface, SAMPLE_LIMIT)
                         ),
                     )
-                    .with_hint(
+                    .with_hint(crate::tr!(
+                        "In transcutaneous electrical stimulation, electrodes are always on the body \
+                         surface (SPEC §11.1). Either an internal face is referenced, or the nodes of \
+                         the shell elements do not coincide with the faces of the solids",
                         "経皮電気刺激では電極は必ず体表面にあります（SPEC §11.1）。\
-                         内部面を指しているか、シェル要素の節点がソリッドの面と一致していません",
-                    ),
+                         内部面を指しているか、シェル要素の節点がソリッドの面と一致していません"
+                    )),
                 );
             }
         }
@@ -834,13 +921,20 @@ pub fn resolve_faces(lookup: &FaceLookup, electrode: &Electrode) -> Result<Vec<E
 
     // --- 体表面のパッチ（SPEC §11.1）---
     for (k, patch) in electrode.patches.iter().enumerate() {
-        let selected = patch
-            .select(lookup.picker())
-            .map_err(|e| e.with_entity(format!("電極 {} のパッチ {}", electrode.name, k + 1)))?;
+        let selected = patch.select(lookup.picker()).map_err(|e| {
+            e.with_entity(crate::tr!(
+                "patch {1} of electrode {0}",
+                "電極 {} のパッチ {}",
+                electrode.name,
+                k + 1
+            ))
+        })?;
         if selected.is_empty() {
             return Err(GfemError::new(
                 ErrorKind::Case,
-                format!(
+                crate::tr!(
+                    "Patch {1} of electrode {0} did not select any face of the body surface \
+                     (center {2:?} m, {3}{4})",
                     "電極 {} のパッチ {} が体表面の面を 1 枚も選べませんでした（中心 {:?} m, {}{}）",
                     electrode.name,
                     k + 1,
@@ -852,10 +946,12 @@ pub fn resolve_faces(lookup: &FaceLookup, electrode: &Electrode) -> Result<Vec<E
                     }
                 ),
             )
-            .with_hint(
+            .with_hint(crate::tr!(
+                "If you filter by PID, check that the region is exposed on the body surface \
+                 (see the region list in the load report and the outer surface in the 3D view)",
                 "PID で絞り込んでいる場合は、その領域が体表面に露出しているか確認してください\
-                 （読み込みレポートの領域一覧と、3D ビューの外表面表示で分かります）",
-            ));
+                 （読み込みレポートの領域一覧と、3D ビューの外表面表示で分かります）"
+            )));
         }
         faces.extend(selected.into_iter().map(ElectrodeFace::Surface));
     }
@@ -897,13 +993,17 @@ pub fn resolve_faces(lookup: &FaceLookup, electrode: &Electrode) -> Result<Vec<E
     if !unknown_pids.is_empty() {
         return Err(GfemError::new(
             ErrorKind::Case,
-            format!(
+            crate::tr!(
+                "Shell PIDs referenced by electrode {} are not in the mesh: PID={}",
                 "電極 {} が参照するシェル PID がメッシュにありません: PID={}",
                 electrode.name,
                 format_sample_list(&unknown_pids, SAMPLE_LIMIT)
             ),
         )
-        .with_hint("読み込みレポートの PSHELL 一覧から選び直してください"));
+        .with_hint(crate::tr!(
+            "Choose again from the PSHELL list in the load report",
+            "読み込みレポートの PSHELL 一覧から選び直してください"
+        )));
     }
     let unknown_ids: Vec<String> = wanted_ids
         .difference(&seen_ids)
@@ -912,26 +1012,33 @@ pub fn resolve_faces(lookup: &FaceLookup, electrode: &Electrode) -> Result<Vec<E
     if !unknown_ids.is_empty() {
         return Err(GfemError::new(
             ErrorKind::Case,
-            format!(
+            crate::tr!(
+                "Shell elements referenced by electrode {} are not in the mesh: EID={}",
                 "電極 {} が参照するシェル要素がメッシュにありません: EID={}",
                 electrode.name,
                 format_sample_list(&unknown_ids, SAMPLE_LIMIT)
             ),
         )
-        .with_hint("CTRIA3 / CQUAD4 として存在する要素 ID を指定してください"));
+        .with_hint(crate::tr!(
+            "Specify IDs of existing CTRIA3 / CQUAD4 elements",
+            "CTRIA3 / CQUAD4 として存在する要素 ID を指定してください"
+        )));
     }
     if faces.is_empty() {
         return Err(GfemError::new(
             ErrorKind::Case,
-            format!(
+            crate::tr!(
+                "No faces are assigned to electrode {}",
                 "電極 {} に面が 1 枚も割り当てられていません",
                 electrode.name
             ),
         )
-        .with_hint(
+        .with_hint(crate::tr!(
+            "Specify the electrode faces by shell PID, shell element ID, or a patch on the body \
+             surface (click in the 3D view)",
             "シェル PID・シェル要素 ID・体表面のパッチ（3D ビューでクリック）の\
-             いずれかで電極面を指定してください",
-        ));
+             いずれかで電極面を指定してください"
+        )));
     }
     Ok(faces)
 }
@@ -1041,16 +1148,20 @@ impl<'a> FaceLookup<'a> {
             .ok_or_else(|| {
                 GfemError::new(
                     ErrorKind::Case,
-                    format!(
+                    crate::tr!(
+                        "A face referenced by electrode {} is not on the body surface: face {2} of EID={1}",
                         "電極 {} が指している面が体表面にありません: EID={} の第 {} 面",
                         electrode.name,
                         face.element_id,
                         face.local_face + 1
                     ),
                 )
-                .with_hint(
-                    "3D ビューで選び直してください。メッシュを差し替えた場合は、                     手で足した面・外した面の指定が古くなっている可能性があります",
-                )
+                .with_hint(crate::tr!(
+                    "Select it again in the 3D view. If the mesh was replaced, the manually added or \
+                     removed faces may be out of date",
+                    "3D ビューで選び直してください。メッシュを差し替えた場合は、\
+                     手で足した面・外した面の指定が古くなっている可能性があります"
+                ))
             })
     }
 
@@ -1096,7 +1207,8 @@ impl<'a> FaceLookup<'a> {
             ElectrodeFace::Surface(i) => {
                 let f = &self.surface.faces()[i as usize];
                 let solid = self.mesh.solid(f.element as usize);
-                format!(
+                crate::tr!(
+                    "body-surface face (face {2} of {0} EID={1})",
                     "体表面の面（{} EID={} の第 {} 面）",
                     solid.kind.card_name(),
                     solid.id,

@@ -58,7 +58,9 @@ fn probe(ordinal: usize) -> Option<DeviceInfo> {
     let (free_memory, total_memory) = ctx.mem_get_info().ok()?;
     Some(DeviceInfo {
         ordinal,
-        name: ctx.name().unwrap_or_else(|_| "不明な GPU".into()),
+        name: ctx
+            .name()
+            .unwrap_or_else(|_| gfem_core::tr!("Unknown GPU", "不明な GPU")),
         compute_capability: ctx.compute_capability().ok()?,
         total_memory,
         free_memory,
@@ -135,32 +137,53 @@ impl Device {
     /// ふつうは使い回す [`Device::shared`] を使う。こちらは呼ぶたびに 0.2 秒ほどかかる。
     pub fn new(ordinal: usize) -> Result<Self> {
         let ctx = CudaContext::new(ordinal).map_err(|e| {
-            cuda_error(format!("GPU {ordinal} を初期化できませんでした"), &e).with_hint(
-                "NVIDIA ドライバが入っているか、GPU が他のプロセスに占有されていないか\
-                 確認してください（nvidia-smi）",
+            cuda_error(
+                gfem_core::tr!(
+                    "Could not initialize GPU {ordinal}",
+                    "GPU {ordinal} を初期化できませんでした"
+                ),
+                &e,
             )
+            .with_hint(gfem_core::tr!(
+                "Check that the NVIDIA driver is installed and that the GPU is not occupied by \
+                 another process (nvidia-smi)",
+                "NVIDIA ドライバが入っているか、GPU が他のプロセスに占有されていないか\
+                 確認してください（nvidia-smi）"
+            ))
         })?;
         let info = DeviceInfo {
             ordinal,
-            name: ctx.name().unwrap_or_else(|_| "不明な GPU".into()),
-            compute_capability: ctx
-                .compute_capability()
-                .map_err(|e| cuda_error("Compute Capability を取得できませんでした", &e))?,
+            name: ctx
+                .name()
+                .unwrap_or_else(|_| gfem_core::tr!("Unknown GPU", "不明な GPU")),
+            compute_capability: ctx.compute_capability().map_err(|e| {
+                cuda_error(
+                    gfem_core::tr!(
+                        "Could not get the Compute Capability",
+                        "Compute Capability を取得できませんでした"
+                    ),
+                    &e,
+                )
+            })?,
             total_memory: ctx.total_mem().unwrap_or(0),
             free_memory: ctx.mem_get_info().map(|(free, _)| free).unwrap_or(0),
         };
         if !info.supports_f64() {
             let (major, minor) = info.compute_capability;
             let (rmajor, rminor) = MIN_COMPUTE_CAPABILITY;
-            return Err(GfemError::unsupported(format!(
+            return Err(GfemError::unsupported(gfem_core::tr!(
+                "The Compute Capability of GPU {ordinal} ({}) is {major}.{minor}, below the \
+                 {rmajor}.{rminor} needed for double-precision arithmetic",
                 "GPU {ordinal}（{}）の Compute Capability は {major}.{minor} で、\
                  倍精度演算に必要な {rmajor}.{rminor} に足りません",
                 info.name
             ))
-            .with_hint(
+            .with_hint(gfem_core::tr!(
+                "All computations are done in f64, so there is no fallback to single precision \
+                 (CLAUDE.md design principle 2). Use backend: cpu_parallel",
                 "全計算を f64 で行うため単精度への切り替えはしません（CLAUDE.md 設計原則 2）。\
-                 backend: cpu_parallel を使ってください",
-            ));
+                 backend: cpu_parallel を使ってください"
+            )));
         }
 
         let ptx = compile_ptx_with_opts(
@@ -178,19 +201,36 @@ impl Device {
             },
         )
         .map_err(|e| {
-            GfemError::internal(format!("CUDA カーネルのコンパイルに失敗しました: {e}")).with_hint(
+            GfemError::internal(gfem_core::tr!(
+                "Failed to compile the CUDA kernels: {e}",
+                "CUDA カーネルのコンパイルに失敗しました: {e}"
+            ))
+            .with_hint(gfem_core::tr!(
+                "nvrtc from the CUDA Toolkit may not be found. Check that CUDA_PATH is set",
                 "CUDA Toolkit の nvrtc が見つからない可能性があります。\
-                 CUDA_PATH が通っているか確認してください",
-            )
+                 CUDA_PATH が通っているか確認してください"
+            ))
         })?;
 
-        let module = ctx
-            .load_module(ptx)
-            .map_err(|e| cuda_error("CUDA モジュールを読み込めませんでした", &e))?;
+        let module = ctx.load_module(ptx).map_err(|e| {
+            cuda_error(
+                gfem_core::tr!(
+                    "Could not load the CUDA module",
+                    "CUDA モジュールを読み込めませんでした"
+                ),
+                &e,
+            )
+        })?;
         let load = |name: &str| -> Result<CudaFunction> {
-            module
-                .load_function(name)
-                .map_err(|e| cuda_error(format!("カーネル {name} が見つかりません"), &e))
+            module.load_function(name).map_err(|e| {
+                cuda_error(
+                    gfem_core::tr!(
+                        "Kernel {name} not found",
+                        "カーネル {name} が見つかりません"
+                    ),
+                    &e,
+                )
+            })
         };
 
         Ok(Self {
@@ -217,9 +257,14 @@ impl Device {
 
     /// いまの空き VRAM [byte]。
     pub fn free_memory(&self) -> Result<usize> {
-        self._ctx
-            .mem_get_info()
-            .map(|(free, _)| free)
-            .map_err(|e| cuda_error("空き VRAM を取得できませんでした", &e))
+        self._ctx.mem_get_info().map(|(free, _)| free).map_err(|e| {
+            cuda_error(
+                gfem_core::tr!(
+                    "Could not get the free VRAM",
+                    "空き VRAM を取得できませんでした"
+                ),
+                &e,
+            )
+        })
     }
 }

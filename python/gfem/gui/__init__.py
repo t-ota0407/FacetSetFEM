@@ -24,18 +24,36 @@ def parse_arguments(argv: list[str]) -> argparse.Namespace:
     ケースファイル（.yaml）は単位を自分で持っているので `--unit` は要らない。
     """
     from .. import length_units
+    from ..i18n import LANGUAGES, tr
 
-    parser = argparse.ArgumentParser(prog="python -m gfem.gui", description="GenericFEM の GUI")
-    parser.add_argument("path", nargs="?", type=Path, help="ケースファイル（.yaml）かメッシュ（.bdf / .nas）")
+    parser = argparse.ArgumentParser(prog="python -m gfem.gui", description=tr("GenericFEM GUI"))
+    parser.add_argument(
+        "path", nargs="?", type=Path, help=tr("case file (.yaml) or mesh (.bdf / .nas)")
+    )
     parser.add_argument(
         "--unit",
         choices=length_units(),
-        help="メッシュの座標の長さ単位。省略すると寸法を見せてから選ばせる",
+        help=tr("length unit of the mesh coordinates; if omitted, the GUI shows the size and asks"),
+    )
+    parser.add_argument(
+        "--lang",
+        choices=[code for code, _name in LANGUAGES],
+        help=tr("display language (default: the one chosen in View → Language, otherwise English)"),
     )
     args = parser.parse_args(argv)
     if args.unit is not None and args.path is not None and _is_case_file(args.path):
-        parser.error("--unit はメッシュを開くときだけ使えます（ケースファイルは単位を持っています）")
+        parser.error(tr("--unit is only for opening a mesh (a case file records its own unit)"))
     return args
+
+
+def _peek_language(argv: list[str]) -> str | None:
+    """`--lang xx` / `--lang=xx` を引数の解釈より先に拾う。"""
+    for i, arg in enumerate(argv):
+        if arg == "--lang" and i + 1 < len(argv):
+            return argv[i + 1]
+        if arg.startswith("--lang="):
+            return arg.split("=", 1)[1]
+    return None
 
 
 def _is_case_file(path: Path) -> bool:
@@ -44,13 +62,20 @@ def _is_case_file(path: Path) -> bool:
 
 def main(argv: list[str] | None = None) -> int:
     """GUI を起動する。"""
-    args = parse_arguments(sys.argv[1:] if argv is None else argv)
+    argv = sys.argv[1:] if argv is None else argv
 
     from PySide6.QtWidgets import QApplication
 
-    from .main_window import MainWindow
+    from .language import apply_startup_language
 
     app = QApplication.instance() or QApplication(sys.argv[:1])
+    # **ウィンドウを作る前に言語を決める。** 文言は作るときに訳すので、後からは変わらない。
+    # --lang だけは引数を解釈する前に拾う（引数の説明もその言語で出すため）
+    apply_startup_language(app, _peek_language(argv))
+    args = parse_arguments(argv)
+
+    from .main_window import MainWindow
+
     window = MainWindow()
     window.show()
 

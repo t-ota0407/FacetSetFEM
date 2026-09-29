@@ -143,10 +143,19 @@ impl<R: std::io::BufRead> LineSource<R> {
         }
         self.buf.clear();
         let n = self.inner.read_line(&mut self.buf).map_err(|e| {
-            GfemError::new(ErrorKind::Io, "ファイルの読み取りに失敗しました")
-                .with_line(self.lineno + 1)
-                .with_hint("ファイルが ASCII / UTF-8 のテキストであることを確認してください")
-                .with_source(e)
+            GfemError::new(
+                ErrorKind::Io,
+                crate::tr!(
+                    "Failed to read the file",
+                    "ファイルの読み取りに失敗しました"
+                ),
+            )
+            .with_line(self.lineno + 1)
+            .with_hint(crate::tr!(
+                "Check that the file is ASCII / UTF-8 text",
+                "ファイルが ASCII / UTF-8 のテキストであることを確認してください"
+            ))
+            .with_source(e)
         })?;
         if n == 0 {
             self.eof = true;
@@ -284,11 +293,16 @@ impl<R: std::io::BufRead> BulkReader<R> {
         check_ascii(body, lineno)?;
         let form = line_form(body);
         if is_continuation(body, form) {
-            return Err(GfemError::syntax("対応する親カードのない継続行です")
-                .with_line(lineno)
-                .with_hint(
-                    "直前のカードが欠けているか、コメント行の書き方（先頭の $）を確認してください",
-                ));
+            return Err(GfemError::syntax(crate::tr!(
+                "Continuation line without a parent card",
+                "対応する親カードのない継続行です"
+            ))
+            .with_line(lineno)
+            .with_hint(crate::tr!(
+                "The preceding card may be missing. Also check how comment lines are written \
+                 (a leading $)",
+                "直前のカードが欠けているか、コメント行の書き方（先頭の $）を確認してください"
+            )));
         }
 
         card.reset(lineno);
@@ -358,14 +372,17 @@ fn check_ascii(line: &str, lineno: usize) -> Result<()> {
     if line.is_ascii() {
         return Ok(());
     }
-    Err(
-        GfemError::syntax("バルクデータ行に ASCII 以外の文字が含まれています")
-            .with_line(lineno)
-            .with_hint(
-                "Nastran のバルクデータは ASCII で書かれている必要があります。\
-                 日本語などを書く場合は行頭を $ にしてコメントにしてください",
-            ),
-    )
+    Err(GfemError::syntax(crate::tr!(
+        "A bulk data line contains non-ASCII characters",
+        "バルクデータ行に ASCII 以外の文字が含まれています"
+    ))
+    .with_line(lineno)
+    .with_hint(crate::tr!(
+        "Nastran bulk data must be written in ASCII. To write non-ASCII text such as \
+             Japanese, turn the line into a comment by starting it with $",
+        "Nastran のバルクデータは ASCII で書かれている必要があります。\
+             日本語などを書く場合は行頭を $ にしてコメントにしてください"
+    )))
 }
 
 #[cfg(test)]

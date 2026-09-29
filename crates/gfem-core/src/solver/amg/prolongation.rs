@@ -58,13 +58,16 @@ pub fn spectral_bound(a: &CsrMatrix) -> Result<f64> {
     };
     if let Some(i) = rows().find_first(|&i| bad(row(i).1)) {
         let diag = row(i).1;
-        return Err(GfemError::internal(format!(
+        return Err(GfemError::internal(crate::tr!(
+            "AMG: the diagonal entry of row {i} is not positive ({diag})",
             "AMG: 行 {i} の対角成分が正ではありません（{diag}）"
         ))
-        .with_hint(
+        .with_hint(crate::tr!(
+            "There may be degenerate elements or regions with zero or negative conductivity. \
+             preconditioner: jacobi reports the same problem sooner",
             "退化要素か導電率がゼロ以下の領域が残っている可能性があります。\
-             preconditioner: jacobi なら同じ診断がより早く出ます",
-        ));
+             preconditioner: jacobi なら同じ診断がより早く出ます"
+        )));
     }
     let bound = rows()
         .map(|i| {
@@ -87,7 +90,8 @@ pub fn spectral_bound(a: &CsrMatrix) -> Result<f64> {
 pub fn filtered(a: &CsrMatrix, strength: &Strength, b: &[f64]) -> Result<CsrMatrix> {
     let n = a.n_rows();
     if let Some(i) = b.iter().position(|&v| v == 0.0) {
-        return Err(GfemError::internal(format!(
+        return Err(GfemError::internal(crate::tr!(
+            "AMG: component {i} of the near-null-space vector is zero",
             "AMG: 近零空間ベクトルの成分 {i} がゼロです"
         )));
     }
@@ -205,7 +209,8 @@ pub fn tentative(agg: &Aggregation, b: &[f64]) -> Result<(CsrMatrix, Vec<f64>)> 
     }
     let coarse_b: Vec<f64> = norm2.iter().map(|v| v.sqrt()).collect();
     if let Some((g, _)) = coarse_b.iter().enumerate().find(|&(_, &v)| v == 0.0) {
-        return Err(GfemError::internal(format!(
+        return Err(GfemError::internal(crate::tr!(
+            "AMG: the near-null-space components of aggregate {g} are all zero",
             "AMG: 凝集 {g} の近零空間成分がすべてゼロです"
         )));
     }

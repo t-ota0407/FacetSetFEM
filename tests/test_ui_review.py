@@ -403,7 +403,7 @@ def test_only_the_controls_of_the_current_mode_can_be_used(window, qt_app):
 def test_statistics_carry_units_and_a_zero_reference_reads_as_zero(sample_bdf):
     from gfem.gui.state import REGION_STATS_COLUMNS
 
-    assert "|J| 最大 [A/m²]" in REGION_STATS_COLUMNS
+    assert "|J| max [A/m²]" in REGION_STATS_COLUMNS
     assert "|E| 99% [V/m]" in REGION_STATS_COLUMNS
     s = Session()
     s.open_mesh(sample_bdf, "mm")

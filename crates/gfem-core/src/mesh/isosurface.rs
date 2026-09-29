@@ -295,7 +295,8 @@ impl<'a> Builder<'a> {
 /// 節点値の配列が節点数と合っているか。
 pub(crate) fn check_nodal(mesh: &Mesh, values: &[f64], what: &str) -> Result<()> {
     if values.len() != mesh.nodes.len() {
-        return Err(GfemError::internal(format!(
+        return Err(GfemError::internal(crate::tr!(
+            "Wrong number of {what}: {} given, but there are {} nodes",
             "{what}の個数が合いません: {} 個ですが節点は {} 個です",
             values.len(),
             mesh.nodes.len()
@@ -315,9 +316,9 @@ pub fn iso_surface(
     level: f64,
     extra: &[&[f64]],
 ) -> Result<TriangleMesh> {
-    check_nodal(mesh, values, "節点値")?;
+    check_nodal(mesh, values, &crate::tr!("nodal values", "節点値"))?;
     for (i, e) in extra.iter().enumerate() {
-        check_nodal(mesh, e, &format!("extra[{i}] "))?;
+        check_nodal(mesh, e, &crate::tr!("values in extra[{i}]", "extra[{i}] "))?;
     }
     let mut builder = Builder::new(mesh, extra);
     for t in 0..tets.len() {

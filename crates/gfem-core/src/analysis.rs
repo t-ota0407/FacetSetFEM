@@ -287,8 +287,18 @@ impl Analysis {
 
 fn write_json(path: &Path, json: &Json) -> Result<()> {
     std::fs::write(path, json.to_pretty_string()).map_err(|e| {
-        GfemError::io(path, "実行サマリ JSON を書き出せません", e)
-            .with_hint("出力先のディレクトリが存在し、書き込み権限があるかを確認してください")
+        GfemError::io(
+            path,
+            crate::tr!(
+                "Cannot write the run summary JSON",
+                "実行サマリ JSON を書き出せません"
+            ),
+            e,
+        )
+        .with_hint(crate::tr!(
+            "Check that the output directory exists and that you have write permission",
+            "出力先のディレクトリが存在し、書き込み権限があるかを確認してください"
+        ))
     })
 }
 
@@ -391,12 +401,17 @@ fn dispatch(
         }
         None if resolved == Backend::Cuda => Err(GfemError::new(
             ErrorKind::Case,
-            "backend: cuda が指定されましたが、CUDA バックエンドが渡されていません",
+            crate::tr!(
+                "backend: cuda was specified, but no CUDA backend was supplied",
+                "backend: cuda が指定されましたが、CUDA バックエンドが渡されていません"
+            ),
         )
-        .with_hint(
+        .with_hint(crate::tr!(
+            "gfem-core on its own does not depend on CUDA (SPEC §7). Use the Python API, \
+             or pass a gfem_cuda solver to solve_with",
             "gfem-core 単体は CUDA に依存しません（SPEC §7）。Python API から使うか、\
-             gfem_cuda のソルバを solve_with に渡してください",
-        )),
+             gfem_cuda のソルバを solve_with に渡してください"
+        ))),
         None if resolved == Backend::CpuParallel => run_with(
             &BackendSolver(CpuParallel),
             lookup,
@@ -477,19 +492,27 @@ fn run_with(
         } else {
             ErrorKind::Convergence
         };
-        return Err(
-            GfemError::new(kind, format!("CG が収束しませんでした: {reason}")).with_hint(
-                if report.cancelled {
-                    "中断された時点の解は使えません。もう一度実行してください".to_string()
-                } else {
-                    format!(
-                        "最大反復回数を増やす、収束判定を緩める（現在 {:.0e}）、\
-                     または導電率のコントラストとメッシュの品質を見直してください",
-                        case.solver.tolerance
-                    )
-                },
+        return Err(GfemError::new(
+            kind,
+            crate::tr!(
+                "CG did not converge: {reason}",
+                "CG が収束しませんでした: {reason}"
             ),
-        );
+        )
+        .with_hint(if report.cancelled {
+            crate::tr!(
+                "The solution at the point of cancellation cannot be used. Run it again",
+                "中断された時点の解は使えません。もう一度実行してください"
+            )
+        } else {
+            crate::tr!(
+                "Increase the maximum number of iterations, loosen the convergence tolerance \
+                     (currently {:.0e}), or review the conductivity contrast and the mesh quality",
+                "最大反復回数を増やす、収束判定を緩める（現在 {:.0e}）、\
+                     または導電率のコントラストとメッシュの品質を見直してください",
+                case.solver.tolerance
+            )
+        }));
     }
 
     // --- 表示基準の適用（SPEC §2.2 の「基準点の付け替え」）---
@@ -513,7 +536,9 @@ fn run_with(
         && !info.direct_coarse_solve
     {
         let (n_coarse, _) = info.levels.last().copied().unwrap_or_default();
-        warnings.push(format!(
+        warnings.push(crate::tr!(
+            "The coarsest AMG level ({n_coarse} nodes) could not be solved directly, so smoothing \
+             was used instead. The answer is unchanged, but more iterations are needed (SPEC §4.5)",
             "AMG の最粗レベル（{n_coarse} 節点）を直接解けなかったため、平滑化で代用しました。\
              答えは変わりませんが反復回数が増えます（SPEC §4.5）"
         ));
@@ -553,7 +578,10 @@ fn apply_reference(
             if !electrodes.iter().any(|e| e.role == ElectrodeRole::Cathode) {
                 return Err(GfemError::new(
                     ErrorKind::Case,
-                    "基準電位に cathode_mean が指定されていますが、陰極がありません",
+                    crate::tr!(
+                        "The reference potential is cathode_mean, but there is no cathode",
+                        "基準電位に cathode_mean が指定されていますが、陰極がありません"
+                    ),
                 ));
             }
             crate::post::weighted_potential(electrodes, phi, ElectrodeRole::Cathode)
@@ -562,9 +590,15 @@ fn apply_reference(
             let Some(index) = mesh.nodes.ids().iter().position(|&n| n == id) else {
                 return Err(GfemError::new(
                     ErrorKind::Case,
-                    format!("基準電位に指定された節点 ID {id} がメッシュにありません"),
+                    crate::tr!(
+                        "Node ID {id} given for the reference potential is not in the mesh",
+                        "基準電位に指定された節点 ID {id} がメッシュにありません"
+                    ),
                 )
-                .with_hint("存在する GRID の ID を指定してください"));
+                .with_hint(crate::tr!(
+                    "Specify the ID of an existing GRID",
+                    "存在する GRID の ID を指定してください"
+                )));
             };
             phi[index]
         }

@@ -68,16 +68,20 @@ impl CgReport {
             return None;
         }
         Some(if self.cancelled {
-            "利用者によって中断されました".to_string()
+            crate::tr!("Cancelled by the user", "利用者によって中断されました")
         } else if self.stalled {
-            format!(
+            crate::tr!(
+                "The residual did not improve for {} iterations (stalled at relative residual {:.3e})",
                 "残差が {} 反復のあいだ改善しませんでした（相対残差 {:.3e} で停滞）",
-                STALL_WINDOW, self.relative_residual
+                STALL_WINDOW,
+                self.relative_residual
             )
         } else {
-            format!(
+            crate::tr!(
+                "Reached the maximum number of iterations, {} (relative residual {:.3e})",
                 "最大反復回数 {} に達しました（相対残差 {:.3e}）",
-                self.iterations, self.relative_residual
+                self.iterations,
+                self.relative_residual
             )
         })
     }
@@ -100,7 +104,8 @@ pub fn solve<B: LinearBackend>(
 ) -> Result<CgReport> {
     let n = matrix.n_rows();
     if rhs.len() != n || phi.len() != n {
-        return Err(GfemError::internal(format!(
+        return Err(GfemError::internal(crate::tr!(
+            "Vector lengths do not match the matrix: matrix {n}, right-hand side {}, solution {}",
             "ベクトルの長さが行列と合いません: 行列 {n}, 右辺 {}, 解 {}",
             rhs.len(),
             phi.len()
@@ -194,13 +199,16 @@ pub fn solve<B: LinearBackend>(
 
         let pap = backend.dot(&p, &ap)?;
         if pap <= 0.0 || pap.is_nan() {
-            return Err(GfemError::internal(format!(
+            return Err(GfemError::internal(crate::tr!(
+                "CG broke down: pᵀKp = {pap} is not positive (iteration {iteration})",
                 "CG が破綻しました: pᵀKp = {pap} が正ではありません（反復 {iteration}）"
             ))
-            .with_hint(
+            .with_hint(crate::tr!(
+                "The stiffness matrix may not be positive definite. Check for degenerate elements, \
+                 negative conductivities and disconnected meshes",
                 "剛性行列が正定値でない可能性があります。退化要素や負の導電率、\
-                 メッシュの非連結を確認してください",
-            ));
+                 メッシュの非連結を確認してください"
+            )));
         }
         let alpha = rz / pap;
 

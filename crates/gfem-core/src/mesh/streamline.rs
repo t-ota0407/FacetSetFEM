@@ -271,7 +271,8 @@ impl Navigator {
     ) -> Result<Option<Streamline>> {
         let n_elements = mesh.n_solid_elements();
         if field.len() != 3 * n_elements {
-            return Err(GfemError::internal(format!(
+            return Err(GfemError::internal(crate::tr!(
+                "Wrong length of the element values: {} given, but 3 × {n_elements} expected",
                 "要素値の長さが合いません: {} 個ですが 3 × {n_elements} であるべきです",
                 field.len()
             )));

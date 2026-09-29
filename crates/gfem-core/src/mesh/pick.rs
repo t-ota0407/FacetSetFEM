@@ -287,17 +287,26 @@ impl SurfacePicker {
         if norm(p) < AXIS_PARALLEL_LIMIT * norm(a) {
             return Err(GfemError::new(
                 ErrorKind::Case,
-                format!(
+                crate::tr!(
+                    "The orientation axis {:?} of the rectangular patch is almost parallel to the \
+                     normal [{:.3}, {:.3}, {:.3}] of the face it is placed on, so the edge direction \
+                     cannot be determined",
                     "矩形パッチの向きの軸 {:?} が、置こうとした面の法線 [{:.3}, {:.3}, {:.3}] と\
                      ほぼ平行で、辺の向きが決まりません",
-                    a, n[0], n[1], n[2]
+                    a,
+                    n[0],
+                    n[1],
+                    n[2]
                 ),
             )
-            .with_hint(
+            .with_hint(crate::tr!(
+                "In the GUI you are looking at the body surface almost edge-on. Rotate the view so \
+                 that you face the surface where the electrode goes, then click again (in a case \
+                 file, give an axis that runs along the body surface)",
                 "GUI では体表面をほぼ真横から見ています。電極を置く面を正面から見るように\
                  回してからクリックしてください（ケースファイルでは axis を体表面に沿う向きに\
-                 書いてください）",
-            ));
+                 書いてください）"
+            )));
         }
         let u0 = scale(p, 1.0 / norm(p));
         let w0 = cross(n, u0);
@@ -397,20 +406,24 @@ pub struct RectShape {
 impl RectShape {
     /// 寸法と向きが使える値か確かめる。
     pub fn check(&self) -> Result<()> {
-        let bad = |what: String, hint: &str| {
-            Err(GfemError::new(ErrorKind::Case, what).with_hint(hint.to_string()))
-        };
+        let bad =
+            |what: String, hint: String| Err(GfemError::new(ErrorKind::Case, what).with_hint(hint));
         if !(self.width.is_finite()
             && self.width > 0.0
             && self.height.is_finite()
             && self.height > 0.0)
         {
             return bad(
-                format!(
+                crate::tr!(
+                    "Invalid rectangular patch size: width {} m × height {} m",
                     "矩形パッチの寸法が不正です: 幅 {} m × 高さ {} m",
-                    self.width, self.height
+                    self.width,
+                    self.height
                 ),
-                "幅と高さは正の有限値で指定してください（単位は m。20 mm なら 0.02）",
+                crate::tr!(
+                    "Give the width and height as positive finite values (in m; 20 mm is 0.02)",
+                    "幅と高さは正の有限値で指定してください（単位は m。20 mm なら 0.02）"
+                ),
             );
         }
         let limit = 0.5 * self.width.min(self.height);
@@ -419,23 +432,43 @@ impl RectShape {
             && self.corner_radius <= limit)
         {
             return bad(
-                format!(
+                crate::tr!(
+                    "The corner radius {} m of the rectangular patch is outside the allowed range \
+                     0–{} m (half the shorter side)",
                     "矩形パッチの角の半径 {} m が、使える範囲 0〜{} m（短い辺の半分）を外れています",
-                    self.corner_radius, limit
+                    self.corner_radius,
+                    limit
                 ),
-                "角の半径は 0（尖った角）から短い辺の半分までで指定してください",
+                crate::tr!(
+                    "Give a corner radius between 0 (sharp corners) and half the shorter side",
+                    "角の半径は 0（尖った角）から短い辺の半分までで指定してください"
+                ),
             );
         }
         if !self.axis.iter().all(|v| v.is_finite()) || norm(self.axis) == 0.0 {
             return bad(
-                format!("矩形パッチの向きの軸が不正です: {:?}", self.axis),
-                "axis は幅の辺の向きを表す 0 でない 3 次元ベクトルで指定してください（例: [1, 0, 0]）",
+                crate::tr!(
+                    "Invalid orientation axis of the rectangular patch: {:?}",
+                    "矩形パッチの向きの軸が不正です: {:?}",
+                    self.axis
+                ),
+                crate::tr!(
+                    "Give axis as a nonzero 3D vector along the width edge (e.g. [1, 0, 0])",
+                    "axis は幅の辺の向きを表す 0 でない 3 次元ベクトルで指定してください（例: [1, 0, 0]）"
+                ),
             );
         }
         if !self.angle.is_finite() {
             return bad(
-                format!("矩形パッチの角度が数値になっていません: {}", self.angle),
-                "angle は度で指定してください（省略すると 0）",
+                crate::tr!(
+                    "The angle of the rectangular patch is not a number: {}",
+                    "矩形パッチの角度が数値になっていません: {}",
+                    self.angle
+                ),
+                crate::tr!(
+                    "Give angle in degrees (0 if omitted)",
+                    "angle は度で指定してください（省略すると 0）"
+                ),
             );
         }
         Ok(())

@@ -25,10 +25,18 @@ use gfem_core::solver::reduce::{self, BLOCK};
 use std::sync::Arc;
 
 /// CSR の転送に失敗したときのエラー。VRAM 不足が圧倒的に多いので、そう書く。
-fn upload_err(what: &str, e: &cudarc::driver::DriverError) -> GfemError {
-    cuda_error(format!("{what}を VRAM へ転送できませんでした"), e).with_hint(
-        "VRAM が足りない可能性があります。backend: cpu_parallel なら主記憶だけで解けます",
-    )
+///
+/// `what` は（英語, 日本語）の組。エラーのときだけ片方を選ぶ。
+fn upload_err(what: (&str, &str), e: &cudarc::driver::DriverError) -> GfemError {
+    let message = if gfem_core::i18n::is_ja() {
+        format!("{}を VRAM へ転送できませんでした", what.1)
+    } else {
+        format!("Could not transfer the {} to VRAM", what.0)
+    };
+    cuda_error(message, e).with_hint(gfem_core::tr!(
+        "VRAM may be insufficient. backend: cpu_parallel solves using main memory only",
+        "VRAM が足りない可能性があります。backend: cpu_parallel なら主記憶だけで解けます"
+    ))
 }
 
 /// VRAM 上の CSR 行列。
@@ -99,11 +107,15 @@ impl CudaBackend {
         n: usize,
     ) -> Result<CudaSlice<f64>> {
         let blocks = n.div_ceil(BLOCK);
-        let mut out = self
-            .device
-            .stream
-            .alloc_zeros::<f64>(blocks)
-            .map_err(|e| cuda_error("リダクション用の VRAM を確保できませんでした", &e))?;
+        let mut out = self.device.stream.alloc_zeros::<f64>(blocks).map_err(|e| {
+            cuda_error(
+                gfem_core::tr!(
+                    "Could not allocate VRAM for the reduction",
+                    "リダクション用の VRAM を確保できませんでした"
+                ),
+                &e,
+            )
+        })?;
         let (n64, block64) = (n as u64, BLOCK as u64);
         let cfg = Self::config(blocks);
         let launch = match second {
@@ -118,7 +130,15 @@ impl CudaBackend {
                 unsafe { b.launch(cfg) }
             }
         };
-        launch.map_err(|e| cuda_error("リダクションのカーネル起動に失敗しました", &e))?;
+        launch.map_err(|e| {
+            cuda_error(
+                gfem_core::tr!(
+                    "Failed to launch the reduction kernel",
+                    "リダクションのカーネル起動に失敗しました"
+                ),
+                &e,
+            )
+        })?;
         Ok(out)
     }
 
@@ -133,26 +153,33 @@ impl CudaBackend {
             let n = current.len();
             current = self.block_reduce(&current, None, n)?;
         }
-        let host = self
-            .device
-            .stream
-            .clone_dtoh(&current)
-            .map_err(|e| cuda_error("リダクション結果を取り出せませんでした", &e))?;
+        let host = self.device.stream.clone_dtoh(&current).map_err(|e| {
+            cuda_error(
+                gfem_core::tr!(
+                    "Could not retrieve the reduction result",
+                    "リダクション結果を取り出せませんでした"
+                ),
+                &e,
+            )
+        })?;
         self.sync()?;
         Ok(reduce::sum(&host))
     }
 
     fn sync(&self) -> Result<()> {
-        self.device
-            .stream
-            .synchronize()
-            .map_err(|e| cuda_error("GPU の同期に失敗しました", &e))
+        self.device.stream.synchronize().map_err(|e| {
+            cuda_error(
+                gfem_core::tr!("Failed to synchronize the GPU", "GPU の同期に失敗しました"),
+                &e,
+            )
+        })
     }
 
     /// 同じ長さであることを確かめる。
     fn same_len(a: usize, b: usize) -> Result<()> {
         if a != b {
-            return Err(GfemError::internal(format!(
+            return Err(GfemError::internal(gfem_core::tr!(
+                "Vector lengths differ: {a} and {b}",
                 "ベクトルの長さが違います: {a} と {b}"
             )));
         }
@@ -187,33 +214,41 @@ impl LinearBackend for CudaBackend {
         Ok(CudaCsr {
             row_ptr: stream
                 .clone_htod(&row_ptr)
-                .map_err(|e| upload_err("行ポインタ", &e))?,
+                .map_err(|e| upload_err(("row pointers", "行ポインタ"), &e))?,
             col_idx: stream
                 .clone_htod(a.col_idx())
-                .map_err(|e| upload_err("列番号", &e))?,
+                .map_err(|e| upload_err(("column indices", "列番号"), &e))?,
             values: stream
                 .clone_htod(a.values())
-                .map_err(|e| upload_err("成分", &e))?,
+                .map_err(|e| upload_err(("matrix values", "成分"), &e))?,
             n_rows: a.n_rows(),
             n_cols: a.n_cols(),
         })
     }
 
     fn zeros(&self, n: usize) -> Result<CudaVector> {
-        let data = self
-            .device
-            .stream
-            .alloc_zeros::<f64>(n)
-            .map_err(|e| cuda_error(format!("{n} 要素の VRAM を確保できませんでした"), &e))?;
+        let data = self.device.stream.alloc_zeros::<f64>(n).map_err(|e| {
+            cuda_error(
+                gfem_core::tr!(
+                    "Could not allocate VRAM for {n} elements",
+                    "{n} 要素の VRAM を確保できませんでした"
+                ),
+                &e,
+            )
+        })?;
         Ok(CudaVector { data, len: n })
     }
 
     fn upload(&self, host: &[f64]) -> Result<CudaVector> {
-        let data = self
-            .device
-            .stream
-            .clone_htod(host)
-            .map_err(|e| cuda_error("ベクトルを VRAM へ転送できませんでした", &e))?;
+        let data = self.device.stream.clone_htod(host).map_err(|e| {
+            cuda_error(
+                gfem_core::tr!(
+                    "Could not transfer the vector to VRAM",
+                    "ベクトルを VRAM へ転送できませんでした"
+                ),
+                &e,
+            )
+        })?;
         Ok(CudaVector {
             data,
             len: host.len(),
@@ -222,10 +257,15 @@ impl LinearBackend for CudaBackend {
 
     fn download(&self, x: &CudaVector, host: &mut [f64]) -> Result<()> {
         Self::same_len(x.len, host.len())?;
-        self.device
-            .stream
-            .memcpy_dtoh(&x.data, host)
-            .map_err(|e| cuda_error("ベクトルをホストへ戻せませんでした", &e))?;
+        self.device.stream.memcpy_dtoh(&x.data, host).map_err(|e| {
+            cuda_error(
+                gfem_core::tr!(
+                    "Could not copy the vector back to the host",
+                    "ベクトルをホストへ戻せませんでした"
+                ),
+                &e,
+            )
+        })?;
         self.sync()
     }
 
@@ -234,7 +274,15 @@ impl LinearBackend for CudaBackend {
         self.device
             .stream
             .memcpy_htod(host, &mut x.data)
-            .map_err(|e| cuda_error("ベクトルを VRAM へ書き戻せませんでした", &e))
+            .map_err(|e| {
+                cuda_error(
+                    gfem_core::tr!(
+                        "Could not write the vector back to VRAM",
+                        "ベクトルを VRAM へ書き戻せませんでした"
+                    ),
+                    &e,
+                )
+            })
     }
 
     fn copy_from(&self, src: &CudaVector, dst: &mut CudaVector) -> Result<()> {
@@ -242,7 +290,15 @@ impl LinearBackend for CudaBackend {
         self.device
             .stream
             .memcpy_dtod(&src.data, &mut dst.data)
-            .map_err(|e| cuda_error("VRAM 内のコピーに失敗しました", &e))
+            .map_err(|e| {
+                cuda_error(
+                    gfem_core::tr!(
+                        "Failed to copy within VRAM",
+                        "VRAM 内のコピーに失敗しました"
+                    ),
+                    &e,
+                )
+            })
     }
 
     fn len(&self, x: &CudaVector) -> usize {
@@ -262,7 +318,15 @@ impl LinearBackend for CudaBackend {
             .arg(&mut y.data);
         unsafe { b.launch(Self::config(a.n_rows)) }
             .map(|_| ())
-            .map_err(|e| cuda_error("SpMV のカーネル起動に失敗しました", &e))
+            .map_err(|e| {
+                cuda_error(
+                    gfem_core::tr!(
+                        "Failed to launch the SpMV kernel",
+                        "SpMV のカーネル起動に失敗しました"
+                    ),
+                    &e,
+                )
+            })
     }
 
     fn axpy(&self, alpha: f64, x: &CudaVector, y: &mut CudaVector) -> Result<()> {
@@ -272,7 +336,15 @@ impl LinearBackend for CudaBackend {
         b.arg(&n).arg(&alpha).arg(&x.data).arg(&mut y.data);
         unsafe { b.launch(Self::config(x.len)) }
             .map(|_| ())
-            .map_err(|e| cuda_error("axpy のカーネル起動に失敗しました", &e))
+            .map_err(|e| {
+                cuda_error(
+                    gfem_core::tr!(
+                        "Failed to launch the axpy kernel",
+                        "axpy のカーネル起動に失敗しました"
+                    ),
+                    &e,
+                )
+            })
     }
 
     fn xpby(&self, x: &CudaVector, beta: f64, y: &mut CudaVector) -> Result<()> {
@@ -282,7 +354,15 @@ impl LinearBackend for CudaBackend {
         b.arg(&n).arg(&x.data).arg(&beta).arg(&mut y.data);
         unsafe { b.launch(Self::config(x.len)) }
             .map(|_| ())
-            .map_err(|e| cuda_error("xpby のカーネル起動に失敗しました", &e))
+            .map_err(|e| {
+                cuda_error(
+                    gfem_core::tr!(
+                        "Failed to launch the xpby kernel",
+                        "xpby のカーネル起動に失敗しました"
+                    ),
+                    &e,
+                )
+            })
     }
 
     fn dot(&self, x: &CudaVector, y: &CudaVector) -> Result<f64> {
@@ -293,11 +373,15 @@ impl LinearBackend for CudaBackend {
         let partial = self.block_reduce(&x.data, Some(&y.data), x.len)?;
         if x.len <= BLOCK {
             // CPU 側は dot_block の結果をそのまま返す（総和の再帰に入らない）
-            let host = self
-                .device
-                .stream
-                .clone_dtoh(&partial)
-                .map_err(|e| cuda_error("内積の結果を取り出せませんでした", &e))?;
+            let host = self.device.stream.clone_dtoh(&partial).map_err(|e| {
+                cuda_error(
+                    gfem_core::tr!(
+                        "Could not retrieve the dot product result",
+                        "内積の結果を取り出せませんでした"
+                    ),
+                    &e,
+                )
+            })?;
             self.sync()?;
             return Ok(host[0]);
         }
@@ -310,11 +394,15 @@ impl LinearBackend for CudaBackend {
         }
         let partial = self.block_reduce(&x.data, None, x.len)?;
         if x.len <= BLOCK {
-            let host = self
-                .device
-                .stream
-                .clone_dtoh(&partial)
-                .map_err(|e| cuda_error("総和の結果を取り出せませんでした", &e))?;
+            let host = self.device.stream.clone_dtoh(&partial).map_err(|e| {
+                cuda_error(
+                    gfem_core::tr!(
+                        "Could not retrieve the sum result",
+                        "総和の結果を取り出せませんでした"
+                    ),
+                    &e,
+                )
+            })?;
             self.sync()?;
             return Ok(host[0]);
         }
@@ -327,7 +415,15 @@ impl LinearBackend for CudaBackend {
         b.arg(&n).arg(&alpha).arg(&mut x.data);
         unsafe { b.launch(Self::config(x.len)) }
             .map(|_| ())
-            .map_err(|e| cuda_error("scale のカーネル起動に失敗しました", &e))
+            .map_err(|e| {
+                cuda_error(
+                    gfem_core::tr!(
+                        "Failed to launch the scale kernel",
+                        "scale のカーネル起動に失敗しました"
+                    ),
+                    &e,
+                )
+            })
     }
 
     fn multiply(&self, a: &CudaVector, x: &CudaVector, y: &mut CudaVector) -> Result<()> {
@@ -338,7 +434,15 @@ impl LinearBackend for CudaBackend {
         b.arg(&n).arg(&a.data).arg(&x.data).arg(&mut y.data);
         unsafe { b.launch(Self::config(a.len)) }
             .map(|_| ())
-            .map_err(|e| cuda_error("multiply のカーネル起動に失敗しました", &e))
+            .map_err(|e| {
+                cuda_error(
+                    gfem_core::tr!(
+                        "Failed to launch the multiply kernel",
+                        "multiply のカーネル起動に失敗しました"
+                    ),
+                    &e,
+                )
+            })
     }
 
     fn shift(&self, delta: f64, x: &mut CudaVector) -> Result<()> {
@@ -347,7 +451,15 @@ impl LinearBackend for CudaBackend {
         b.arg(&n).arg(&delta).arg(&mut x.data);
         unsafe { b.launch(Self::config(x.len)) }
             .map(|_| ())
-            .map_err(|e| cuda_error("shift のカーネル起動に失敗しました", &e))
+            .map_err(|e| {
+                cuda_error(
+                    gfem_core::tr!(
+                        "Failed to launch the shift kernel",
+                        "shift のカーネル起動に失敗しました"
+                    ),
+                    &e,
+                )
+            })
     }
 
     fn fill(&self, value: f64, x: &mut CudaVector) -> Result<()> {
@@ -356,6 +468,14 @@ impl LinearBackend for CudaBackend {
         b.arg(&n).arg(&value).arg(&mut x.data);
         unsafe { b.launch(Self::config(x.len)) }
             .map(|_| ())
-            .map_err(|e| cuda_error("fill のカーネル起動に失敗しました", &e))
+            .map_err(|e| {
+                cuda_error(
+                    gfem_core::tr!(
+                        "Failed to launch the fill kernel",
+                        "fill のカーネル起動に失敗しました"
+                    ),
+                    &e,
+                )
+            })
     }
 }

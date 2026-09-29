@@ -59,9 +59,15 @@ impl LengthUnit {
             "in" | "inch" | "inches" => Ok(LengthUnit::Inch),
             other => Err(GfemError::new(
                 ErrorKind::Case,
-                format!("長さ単位として解釈できません: \"{other}\""),
+                crate::tr!(
+                    "Cannot interpret as a length unit: \"{other}\"",
+                    "長さ単位として解釈できません: \"{other}\""
+                ),
             )
-            .with_hint("mm / cm / m / inch のいずれかを指定してください")),
+            .with_hint(crate::tr!(
+                "Specify one of mm / cm / m / inch",
+                "mm / cm / m / inch のいずれかを指定してください"
+            ))),
         }
     }
 }

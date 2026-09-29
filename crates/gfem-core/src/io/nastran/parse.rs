@@ -35,16 +35,26 @@ const SAMPLE_LIMIT: usize = 20;
 ///
 /// 要素 1 個につき節点の数だけ引くので、`format!` で作ると 1000 万節点級のモデルで
 /// 数億回の文字列確保になる。エラーにならない限り使わない名前なので、固定の表にしておく。
-const NODE_FIELD_NAMES: [&str; 8] = [
-    "節点 G1",
-    "節点 G2",
-    "節点 G3",
-    "節点 G4",
-    "節点 G5",
-    "節点 G6",
-    "節点 G7",
-    "節点 G8",
+/// 英語と日本語の組で持ち、エラーを作るときに片方を選ぶ（[`FieldName`]）。
+const NODE_FIELD_NAMES: [FieldName; 8] = [
+    ("node G1", "節点 G1"),
+    ("node G2", "節点 G2"),
+    ("node G3", "節点 G3"),
+    ("node G4", "節点 G4"),
+    ("node G5", "節点 G5"),
+    ("node G6", "節点 G6"),
+    ("node G7", "節点 G7"),
+    ("node G8", "節点 G8"),
 ];
+
+/// エラーに出すフィールド名（英語, 日本語）。読むたびに訳を選ばないよう、
+/// エラーを作るときまで組のまま持つ（SPEC §6.6）。
+type FieldName = (&'static str, &'static str);
+
+const NODE_ID: FieldName = ("node ID", "節点 ID");
+const ELEMENT_ID: FieldName = ("element ID", "要素 ID");
+const PROPERTY_ID: FieldName = ("property ID (PID)", "プロパティ ID (PID)");
+const COORD_ID: FieldName = ("coordinate system ID (CID)", "座標系 ID (CID)");
 
 /// 退化要素とみなす無次元体積のしきい値。`|V| / h³` がこれ以下なら潰れている。
 ///
@@ -85,19 +95,38 @@ pub struct ReadReport {
 
 impl fmt::Display for ReadReport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "読み込み: {} （{} 行）", self.file.display(), self.lines)?;
+        let ja = crate::i18n::is_ja();
+        let file = self.file.display();
+        let lines = self.lines;
+        if ja {
+            writeln!(f, "読み込み: {file} （{lines} 行）")?;
+        } else {
+            writeln!(f, "Read: {file} ({lines} lines)")?;
+        }
         for (name, count) in &self.card_counts {
-            writeln!(f, "  {name:<8} {count} 件")?;
+            if ja {
+                writeln!(f, "  {name:<8} {count} 件")?;
+            } else {
+                writeln!(f, "  {name:<8} {count}")?;
+            }
         }
         for u in &self.unsupported {
-            writeln!(
-                f,
-                "  [未対応] {} {} 件（最初の出現: {} 行目）",
-                u.name, u.count, u.first_line
-            )?;
+            let (name, count, first) = (&u.name, u.count, u.first_line);
+            if ja {
+                writeln!(
+                    f,
+                    "  [未対応] {name} {count} 件（最初の出現: {first} 行目）"
+                )?;
+            } else {
+                writeln!(
+                    f,
+                    "  [unsupported] {name} ×{count} (first seen at line {first})"
+                )?;
+            }
         }
+        let head = if ja { "警告" } else { "warning" };
         for w in &self.warnings {
-            writeln!(f, "  [警告] {w}")?;
+            writeln!(f, "  [{head}] {w}")?;
         }
         Ok(())
     }
@@ -110,8 +139,18 @@ impl fmt::Display for ReadReport {
 pub fn read_nastran(path: impl AsRef<Path>, length_unit: LengthUnit) -> Result<(Mesh, ReadReport)> {
     let path = path.as_ref();
     let file = File::open(path).map_err(|e| {
-        GfemError::io(path, "Nastran ファイルを開けません", e)
-            .with_hint("パスが正しいか、読み取り権限があるかを確認してください")
+        GfemError::io(
+            path,
+            crate::tr!(
+                "Cannot open the Nastran file",
+                "Nastran ファイルを開けません"
+            ),
+            e,
+        )
+        .with_hint(crate::tr!(
+            "Check that the path is correct and that you have read permission",
+            "パスが正しいか、読み取り権限があるかを確認してください"
+        ))
     })?;
     // 読んだバイト列をその場でハッシュに流す（SPEC §5.5）。実行サマリを書く時点で
     // ファイルを読み直すと、その間に書き換えられていても気づけない。
@@ -119,8 +158,16 @@ pub fn read_nastran(path: impl AsRef<Path>, length_unit: LengthUnit) -> Result<(
     let mut reader = BufReader::with_capacity(1 << 20, HashingReader::new(file));
     let (mesh, mut report) = read_nastran_from(&mut reader, path, length_unit)?;
     // ENDDATA の後ろも含めたファイル全体のハッシュにする（sha256sum と同じ値になる）
-    std::io::copy(&mut reader, &mut std::io::sink())
-        .map_err(|e| GfemError::io(path, "ハッシュを取るためにファイルの残りを読めません", e))?;
+    std::io::copy(&mut reader, &mut std::io::sink()).map_err(|e| {
+        GfemError::io(
+            path,
+            crate::tr!(
+                "Cannot read the rest of the file to compute its hash",
+                "ハッシュを取るためにファイルの残りを読めません"
+            ),
+            e,
+        )
+    })?;
     report.sha256 = Some(reader.into_inner().finish());
     Ok((mesh, report))
 }
@@ -214,15 +261,18 @@ impl Builder {
             "CORD2R" => self.count_and(name, |s| s.coord(card, CoordKind::Rectangular)),
             "CORD2C" => self.count_and(name, |s| s.coord(card, CoordKind::Cylindrical)),
             "CORD2S" => self.count_and(name, |s| s.coord(card, CoordKind::Spherical)),
-            "INCLUDE" => Err(GfemError::unsupported(
-                "INCLUDE による外部ファイルの取り込みは未対応です",
-            )
+            "INCLUDE" => Err(GfemError::unsupported(crate::tr!(
+                "Including external files with INCLUDE is not supported",
+                "INCLUDE による外部ファイルの取り込みは未対応です"
+            ))
             .with_line(card.line())
             .with_card("INCLUDE")
-            .with_hint(
+            .with_hint(crate::tr!(
+                "Merge the included contents into a single file before loading it \
+                 (INCLUDE support is planned in SPEC §3.1)",
                 "取り込み先の内容を 1 つのファイルにまとめてから読み込ませてください\
-                 （INCLUDE の対応は SPEC §3.1 の予定項目です）",
-            )),
+                 （INCLUDE の対応は SPEC §3.1 の予定項目です）"
+            ))),
             _ if IGNORED_CARDS.contains(&name) => {
                 *self.card_counts.entry(name.to_string()).or_insert(0) += 1;
                 Ok(())
@@ -252,17 +302,21 @@ impl Builder {
 
     /// `GRID ID CP X1 X2 X3 CD PS SEID`
     fn grid(&mut self, card: &Card) -> Result<()> {
-        let id = field_id(card, 1, "節点 ID")?;
+        let id = field_id(card, 1, NODE_ID)?;
         let cp = field_int(card, 2)?.unwrap_or(0);
         if !(0..=u32::MAX as i64).contains(&cp) {
-            return Err(
-                GfemError::syntax(format!("定義座標系 CP が範囲外です: {cp}"))
-                    .with_line(card.line())
-                    .with_card("GRID")
-                    .with_field(2)
-                    .with_entity(format!("節点 ID={id}"))
-                    .with_hint("CP には 0 以上の座標系 ID を書いてください"),
-            );
+            return Err(GfemError::syntax(crate::tr!(
+                "The definition coordinate system CP is out of range: {cp}",
+                "定義座標系 CP が範囲外です: {cp}"
+            ))
+            .with_line(card.line())
+            .with_card("GRID")
+            .with_field(2)
+            .with_entity(crate::tr!("node ID={id}", "節点 ID={id}"))
+            .with_hint(crate::tr!(
+                "Write a coordinate system ID of 0 or more in CP",
+                "CP には 0 以上の座標系 ID を書いてください"
+            )));
         }
         // CD（変位座標系）はスカラー場では意味を持たないので読み飛ばす（SPEC §3.1）
         let x = field_real(card, 3, 0.0)?;
@@ -281,17 +335,21 @@ impl Builder {
 
     /// `CORD2R / CORD2C / CORD2S CID RID A1 A2 A3 B1 B2 B3 / C1 C2 C3`
     fn coord(&mut self, card: &Card, kind: CoordKind) -> Result<()> {
-        let cid = field_id(card, 1, "座標系 ID (CID)")?;
+        let cid = field_id(card, 1, COORD_ID)?;
         let rid = field_int(card, 2)?.unwrap_or(0);
         if !(0..=u32::MAX as i64).contains(&rid) {
-            return Err(
-                GfemError::syntax(format!("参照座標系 RID が範囲外です: {rid}"))
-                    .with_line(card.line())
-                    .with_card(kind.card_name())
-                    .with_field(2)
-                    .with_entity(format!("CID={cid}"))
-                    .with_hint("RID には 0 以上の座標系 ID を書いてください"),
-            );
+            return Err(GfemError::syntax(crate::tr!(
+                "The reference coordinate system RID is out of range: {rid}",
+                "参照座標系 RID が範囲外です: {rid}"
+            ))
+            .with_line(card.line())
+            .with_card(kind.card_name())
+            .with_field(2)
+            .with_entity(format!("CID={cid}"))
+            .with_hint(crate::tr!(
+                "Write a coordinate system ID of 0 or more in RID",
+                "RID には 0 以上の座標系 ID を書いてください"
+            )));
         }
         let point = |start: usize| -> Result<[f64; 3]> {
             Ok([
@@ -310,7 +368,8 @@ impl Builder {
             line: card.line(),
         };
         if self.coord_definitions.insert(cid, definition).is_some() {
-            self.warnings.push(format!(
+            self.warnings.push(crate::tr!(
+                "{} CID={cid} is defined more than once (the one on line {} is used)",
                 "{} の CID={cid} が複数回定義されています（{} 行目のものを使います）",
                 kind.card_name(),
                 card.line()
@@ -322,19 +381,21 @@ impl Builder {
     /// `CTETRA / CPENTA / CHEXA EID PID G1 G2 ...`
     fn solid(&mut self, card: &Card, kind: ElementKind, higher_order_nodes: usize) -> Result<()> {
         let n = kind.node_count();
-        let eid = field_id(card, 1, "要素 ID")?;
-        let pid = field_id(card, 2, "プロパティ ID (PID)")?;
+        let eid = field_id(card, 1, ELEMENT_ID)?;
+        let pid = field_id(card, 2, PROPERTY_ID)?;
         let last = card.last_non_blank(3);
         if last > 3 + n {
-            return Err(GfemError::unsupported(format!(
+            return Err(GfemError::unsupported(crate::tr!(
+                "The {1}-node version of {0} (second-order element) is not supported",
                 "{} の {} 節点版（2 次要素）は未対応です",
                 kind.card_name(),
                 higher_order_nodes
             ))
             .with_line(card.line())
             .with_card(kind.card_name())
-            .with_entity(format!("要素 EID={eid}"))
-            .with_hint(format!(
+            .with_entity(crate::tr!("element EID={eid}", "要素 EID={eid}"))
+            .with_hint(crate::tr!(
+                "v1.0 supports first-order elements only (SPEC §1.4). Convert to the {}-node {}",
                 "v1.0 は 1 次要素のみ対応です（SPEC §1.4）。{} 節点の {} に変換してください",
                 n,
                 kind.card_name()
@@ -345,7 +406,7 @@ impl Builder {
         block.pids.push(pid);
         block.lines.push(card.line() as u32);
         for (k, name) in NODE_FIELD_NAMES.iter().take(n).enumerate() {
-            block.conn_ids.push(field_id(card, 3 + k, name)?);
+            block.conn_ids.push(field_id(card, 3 + k, *name)?);
         }
         Ok(())
     }
@@ -353,14 +414,14 @@ impl Builder {
     /// `CTRIA3 / CQUAD4 EID PID G1 ... [THETA/MCID ZOFFS]`
     fn shell(&mut self, card: &Card, kind: ElementKind) -> Result<()> {
         let n = kind.node_count();
-        let eid = field_id(card, 1, "要素 ID")?;
-        let pid = field_id(card, 2, "プロパティ ID (PID)")?;
+        let eid = field_id(card, 1, ELEMENT_ID)?;
+        let pid = field_id(card, 2, PROPERTY_ID)?;
         let block = self.blocks.entry(kind).or_insert_with(RawBlock::new);
         block.ids.push(eid);
         block.pids.push(pid);
         block.lines.push(card.line() as u32);
         for (k, name) in NODE_FIELD_NAMES.iter().take(n).enumerate() {
-            block.conn_ids.push(field_id(card, 3 + k, name)?);
+            block.conn_ids.push(field_id(card, 3 + k, *name)?);
         }
         // THETA/MCID・ZOFFS 以降は構造解析用なので読み飛ばす
         Ok(())
@@ -368,7 +429,7 @@ impl Builder {
 
     /// `PSOLID PID MID ...` / `PSHELL PID MID1 T ...`
     fn property(&mut self, card: &Card, kind: &'static str) -> Result<()> {
-        let pid = field_id(card, 1, "プロパティ ID (PID)")?;
+        let pid = field_id(card, 1, PROPERTY_ID)?;
         let mid = field_int(card, 2)?.and_then(|v| u32::try_from(v).ok());
         let prop = Property {
             pid,
@@ -377,21 +438,25 @@ impl Builder {
         };
         if let Some(prev) = self.properties.insert(pid, prop) {
             if prev.card == kind {
-                self.warnings.push(format!(
+                self.warnings.push(crate::tr!(
+                    "{kind} PID={pid} is defined more than once (the one on line {} is used)",
                     "{kind} の PID={pid} が複数回定義されています（{} 行目のものを使います）",
                     card.line()
                 ));
             } else {
-                return Err(GfemError::model(format!(
+                return Err(GfemError::model(crate::tr!(
+                    "PID={pid} is defined by both {} and {kind}",
                     "PID={pid} が {} と {kind} の両方で定義されています",
                     prev.card
                 ))
                 .with_line(card.line())
                 .with_card(kind)
-                .with_hint(
+                .with_hint(crate::tr!(
+                    "A PID identifies a region (PSOLID) or a candidate electrode surface (PSHELL), \
+                     so it must be unique across all property cards. Change one of the PIDs",
                     "PID は領域（PSOLID）と電極候補面（PSHELL）を識別する鍵なので、\
-                     全プロパティカードを通して一意でなければなりません。片方の PID を変更してください",
-                ));
+                     全プロパティカードを通して一意でなければなりません。片方の PID を変更してください"
+                )));
             }
         }
         Ok(())
@@ -419,12 +484,20 @@ impl Builder {
             let systems = coord::resolve(&coord_definitions)?;
             for &(index, cid) in &node_cp {
                 let Some(system) = systems.get(cid) else {
-                    return Err(GfemError::model(format!(
+                    return Err(GfemError::model(crate::tr!(
+                        "The coordinate system CID={cid} referenced by GRID is not defined",
                         "GRID が参照する座標系 CID={cid} が定義されていません"
                     ))
                     .with_card("GRID")
-                    .with_entity(format!("節点 ID={}", node_ids[index as usize]))
-                    .with_hint("CORD2R / CORD2C / CORD2S でその CID を定義してください"));
+                    .with_entity(crate::tr!(
+                        "node ID={}",
+                        "節点 ID={}",
+                        node_ids[index as usize]
+                    ))
+                    .with_hint(crate::tr!(
+                        "Define that CID with CORD2R / CORD2C / CORD2S",
+                        "CORD2R / CORD2C / CORD2S でその CID を定義してください"
+                    )));
                 };
                 let k = index as usize * 3;
                 let local = [node_coords[k], node_coords[k + 1], node_coords[k + 2]];
@@ -439,24 +512,32 @@ impl Builder {
         }
 
         if node_ids.is_empty() {
-            return Err(
-                GfemError::model("GRID カードが 1 枚もありません").with_hint(
-                    "バルクデータセクション（BEGIN BULK 〜 ENDDATA）に GRID があるか、\
-                     ファイルが空でないかを確認してください",
-                ),
-            );
+            return Err(GfemError::model(crate::tr!(
+                "There are no GRID cards",
+                "GRID カードが 1 枚もありません"
+            ))
+            .with_hint(crate::tr!(
+                "Check that the bulk data section (BEGIN BULK ... ENDDATA) contains GRID cards \
+                 and that the file is not empty",
+                "バルクデータセクション（BEGIN BULK 〜 ENDDATA）に GRID があるか、\
+                 ファイルが空でないかを確認してください"
+            )));
         }
 
         // --- 節点 ID → 索引 ---
         let idmap = IdMap::build(&node_ids).map_err(|dups| {
             let list: Vec<String> = dups.iter().map(|d| d.to_string()).collect();
-            GfemError::model(format!(
+            GfemError::model(crate::tr!(
+                "Duplicate node IDs ({}): {}",
                 "節点 ID が重複しています（{} 件）: {}",
                 dups.len(),
                 format_sample_list(&list, SAMPLE_LIMIT)
             ))
             .with_card("GRID")
-            .with_hint("同じ ID の GRID が 2 枚以上あります。重複を取り除いてください")
+            .with_hint(crate::tr!(
+                "Two or more GRID cards have the same ID. Remove the duplicates",
+                "同じ ID の GRID が 2 枚以上あります。重複を取り除いてください"
+            ))
         })?;
 
         // --- 接続を索引へ解決 ---
@@ -471,14 +552,16 @@ impl Builder {
             for (e, chunk) in raw.conn_ids.chunks_exact(n).enumerate() {
                 for (k, &gid) in chunk.iter().enumerate() {
                     let Some(idx) = idmap.get(gid) else {
-                        return Err(GfemError::model(format!(
+                        return Err(GfemError::model(crate::tr!(
+                            "Node ID {gid} is not defined as a GRID",
                             "節点 ID {gid} が GRID として定義されていません"
                         ))
                         .with_line(raw.lines[e] as usize)
                         .with_card(kind.card_name())
                         .with_field(3 + k)
-                        .with_entity(format!("要素 EID={}", raw.ids[e]))
-                        .with_hint(format!(
+                        .with_entity(crate::tr!("element EID={}", "要素 EID={}", raw.ids[e]))
+                        .with_hint(crate::tr!(
+                            "Add a GRID card with ID {gid}, or fix the node IDs of the {}",
                             "GRID カードに ID {gid} を追加するか、{} の節点 ID を修正してください",
                             kind.card_name()
                         )));
@@ -508,12 +591,16 @@ impl Builder {
         }
         if !dup_elems.is_empty() {
             dup_elems.dedup();
-            return Err(GfemError::model(format!(
+            return Err(GfemError::model(crate::tr!(
+                "Duplicate element IDs ({}): {}",
                 "要素 ID が重複しています（{} 件）: {}",
                 dup_elems.len(),
                 format_sample_list(&dup_elems, SAMPLE_LIMIT)
             ))
-            .with_hint("要素 ID は全要素カードを通して一意でなければなりません"));
+            .with_hint(crate::tr!(
+                "Element IDs must be unique across all element cards",
+                "要素 ID は全要素カードを通して一意でなければなりません"
+            )));
         }
 
         // --- プロパティの参照整合性 ---
@@ -530,13 +617,14 @@ impl Builder {
                 Some(p) => {
                     let expected = if is_solid { "PSOLID" } else { "PSHELL" };
                     if p.card != expected {
-                        warnings.push(format!(
+                        warnings.push(crate::tr!(
+                            "PID={pid} is defined by {}, but is referenced by {} elements",
                             "PID={pid} は {} で定義されていますが、{} 要素から参照されています",
                             p.card,
                             if is_solid {
-                                "ソリッド"
+                                crate::tr!("solid", "ソリッド")
                             } else {
-                                "シェル"
+                                crate::tr!("shell", "シェル")
                             }
                         ));
                     }
@@ -548,7 +636,9 @@ impl Builder {
                 }
                 None => {
                     // 領域一覧が欠けると GUI で σ を割り当てられなくなるので補完する
-                    warnings.push(format!(
+                    warnings.push(crate::tr!(
+                        "Some elements reference PID={pid}, but there is no matching {} card. \
+                         It was registered as a region automatically",
                         "PID={pid} を参照する要素がありますが、対応する {} カードがありません。\
                          領域として自動的に登録しました",
                         if is_solid { "PSOLID" } else { "PSHELL" }
@@ -572,7 +662,8 @@ impl Builder {
             .map(|pid| pid.to_string())
             .collect();
         if !unused.is_empty() {
-            warnings.push(format!(
+            warnings.push(crate::tr!(
+                "Some properties are not referenced by any element ({}): PID={}",
                 "どの要素からも参照されていないプロパティがあります（{} 件）: PID={}",
                 unused.len(),
                 format_sample_list(&unused, SAMPLE_LIMIT)
@@ -587,7 +678,8 @@ impl Builder {
             .map(|(i, _)| node_ids[i].to_string())
             .collect();
         if !orphans.is_empty() {
-            warnings.push(format!(
+            warnings.push(crate::tr!(
+                "Some isolated nodes are not referenced by any element ({}): ID={}",
                 "どの要素からも参照されていない孤立節点があります（{} 件）: ID={}",
                 orphans.len(),
                 format_sample_list(&orphans, SAMPLE_LIMIT)
@@ -605,10 +697,10 @@ impl Builder {
         };
 
         if mesh.n_solid_elements() == 0 {
-            warnings.push(
+            warnings.push(crate::tr!(
+                "There are no solid elements (CTETRA / CPENTA / CHEXA). The model cannot be analysed",
                 "ソリッド要素（CTETRA / CPENTA / CHEXA）が 1 つもありません。解析はできません"
-                    .to_string(),
-            );
+            ));
         }
         check_tet4_geometry(&mesh, &mut warnings)?;
         check_isoparametric_geometry(&mesh)?;
@@ -662,19 +754,24 @@ fn check_tet4_geometry(mesh: &Mesh, warnings: &mut Vec<String>) -> Result<()> {
         }
     }
     if !degenerate.is_empty() {
-        return Err(GfemError::model(format!(
+        return Err(GfemError::model(crate::tr!(
+            "Some CTETRA elements are degenerate with zero volume ({}): EID={}",
             "体積がゼロの退化した CTETRA があります（{} 件）: EID={}",
             degenerate.len(),
             format_sample_list(&degenerate, SAMPLE_LIMIT)
         ))
         .with_card("CTETRA")
-        .with_hint(
+        .with_hint(crate::tr!(
+            "The 4 nodes lie in one plane, or the same node is referenced more than once. \
+             Fix these elements in the mesh generator",
             "4 節点が同一平面上にあるか、同じ節点を重複して参照しています。\
-             メッシュ生成側で該当要素を修正してください",
-        ));
+             メッシュ生成側で該当要素を修正してください"
+        )));
     }
     if !inverted.is_empty() {
-        warnings.push(format!(
+        warnings.push(crate::tr!(
+            "Some CTETRA elements have reversed node order (negative signed volume) ({}): EID={}. \
+             The element stiffness uses |V|, so the results are not affected",
             "節点順序が反転している（符号付き体積が負の）CTETRA があります（{} 件）: EID={}。\
              要素剛性は |V| で計算するため結果には影響しません",
             inverted.len(),
@@ -724,16 +821,25 @@ fn check_isoparametric_geometry(mesh: &Mesh) -> Result<()> {
         if !bad.is_empty() {
             let card = kind.card_name();
             let order = match kind {
-                ElementKind::Hex8 => "G1〜G4 が底面、G5〜G8 がその真上（底面から見て反時計回り）",
-                _ => "G1〜G3 が底面、G4〜G6 がその真上（底面から見て反時計回り）",
+                ElementKind::Hex8 => crate::tr!(
+                    "G1–G4 form the bottom face and G5–G8 lie directly above them (counterclockwise seen from the bottom face)",
+                    "G1〜G4 が底面、G5〜G8 がその真上（底面から見て反時計回り）"
+                ),
+                _ => crate::tr!(
+                    "G1–G3 form the bottom face and G4–G6 lie directly above them (counterclockwise seen from the bottom face)",
+                    "G1〜G3 が底面、G4〜G6 がその真上（底面から見て反時計回り）"
+                ),
             };
-            return Err(GfemError::model(format!(
+            return Err(GfemError::model(crate::tr!(
+                "Some {card} elements have a non-positive Jacobian ({}): EID={}",
                 "ヤコビアンが正でない {card} があります（{} 件）: EID={}",
                 bad.len(),
                 format_sample_list(&bad, SAMPLE_LIMIT)
             ))
             .with_card(card)
-            .with_hint(format!(
+            .with_hint(crate::tr!(
+                "The node order is reversed, or the element is collapsed or twisted. For {card}, {order}. \
+                 Fix these elements in the mesh generator",
                 "節点の並びが逆か、要素が潰れている／ねじれています。{card} の並びは {order} です。\
                  メッシュ生成側で該当要素を修正してください"
             )));
@@ -750,11 +856,17 @@ fn field_int(card: &Card, i: usize) -> Result<Option<i64>> {
         return Ok(None);
     }
     parse_int(s).map(Some).ok_or_else(|| {
-        GfemError::syntax(format!("整数として解釈できません: \"{s}\""))
-            .with_line(card.line())
-            .with_card(card.name())
-            .with_field(i)
-            .with_hint("符号付きの十進整数を書いてください")
+        GfemError::syntax(crate::tr!(
+            "Cannot interpret as an integer: \"{s}\"",
+            "整数として解釈できません: \"{s}\""
+        ))
+        .with_line(card.line())
+        .with_card(card.name())
+        .with_field(i)
+        .with_hint(crate::tr!(
+            "Write a signed decimal integer",
+            "符号付きの十進整数を書いてください"
+        ))
     })
 }
 
@@ -764,34 +876,51 @@ fn field_real(card: &Card, i: usize, default: f64) -> Result<f64> {
         return Ok(default);
     }
     parse_real(s).ok_or_else(|| {
-        GfemError::syntax(format!("実数として解釈できません: \"{s}\""))
-            .with_line(card.line())
-            .with_card(card.name())
-            .with_field(i)
-            .with_hint("Nastran の実数形式（例: 1.0, 7., .5, 1.5+3, 2.5E-2）で書いてください")
+        GfemError::syntax(crate::tr!(
+            "Cannot interpret as a real number: \"{s}\"",
+            "実数として解釈できません: \"{s}\""
+        ))
+        .with_line(card.line())
+        .with_card(card.name())
+        .with_field(i)
+        .with_hint(crate::tr!(
+            "Write it in a Nastran real format (e.g. 1.0, 7., .5, 1.5+3, 2.5E-2)",
+            "Nastran の実数形式（例: 1.0, 7., .5, 1.5+3, 2.5E-2）で書いてください"
+        ))
     })
 }
 
 /// ID フィールド（1 以上の整数）を読む。
-fn field_id(card: &Card, i: usize, what: &str) -> Result<u32> {
+fn field_id(card: &Card, i: usize, what: FieldName) -> Result<u32> {
+    // 名前はエラーのときだけ選ぶ（要素の節点ごとに呼ばれるので、正常系で言語を引かない）
+    let name = || if crate::i18n::is_ja() { what.1 } else { what.0 };
     let Some(v) = field_int(card, i)? else {
-        return Err(GfemError::syntax(format!("{what} が空です"))
-            .with_line(card.line())
-            .with_card(card.name())
-            .with_field(i)
-            .with_hint("必須フィールドです。1 以上の整数を書いてください"));
-    };
-    if v < 1 || v > u32::MAX as i64 {
+        let what = name();
         return Err(
-            GfemError::new(ErrorKind::Model, format!("{what} が範囲外です: {v}"))
+            GfemError::syntax(crate::tr!("{what} is empty", "{what} が空です"))
                 .with_line(card.line())
                 .with_card(card.name())
                 .with_field(i)
-                .with_hint(format!(
-                    "ID は 1 以上 {} 以下でなければなりません",
-                    u32::MAX
+                .with_hint(crate::tr!(
+                    "This field is required. Write an integer of 1 or more",
+                    "必須フィールドです。1 以上の整数を書いてください"
                 )),
         );
+    };
+    if v < 1 || v > u32::MAX as i64 {
+        let what = name();
+        return Err(GfemError::new(
+            ErrorKind::Model,
+            crate::tr!("{what} is out of range: {v}", "{what} が範囲外です: {v}"),
+        )
+        .with_line(card.line())
+        .with_card(card.name())
+        .with_field(i)
+        .with_hint(crate::tr!(
+            "An ID must be between 1 and {}",
+            "ID は 1 以上 {} 以下でなければなりません",
+            u32::MAX
+        )));
     }
     Ok(v as u32)
 }

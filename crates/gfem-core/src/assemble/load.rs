@@ -87,13 +87,17 @@ pub fn assemble_load(
             mesh.gather_coords(conn, &mut points[..n]);
             let integral = face_integral(kind, &points[..n]);
             if integral.area <= 0.0 {
-                return Err(GfemError::model(format!(
+                return Err(GfemError::model(crate::tr!(
+                    "A face of electrode {} has zero area",
                     "電極 {} の面の面積がゼロです",
                     electrode.name
                 ))
                 .with_card(kind.card_name())
                 .with_entity(lookup.label(face))
-                .with_hint("退化した面です。メッシュ生成側で修正してください"));
+                .with_hint(crate::tr!(
+                    "This is a degenerate face. Fix it in the mesh generator",
+                    "退化した面です。メッシュ生成側で修正してください"
+                )));
             }
             area += integral.area;
             for (k, &node) in conn.iter().enumerate() {
@@ -104,9 +108,16 @@ pub fn assemble_load(
         if area <= MIN_ELECTRODE_AREA_M2 {
             return Err(GfemError::new(
                 ErrorKind::Case,
-                format!("電極 {} の総面積がゼロです: {area} m²", electrode.name),
+                crate::tr!(
+                    "The total area of electrode {} is zero: {area} m²",
+                    "電極 {} の総面積がゼロです: {area} m²",
+                    electrode.name
+                ),
             )
-            .with_hint("電極面の指定を見直してください"));
+            .with_hint(crate::tr!(
+                "Review which faces are assigned to the electrode",
+                "電極面の指定を見直してください"
+            )));
         }
 
         // 2. 一様電流密度で配る（SPEC §2.4）

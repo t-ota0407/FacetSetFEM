@@ -42,6 +42,7 @@ import numpy as np
 import pyvista as pv
 
 from .. import read_nastran
+from ..i18n import LANGUAGES, language, set_language, tr
 from .busy import BusyOverlay, busy_scope, run_in_thread
 from .pages import ElectrodePage, MeshPage, RegionPage, ResultPage, SolverPage
 from .solver_thread import SolverThread
@@ -254,7 +255,7 @@ class MainWindow(QMainWindow):
         mesh = self.session.mesh
         if mesh is None:
             return ""
-        return f"{mesh.n_nodes:,} 節点 / {mesh.n_elements:,} 要素"
+        return tr("{nodes:,} nodes / {elements:,} elements", nodes=mesh.n_nodes, elements=mesh.n_elements)
 
     # --- UI の構築 ---------------------------------------------------------
 
@@ -262,7 +263,7 @@ class MainWindow(QMainWindow):
         from pyvistaqt import QtInteractor
 
         self.tree = QTreeWidget()
-        self.tree.setHeaderLabels(["モデル"])
+        self.tree.setHeaderLabels([tr("Model")])
         self.tree.setMinimumWidth(240)
         # 領域は Ctrl / Shift + クリックで複数選べる（σ をまとめて入れる）
         self.tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
@@ -317,15 +318,15 @@ class MainWindow(QMainWindow):
 
         self.stats_table = QTableWidget()
         self.stats_table.setColumnCount(len(REGION_STATS_COLUMNS))
-        self.stats_table.setHorizontalHeaderLabels(REGION_STATS_COLUMNS)
+        self.stats_table.setHorizontalHeaderLabels([tr(c) for c in REGION_STATS_COLUMNS])
         self.stats_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.stats_table.verticalHeader().setVisible(False)  # 行番号は PID の列と紛らわしい
 
         self.bottom = QTabWidget()
-        self.bottom.addTab(self.log_view, "ログ")
-        self.bottom.addTab(self.convergence, "収束曲線")
-        self.bottom.addTab(self.checks_view, "保存則チェック")
-        self.bottom.addTab(self.stats_table, "領域統計")
+        self.bottom.addTab(self.log_view, tr("Log"))
+        self.bottom.addTab(self.convergence, tr("Convergence"))
+        self.bottom.addTab(self.checks_view, tr("Conservation checks"))
+        self.bottom.addTab(self.stats_table, tr("Region statistics"))
         self.bottom.setMaximumHeight(240)
 
         central = QWidget()
@@ -334,7 +335,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(splitter, stretch=1)
         layout.addWidget(self.bottom)
         self.setCentralWidget(central)
-        self.statusBar().showMessage("モデルを開いてください")
+        self.statusBar().showMessage(tr("Open a model to begin"))
         # 結果が古い条件のものなら、ステータスバーの右端に出し続ける（一時メッセージに消されない）
         self.stale_status = QLabel("")
         self.stale_status.setStyleSheet(f"color: {STALE_COLOR}; font-weight: bold;")
@@ -343,43 +344,55 @@ class MainWindow(QMainWindow):
         self._result_item = None
 
     def _build_menus(self) -> None:
-        file_menu = self.menuBar().addMenu("ファイル(&F)")
-        self._add_action(file_menu, "モデルを開く...", self.open_mesh_dialog, "Ctrl+O")
-        self._add_action(file_menu, "ケースを開く...", self.open_case_dialog)
+        file_menu = self.menuBar().addMenu(tr("&File"))
+        self._add_action(file_menu, tr("Open model..."), self.open_mesh_dialog, "Ctrl+O")
+        self._add_action(file_menu, tr("Open case..."), self.open_case_dialog)
         file_menu.addSeparator()
-        self._add_action(file_menu, "ケースを保存...", self.save_case_dialog, "Ctrl+S")
-        self._add_action(file_menu, "結果を VTU に書き出す...", self.export_vtu_dialog)
+        self._add_action(file_menu, tr("Save case..."), self.save_case_dialog, "Ctrl+S")
+        self._add_action(file_menu, tr("Export results to VTU..."), self.export_vtu_dialog)
         self._add_action(
-            file_menu, "領域統計を CSV に書き出す...", self.export_region_stats_dialog
+            file_menu, tr("Export region statistics to CSV..."), self.export_region_stats_dialog
         )
         self._add_action(
-            file_menu, "収束履歴を CSV に書き出す...", self.export_convergence_dialog
+            file_menu, tr("Export convergence history to CSV..."), self.export_convergence_dialog
         )
         self._add_action(
-            file_menu, "実行サマリを JSON に書き出す...", self.export_summary_dialog
+            file_menu, tr("Export run summary to JSON..."), self.export_summary_dialog
         )
-        self._add_action(file_menu, "スクリーンショット...", self.screenshot_dialog)
+        self._add_action(file_menu, tr("Screenshot..."), self.screenshot_dialog)
         file_menu.addSeparator()
-        self._add_action(file_menu, "終了", self.close)
+        self._add_action(file_menu, tr("Exit"), self.close)
 
-        edit_menu = self.menuBar().addMenu("編集(&E)")
+        edit_menu = self.menuBar().addMenu(tr("&Edit"))
         # 「元に戻す: …」は長いと切って出すので、全文はツールチップで見せる
         edit_menu.setToolTipsVisible(True)
-        self.action_undo = self._add_action(edit_menu, "元に戻す", self.undo, "Ctrl+Z")
-        self.action_redo = self._add_action(edit_menu, "やり直す", self.redo, "Ctrl+Y")
+        self.action_undo = self._add_action(edit_menu, tr("Undo"), self.undo, "Ctrl+Z")
+        self.action_redo = self._add_action(edit_menu, tr("Redo"), self.redo, "Ctrl+Y")
         self._refresh_history_actions()
 
-        run_menu = self.menuBar().addMenu("実行(&R)")
-        self._add_action(run_menu, "整合性チェック", self.check_consistency, "Ctrl+K")
-        self._add_action(run_menu, "求解", self.start_solve, "F5")
-        self.action_cancel = self._add_action(run_menu, "中断", self.cancel_solve)
+        run_menu = self.menuBar().addMenu(tr("&Run"))
+        self._add_action(run_menu, tr("Check consistency"), self.check_consistency, "Ctrl+K")
+        self._add_action(run_menu, tr("Solve"), self.start_solve, "F5")
+        self.action_cancel = self._add_action(run_menu, tr("Cancel"), self.cancel_solve)
         self.action_cancel.setEnabled(False)
         run_menu.addSeparator()
-        self._add_action(run_menu, "パラメータスタディ...", self.open_sweep_dialog)
+        self._add_action(run_menu, tr("Parameter study..."), self.open_sweep_dialog)
 
-        electrode_menu = self.menuBar().addMenu("電極(&L)")
-        self._add_action(electrode_menu, "電極を追加", self.add_electrode)
-        self._add_action(electrode_menu, "選択中の電極を削除", self.remove_selected_electrode)
+        electrode_menu = self.menuBar().addMenu(tr("E&lectrodes"))
+        self._add_action(electrode_menu, tr("Add electrode"), self.add_electrode)
+        self._add_action(electrode_menu, tr("Delete selected electrode"), self.remove_selected_electrode)
+
+        # 表示言語（SPEC §6.6）。選ぶと設定に残り、次に起動したときから効く
+        view_menu = self.menuBar().addMenu(tr("&View"))
+        language_menu = view_menu.addMenu(tr("Language"))
+        self.language_actions = {}
+        for code, name in LANGUAGES:
+            action = QAction(name, self)
+            action.setCheckable(True)
+            action.setChecked(code == language())
+            action.triggered.connect(lambda _checked=False, c=code: self.choose_language(c))
+            language_menu.addAction(action)
+            self.language_actions[code] = action
 
     def _add_action(self, menu, text, slot, shortcut: str | None = None) -> QAction:
         action = QAction(text, self)
@@ -388,6 +401,32 @@ class MainWindow(QMainWindow):
             action.setShortcut(shortcut)
         menu.addAction(action)
         return action
+
+    # --- 表示言語（SPEC §6.6）----------------------------------------------
+
+    def choose_language(self, code: str) -> None:
+        """表示言語を選んだ。設定に保存し、次に起動したときから反映する。
+
+        開いているウィンドウの文言は作ったときに訳してあるので、その場では変えない
+        （全ページを作り直す仕組みに見合わない）。知らせは選んだ言語で出す。
+        """
+        from .language import save_language
+
+        for c, action in self.language_actions.items():
+            action.setChecked(c == code)
+        if code == language():
+            save_language(code)
+            return
+        save_language(code)
+        current = language()
+        set_language(code)
+        try:
+            title, text = tr("Language"), tr(
+                "The display language will change the next time you start GenericFEM."
+            )
+        finally:
+            set_language(current)
+        QMessageBox.information(self, title, text)
 
     # --- ログ ---------------------------------------------------------------
 
@@ -399,14 +438,14 @@ class MainWindow(QMainWindow):
 
     def show_error(self, exc: Exception) -> None:
         text = str(exc)
-        self.log(f"エラー:\n{text}")
-        QMessageBox.critical(self, "エラー", text)
+        self.log(tr("Error:") + "\n" + text)
+        QMessageBox.critical(self, tr("Error"), text)
 
     # --- ファイル操作 -------------------------------------------------------
 
     def open_mesh_dialog(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
-            self, "モデルを開く", "", "Nastran バルクデータ (*.bdf *.nas);;すべて (*)"
+            self, tr("Open model"), "", tr("Nastran bulk data (*.bdf *.nas);;All files (*)")
         )
         if path:
             self.open_mesh_asking_unit(path)
@@ -421,7 +460,7 @@ class MainWindow(QMainWindow):
             # SPEC §3.2: 単位の選択前に寸法を見せたいので、一度そのままの値（m）で読む。
             # 選ばれた単位へは付け替えるだけにして、ファイルを 2 回パースしない
             as_metre = self.run_busy(
-                "寸法を確認しています",
+                tr("Checking the size"),
                 lambda: read_nastran(path, length_unit="m"),
                 Path(path).name,
             )
@@ -444,7 +483,7 @@ class MainWindow(QMainWindow):
         """
         try:
             self.run_busy(
-                "メッシュを読み込んでいます",
+                tr("Reading the mesh"),
                 lambda: self.session.open_mesh(
                     path, length_unit, None if loaded is None else loaded()
                 ),
@@ -455,7 +494,7 @@ class MainWindow(QMainWindow):
             return
         self.convergence.clear()
         self.checks_view.clear()
-        self.log(f"読み込み完了: {path}")
+        self.log(tr("Loaded: {path}", path=path))
         self.log(self.session.mesh_summary(), status=False)
         self._leave_edited_item()
         self.refresh_all()
@@ -463,7 +502,7 @@ class MainWindow(QMainWindow):
 
     def open_case_dialog(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
-            self, "ケースを開く", "", "ケースファイル (*.yaml *.yml);;すべて (*)"
+            self, tr("Open case"), "", tr("Case files (*.yaml *.yml);;All files (*)")
         )
         if path:
             self.open_case(path)
@@ -471,7 +510,7 @@ class MainWindow(QMainWindow):
     def open_case(self, path: str | Path) -> None:
         try:
             self.run_busy(
-                "ケースを読み込んでいます",
+                tr("Reading the case"),
                 lambda: self.session.open_case(path),
                 Path(path).name,
             )
@@ -480,7 +519,7 @@ class MainWindow(QMainWindow):
             return
         self.convergence.clear()
         self.checks_view.clear()
-        self.log(f"ケースを読み込みました: {path}")
+        self.log(tr("Opened the case: {path}", path=path))
         self.log(self.session.mesh_summary(), status=False)
         self._leave_edited_item()
         self.refresh_all()
@@ -488,7 +527,7 @@ class MainWindow(QMainWindow):
 
     def save_case_dialog(self) -> None:
         path, _ = QFileDialog.getSaveFileName(
-            self, "ケースを保存", "case.yaml", "ケースファイル (*.yaml)"
+            self, tr("Save case"), "case.yaml", tr("Case files (*.yaml)")
         )
         if path:
             self.save_case(path)
@@ -500,33 +539,33 @@ class MainWindow(QMainWindow):
         except Exception as exc:  # noqa: BLE001
             self.show_error(exc)
             return False
-        self.log(f"ケースを保存しました: {path}")
+        self.log(tr("Saved the case: {path}", path=path))
         return True
 
     def export_vtu_dialog(self) -> None:
         if self.session.solution is None:
-            QMessageBox.information(self, "VTU 書き出し", "先に求解してください（実行 → 求解、F5）。")
+            QMessageBox.information(self, tr("Export VTU"), tr("Solve first (Run → Solve, F5)."))
             return
-        path, _ = QFileDialog.getSaveFileName(self, "VTU に書き出す", "result.vtu", "VTU (*.vtu)")
+        path, _ = QFileDialog.getSaveFileName(self, tr("Export to VTU"), "result.vtu", "VTU (*.vtu)")
         if path:
             self.export_vtu(path)
 
     def export_vtu(self, path: str | Path) -> None:
         try:
             self.run_busy(
-                "VTU を書き出しています",
+                tr("Writing the VTU"),
                 lambda: self.session.solution.write_vtu(path),
                 Path(path).name,
             )
         except Exception as exc:  # noqa: BLE001
             self.show_error(exc)
             return
-        self.log(f"VTU を書き出しました: {path}")
+        self.log(tr("Wrote the VTU: {path}", path=path))
         self._warn_if_stale()
 
     def export_region_stats_dialog(self) -> None:
         self._export_dialog(
-            "領域統計を書き出す",
+            tr("Export region statistics"),
             "region_stats.csv",
             "CSV (*.csv)",
             self.session.write_region_stats_csv,
@@ -534,7 +573,7 @@ class MainWindow(QMainWindow):
 
     def export_convergence_dialog(self) -> None:
         self._export_dialog(
-            "収束履歴を書き出す",
+            tr("Export convergence history"),
             "convergence.csv",
             "CSV (*.csv)",
             self.session.write_convergence_csv,
@@ -542,7 +581,7 @@ class MainWindow(QMainWindow):
 
     def export_summary_dialog(self) -> None:
         self._export_dialog(
-            "実行サマリを書き出す",
+            tr("Export run summary"),
             "summary.json",
             "JSON (*.json)",
             self.session.write_summary_json,
@@ -550,36 +589,36 @@ class MainWindow(QMainWindow):
 
     def _export_dialog(self, title: str, default: str, filters: str, writer) -> None:
         if self.session.solution is None:
-            QMessageBox.information(self, title, "先に求解してください（実行 → 求解、F5）。")
+            QMessageBox.information(self, title, tr("Solve first (Run → Solve, F5)."))
             return
         path, _ = QFileDialog.getSaveFileName(self, title, default, filters)
         if not path:
             return
         try:
-            self.run_busy("書き出しています", lambda: writer(path), Path(path).name)
+            self.run_busy(tr("Writing"), lambda: writer(path), Path(path).name)
         except Exception as exc:  # noqa: BLE001
             self.show_error(exc)
             return
-        self.log(f"書き出しました: {path}")
+        self.log(tr("Wrote: {path}", path=path))
         self._warn_if_stale()
 
     def screenshot_dialog(self) -> None:
-        path, _ = QFileDialog.getSaveFileName(self, "スクリーンショット", "view.png", "PNG (*.png)")
+        path, _ = QFileDialog.getSaveFileName(self, tr("Screenshot"), "view.png", "PNG (*.png)")
         if path:
             self.screenshot(path)
 
     def screenshot(self, path: str | Path) -> None:
         # 画面の取り込みは OpenGL コンテキストを持つメインスレッドでしかできない
-        with self.busy("スクリーンショットを保存しています", Path(path).name):
+        with self.busy(tr("Saving the screenshot"), Path(path).name):
             self.plotter.screenshot(str(path))
-        self.log(f"スクリーンショットを保存しました: {path}")
+        self.log(tr("Saved the screenshot: {path}", path=path))
 
     # --- パラメータスタディ（SPEC §8 M7）-------------------------------------
 
     def open_sweep_dialog(self) -> None:
         """パラメータを振って一括で解くダイアログを開く。"""
         if self.session.study is None:
-            self.log("先にモデルかケースを開いてください")
+            self.log(tr("Open a model or a case first"))
             return
         from .sweep_dialog import SweepDialog
 
@@ -617,7 +656,7 @@ class MainWindow(QMainWindow):
             # 1 なぞりごとに `processEvents` を回すと、そのぶん筆が遅れる
             self._draw_electrode_highlight(name)
             return
-        with self.busy("電極面を描いています"):
+        with self.busy(tr("Drawing the electrode faces")):
             self._draw_electrode_highlight(name)
             self._arm_picking()
 
@@ -647,8 +686,10 @@ class MainWindow(QMainWindow):
         self._stroke_end_callback = stroke_end
         self._arm_picking()
         self.log(
-            "体表面をクリックすると電極面になります"
-            "（Shift + ドラッグで塗る / Alt + ドラッグで消す / ドラッグは回転）"
+            tr(
+                "Click the body surface to make electrode faces "
+                "(Shift + drag paints / Alt + drag erases / drag rotates)"
+            )
         )
 
     def end_patch_picking(self) -> None:
@@ -852,14 +893,14 @@ class MainWindow(QMainWindow):
         if not label:
             return
         self._refresh_after_history()
-        self.log(f"元に戻しました: {label}")
+        self.log(tr("Undone: {what}", what=label))
 
     def redo(self) -> None:
         label = self.session.redo()
         if not label:
             return
         self._refresh_after_history()
-        self.log(f"やり直しました: {label}")
+        self.log(tr("Redone: {what}", what=label))
 
     def _refresh_after_history(self) -> None:
         """Undo / Redo の後。ツリーと、開いているページを戻した条件で読み直す。
@@ -867,7 +908,7 @@ class MainWindow(QMainWindow):
         以前は `refresh_all` だけで、開いているページは戻す前の値を出したまま
         （電流を戻しても欄は古い値）、戻した操作で消えた電極のページも出たままだった。
         """
-        with self.busy("表示を作成しています"):
+        with self.busy(tr("Building the view")):
             self.refresh_tree()
             self.page_result.reload()
             self.refresh_stats_table()
@@ -911,8 +952,8 @@ class MainWindow(QMainWindow):
         self.action_undo.setEnabled(undo)
         self.action_redo.setEnabled(redo)
         for action, verb, enabled, label in (
-            (self.action_undo, "元に戻す", undo, self.session.undo_label()),
-            (self.action_redo, "やり直す", redo, self.session.redo_label()),
+            (self.action_undo, tr("Undo"), undo, self.session.undo_label()),
+            (self.action_redo, tr("Redo"), redo, self.session.redo_label()),
         ):
             # **操作名は切って出す。** 記録の名前には選んだ PID が全部入る（62 領域を
             # まとめて選ぶと「領域 1, 2, 3, …, 62 の設定を変更」）ので、そのまま出すと
@@ -935,10 +976,10 @@ class MainWindow(QMainWindow):
         while f"E{index}" in existing:
             index += 1
         role = "anode" if not existing else "cathode"
-        self.checkpoint(f"電極 E{index} を追加")
+        self.checkpoint(tr("Add electrode {name}", name=f"E{index}"))
         self.session.add_electrode(f"E{index}", role=role)
         self.refresh_tree()
-        self.log(f"電極 E{index} を追加しました（{role}）")
+        self.log(tr("Added electrode {name} ({role})", name=f"E{index}", role=role))
         # 追加した電極を選んで、そのページを開く。以前は選択が前の項目のままで、
         # 追加した電極をツリーで探して選び直す必要があった
         self.select_item("electrode", f"E{index}")
@@ -955,11 +996,11 @@ class MainWindow(QMainWindow):
         if item is None or item.data(0, ROLE_KIND) != "electrode":
             return
         name = item.data(0, ROLE_KEY)
-        self.checkpoint(f"電極 {name} を削除")
+        self.checkpoint(tr("Delete electrode {name}", name=name))
         self.session.remove_electrode(name)
         self.refresh_tree()
         self._show_selection()  # 消した電極は選び直せないので、メッシュのページに戻る
-        self.log(f"電極 {name} を削除しました")
+        self.log(tr("Deleted electrode {name}", name=name))
 
     # --- 実行 ---------------------------------------------------------------
 
@@ -967,7 +1008,7 @@ class MainWindow(QMainWindow):
         """整合性チェック（SPEC §6.2 の手順 4）。不備があれば全部を一覧で出して None。"""
         try:
             problems, warnings = self.run_busy(
-                "整合性をチェックしています", self.session.problems
+                tr("Checking consistency"), self.session.problems
             )
         except Exception as exc:  # noqa: BLE001
             self.show_error(exc)
@@ -976,16 +1017,20 @@ class MainWindow(QMainWindow):
             self._show_problems(problems)
             return None
         if warnings:
-            self.log("整合性チェック: 警告 " + str(len(warnings)) + " 件")
+            self.log(tr("Consistency check: {n} warnings", n=len(warnings)))
             for w in warnings:
-                self.log(f"  [警告] {w}")
+                self.log("  " + tr("[Warning] {text}", text=w))
         else:
-            self.log("整合性チェック: 問題ありません")
+            self.log(tr("Consistency check: no problems"))
         for info in self.session.electrode_info():
             self.log(
-                f"  電極 {info['name']} ({info['role']}): "
-                f"{info['n_faces']} 面, 面積 {info['area'] * 1e6:.1f} mm², "
-                f"電流密度 {info['current_density']:.4g} A/m²"
+                "  "
+                + tr(
+                    "Electrode {name} ({role}): {n} faces, area {mm2:.1f} mm², "
+                    "current density {j:.4g} A/m²",
+                    name=info["name"], role=info["role"], n=info["n_faces"],
+                    mm2=info["area"] * 1e6, j=info["current_density"],
+                )
             )
         return warnings
 
@@ -995,14 +1040,14 @@ class MainWindow(QMainWindow):
         以前は 1 件目だけをダイアログに出していて、直しては F5 を押すことを
         不備の数だけ繰り返した。
         """
-        self.log(f"整合性チェック: 直すところが {len(problems)} 件あります")
+        self.log(tr("Consistency check: {n} things to fix", n=len(problems)))
         for p in problems:
             self.log("  " + p.replace("\n", "\n  "))
         numbered = "\n\n".join(f"{i}. {p}" for i, p in enumerate(problems, start=1))
         QMessageBox.warning(
             self,
-            "整合性チェック",
-            f"解く前に直すところが {len(problems)} 件あります。\n\n{numbered}",
+            tr("Consistency check"),
+            tr("Fix {n} things before solving.", n=len(problems)) + "\n\n" + numbered,
         )
 
     def start_solve(self) -> None:
@@ -1010,12 +1055,12 @@ class MainWindow(QMainWindow):
             return
         try:
             problems, _warnings = self.run_busy(
-                "整合性をチェックしています", self.session.problems
+                tr("Checking consistency"), self.session.problems
             )
             if problems:
                 self._show_problems(problems)
                 return
-            case, study = self.run_busy("解析条件を組み立てています", self.session.prepare_solve)
+            case, study = self.run_busy(tr("Assembling the analysis"), self.session.prepare_solve)
             case.validate()
         except Exception as exc:  # noqa: BLE001
             self.show_error(exc)
@@ -1024,7 +1069,7 @@ class MainWindow(QMainWindow):
         self.convergence.clear()
         self.convergence.set_tolerance(self.session.study.solver.tolerance)
         self.bottom.setCurrentWidget(self.convergence)
-        self.log("求解を開始しました")
+        self.log(tr("Started solving"))
         self.action_cancel.setEnabled(True)
 
         self.solver = SolverThread(case, study, self)
@@ -1038,39 +1083,43 @@ class MainWindow(QMainWindow):
     def cancel_solve(self) -> None:
         if self.solver is not None:
             self.solver.cancel()
-            self.log("中断を要求しました")
+            self.log(tr("Requested cancellation"))
 
     def _on_progress(self, iteration: int, residual: float) -> None:
-        self.statusBar().showMessage(f"反復 {iteration}　相対残差 {residual:.3e}")
+        self.statusBar().showMessage(
+            tr("Iteration {n}   relative residual {r:.3e}", n=iteration, r=residual)
+        )
         self.convergence.append(residual)
 
     def _on_solved(self, solution) -> None:
         # solve 自体はワーカースレッドだが、結果の取り込み（領域統計・表示用データの
         # 作り直し）はメインスレッドで、規模によっては数秒かかる
-        with self.busy("結果を取り込んでいます") as scope:
+        with self.busy(tr("Loading the results")) as scope:
             self._take_solution(scope, solution)
 
     def _take_solution(self, scope, solution) -> None:
         self.session.set_solution(solution, self.solver.study)
         self.convergence.set_history(solution.history)
         self.checks_view.setPlainText(self.session.result_summary())
-        scope.step("領域統計を集計しています")
+        scope.step(tr("Computing region statistics"))
         self.refresh_stats_table()
         self.bottom.setCurrentWidget(self.checks_view)
         self.log(
-            f"求解完了: {solution.iterations} 反復, "
-            f"相対残差 {solution.residual:.3e}, R = {solution.impedance:.4g} Ω"
+            tr(
+                "Solved: {n} iterations, relative residual {r:.3e}, R = {ohm:.4g} Ω",
+                n=solution.iterations, r=solution.residual, ohm=solution.impedance,
+            )
         )
         for w in solution.warnings:
-            self.log(f"  [警告] {w}")
+            self.log("  " + tr("[Warning] {text}", text=w))
         self.refresh_tree()
         self.page_result.reload()
         self.page_result.show_result_field()
         self.refresh_view()
 
     def _on_solve_failed(self, message: str) -> None:
-        self.log(f"求解失敗:\n{message}")
-        QMessageBox.warning(self, "求解", message)
+        self.log(tr("Solve failed:") + "\n" + message)
+        QMessageBox.warning(self, tr("Solve"), message)
 
     def _on_solve_cancelled(self) -> None:
         """利用者が中断した。**失敗ではない**ので警告のダイアログは出さない。
@@ -1078,11 +1127,11 @@ class MainWindow(QMainWindow):
         以前は失敗と同じ扱いで、「求解失敗」とログに残り、警告のダイアログも出ていた。
         """
         kept = (
-            "前の結果はそのまま残っています"
+            tr("the previous result is kept")
             if self.session.solution is not None
-            else "結果はありません"
+            else tr("there is no result")
         )
-        self.log(f"求解を中断しました（{kept}）")
+        self.log(tr("Solving was cancelled ({kept})", kept=kept))
 
     # --- 閉じる -------------------------------------------------------------
 
@@ -1104,8 +1153,8 @@ class MainWindow(QMainWindow):
         if self.solver is not None and self.solver.isRunning():
             answer = QMessageBox.question(
                 self,
-                "求解中",
-                "求解の途中です。計算を中断して終了しますか？",
+                tr("Solving"),
+                tr("A solve is running. Cancel it and exit?"),
                 buttons.Yes | buttons.No,
                 buttons.No,
             )
@@ -1114,8 +1163,8 @@ class MainWindow(QMainWindow):
         if self.session.is_modified():
             answer = QMessageBox.question(
                 self,
-                "保存していない変更",
-                "解析条件に保存していない変更があります。ケースファイルに保存しますか？",
+                tr("Unsaved changes"),
+                tr("The analysis settings have unsaved changes. Save them to a case file?"),
                 buttons.Save | buttons.Discard | buttons.Cancel,
                 buttons.Save,
             )
@@ -1123,7 +1172,7 @@ class MainWindow(QMainWindow):
                 return False
             if answer == buttons.Save:
                 path, _ = QFileDialog.getSaveFileName(
-                    self, "ケースを保存", "case.yaml", "ケースファイル (*.yaml)"
+                    self, tr("Save case"), "case.yaml", tr("Case files (*.yaml)")
                 )
                 if not path or not self.save_case(path):
                     return False
@@ -1134,14 +1183,14 @@ class MainWindow(QMainWindow):
         if self.solver is None or not self.solver.isRunning():
             return
         self.solver.cancel()
-        self.run_busy("計算を止めています", self.solver.wait)
+        self.run_busy(tr("Stopping the calculation"), self.solver.wait)
 
     # --- 表示 ---------------------------------------------------------------
 
     def refresh_all(self) -> None:
         # 全体をひとまとめに囲む。中の refresh_view も同じローディングを使うので、
         # 途中で消えて出直すような瞬きが起きない
-        with self.busy("表示を作成しています"):
+        with self.busy(tr("Building the view")):
             self.refresh_tree()
             # 以前はメッシュページを読み直しておらず、起動直後と読み込み直後は
             # 右のパネルが空のままだった（ツリーをクリックするまで何も出ない）
@@ -1213,17 +1262,21 @@ class MainWindow(QMainWindow):
         if study is None:
             return
 
-        mesh_item = QTreeWidgetItem([f"Mesh（単位: {study.length_unit}）"])
+        mesh_item = QTreeWidgetItem([tr("Mesh (unit: {unit})", unit=study.length_unit)])
         mesh_item.setData(0, ROLE_KIND, "mesh")
         self.tree.addTopLevelItem(mesh_item)
 
-        regions = QTreeWidgetItem(["領域 (PID)"])
+        regions = QTreeWidgetItem([tr("Regions (PID)")])
         regions.setData(0, ROLE_KIND, "regions")
         for m in study.materials:
             label = f"{m.pid}"
             if m.name:
                 label += f" {m.name}"
-            label += f"　σ = {m.sigma:g} S/m" if m.sigma > 0 else "　σ 未設定"
+            label = (
+                tr("{label}   σ = {sigma:g} S/m", label=label, sigma=m.sigma)
+                if m.sigma > 0
+                else tr("{label}   σ not set", label=label)
+            )
             child = QTreeWidgetItem([label])
             child.setData(0, ROLE_KIND, "region")
             child.setData(0, ROLE_KEY, m.pid)
@@ -1231,21 +1284,23 @@ class MainWindow(QMainWindow):
         self.tree.addTopLevelItem(regions)
         regions.setExpanded(True)
 
-        electrodes = QTreeWidgetItem(["電極"])
+        electrodes = QTreeWidgetItem([tr("Electrodes")])
         electrodes.setData(0, ROLE_KIND, "electrodes")
         for e in study.electrodes:
-            child = QTreeWidgetItem([f"{e.name}　{e.role}　{e.current * 1e3:g} mA"])
+            child = QTreeWidgetItem(
+                [tr("{name}   {role}   {ma:g} mA", name=e.name, role=e.role, ma=e.current * 1e3)]
+            )
             child.setData(0, ROLE_KIND, "electrode")
             child.setData(0, ROLE_KEY, e.name)
             electrodes.addChild(child)
         self.tree.addTopLevelItem(electrodes)
         electrodes.setExpanded(True)
 
-        solver_item = QTreeWidgetItem(["ソルバ設定"])
+        solver_item = QTreeWidgetItem([tr("Solver settings")])
         solver_item.setData(0, ROLE_KIND, "solver")
         self.tree.addTopLevelItem(solver_item)
 
-        result_item = QTreeWidgetItem(["結果"])
+        result_item = QTreeWidgetItem([tr("Results")])
         result_item.setData(0, ROLE_KIND, "result")
         self.tree.addTopLevelItem(result_item)
         self._result_item = result_item
@@ -1260,12 +1315,14 @@ class MainWindow(QMainWindow):
         changes = self.session.changes_since_solve()
         text = stale_result_message(changes)
         self.page_result.show_staleness(changes)
-        self.stale_status.setText("⚠ 結果は古い条件のものです（F5 で解き直し）" if changes else "")
+        self.stale_status.setText(
+            tr("⚠ Results are for old conditions (F5 to solve again)") if changes else ""
+        )
         self.stale_status.setToolTip(text)
         self.stale_status.setVisible(bool(changes))
         item = self._result_item
         if item is not None:
-            item.setText(0, "結果（条件が変わっています）" if changes else "結果")
+            item.setText(0, tr("Results (conditions have changed)") if changes else tr("Results"))
             item.setToolTip(0, text)
             item.setForeground(0, QBrush(QColor(STALE_COLOR)) if changes else QBrush())
 
@@ -1274,8 +1331,12 @@ class MainWindow(QMainWindow):
         changes = self.session.changes_since_solve()
         if changes:
             self.log(
-                "  [注意] 書き出したのは求解したときの条件の結果です。いまの条件とは違います"
-                f"（{'、'.join(changes)}）"
+                "  "
+                + tr(
+                    "[Note] The exported result is for the conditions at the time of solving, "
+                    "which differ from the current ones ({changes})",
+                    changes=tr(", ").join(changes),
+                )
             )
 
     def _on_tree_selection_changed(self) -> None:
@@ -1358,7 +1419,7 @@ class MainWindow(QMainWindow):
             # 取り込みや表示の設定の変更で描き直すたびに、選んでいる電極・領域の強調が
             # 消えていた（ツリーでは選ばれたまま）
             highlight_pid, highlight_electrode = self._selected_highlight()
-        with self.busy("メッシュを展開しています") as scope:
+        with self.busy(tr("Preparing the mesh")) as scope:
             self._draw_view(scope, highlight_pid, highlight_electrode)
 
     def _selected_highlight(self) -> tuple[list[int] | None, str | None]:
@@ -1504,7 +1565,7 @@ class MainWindow(QMainWindow):
         iso_text = ""
         if mode in ("slice", "clip"):
             # 切り口は Rust 側で作る。体積メッシュは組み立てない（SPEC §6.3）
-            scope.step("断面を切り出しています")
+            scope.step(tr("Cutting the section"))
             target = self.session.section(
                 mode, options["slice_normal"], options["slice_position"], scalars
             )
@@ -1512,7 +1573,7 @@ class MainWindow(QMainWindow):
             field = field_by_key(scalars)
             quantity = field.iso_quantity if field else None
             if quantity is None:
-                self.log("この量では等値面を作れません（領域 PID など）。全体表示に戻します")
+                self.log(tr("This quantity has no isosurface (e.g. region PID). Showing the whole body."))
             else:
                 lo, hi = self.session.value_range(quantity)
                 level = lo + (hi - lo) * options["iso_level"]
@@ -1521,7 +1582,7 @@ class MainWindow(QMainWindow):
                 # （`j_magnitude`）で貼っていたので色の範囲を引けず、範囲が等値面の値
                 # ＝しきい値 1 点に潰れて、カラーバーの目盛りが全部同じ数字になっていた
                 target = self.session.iso_surface(quantity, level, name=scalars)
-                iso_text = f"いまのしきい値: {level:.4g}（{field.label}）"
+                iso_text = tr("Current threshold: {level:.4g} ({field})", level=level, field=tr(field.label))
         self.page_result.show_iso_level(iso_text)
         if target.n_cells == 0:
             target = surface
@@ -1538,7 +1599,7 @@ class MainWindow(QMainWindow):
         regions = []
         buried = False
         if pids:
-            scope.step("選んだ領域を取り出しています")
+            scope.step(tr("Extracting the selected regions"))
         for pid in pids:
             region = self.session.region_polydata(pid)
             if region.n_cells == 0:
@@ -1552,18 +1613,18 @@ class MainWindow(QMainWindow):
         # 外表面が不透明だと 1 本も見えない）。断面は板なので透かさなくても見える
         lines = None
         if options["streamlines"] and self.session.solution is not None:
-            scope.step("流線を追跡しています")
+            scope.step(tr("Tracing streamlines"))
             try:
                 seeds = self.session.default_seed_points(options["n_seeds"])
                 lines = self.session.streamlines(seeds)
             except Exception as exc:  # noqa: BLE001
-                self.log(f"ストリームラインを引けませんでした: {exc}")
+                self.log(tr("Could not trace streamlines: {error}", error=exc))
         see_through = lines is not None and lines.n_cells > 0 and mode in ("volume", "clip")
         opacity = (
             BURIED_OPACITY if buried else STREAMLINE_SURFACE_OPACITY if see_through else 1.0
         )
 
-        scope.step("表示を作成しています")
+        scope.step(tr("Building the view"))
         edges = options["edges"]
         # **視点は利用者のものとして保つ。** pyvista の add_mesh は既定で視点を
         # 合わせ直すことがあるので、どれも reset_camera=False で足し、モデル全体に
@@ -1638,14 +1699,14 @@ class MainWindow(QMainWindow):
                     reset_camera=False,
                 )
         if highlight_electrode is not None:
-            scope.step("電極の面を取り出しています")
+            scope.step(tr("Extracting the electrode faces"))
             faces = self.session.electrode_polydata(highlight_electrode)
             if faces.n_cells:
                 draw_on_top(
                     self.plotter.add_mesh(faces, color="red", opacity=1.0, reset_camera=False)
                 )
 
-        scope.step("描画しています")
+        scope.step(tr("Rendering"))
         self.plotter.add_axes()
         self._make_room_for_scalar_bar()
         self._frame_new_mesh()

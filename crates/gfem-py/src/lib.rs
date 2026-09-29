@@ -109,7 +109,8 @@ fn view2<'py>(
     cols: usize,
 ) -> PyResult<Bound<'py, PyArray2<f64>>> {
     let view = ArrayView2::from_shape((data.len() / cols, cols), data).map_err(|e| {
-        to_py(gfem_core::GfemError::internal(format!(
+        to_py(gfem_core::GfemError::internal(gfem_core::tr!(
+            "Cannot split the array into {cols} columns ({} elements): {e}",
             "配列を {cols} 列に区切れません（{} 要素）: {e}",
             data.len()
         )))
@@ -540,7 +541,7 @@ impl PyMesh {
             spec.set_item("pid", p)?;
         }
         // 形と中心（ピックに失敗した NaN を含む）の検証は、電極面の解決と同じ関数で行う
-        let patch = parse_patch_at(spec.as_any(), "パッチ")?;
+        let patch = parse_patch_at(spec.as_any(), &gfem_core::tr!("Patch", "パッチ"))?;
         let picker = self.picker()?;
         let faces = patch.select(picker).map_err(to_py)?;
         let d = self.describe_faces(py, &faces)?;
@@ -569,7 +570,7 @@ impl PyMesh {
     /// `added` / `removed` は `(EID, 面番号)` の並び。**面番号は 1 始まり**。
     #[pyo3(signature = (
         shell_pids = None, element_ids = None, patches = None, added = None, removed = None,
-        name = "（名前なし）"
+        name = None
     ))]
     #[allow(clippy::too_many_arguments)] // Python 側の名前つき引数に合わせる
     fn resolve_electrode_faces(
@@ -580,10 +581,12 @@ impl PyMesh {
         patches: Option<Vec<Bound<'_, PyAny>>>,
         added: Option<Vec<(u32, u8)>>,
         removed: Option<Vec<(u32, u8)>>,
-        name: &str,
+        name: Option<&str>,
     ) -> PyResult<Py<PyDict>> {
+        // 名前はエラーの中で電極を指すためだけに使う（省略時の呼び名は表示言語で）
+        let unnamed = gfem_core::tr!("(unnamed)", "（名前なし）");
         let electrode = build_electrode(
-            name,
+            name.unwrap_or(&unnamed),
             ElectrodeRole::Anode,
             1.0,
             shell_pids,
@@ -685,7 +688,10 @@ impl PyMesh {
             .map(|b| b.kind().card_name())
             .collect();
         if !others.is_empty() {
-            return Err(GfemError::new_err(format!(
+            return Err(GfemError::new_err(gfem_core::tr!(
+                "[Unsupported] There are solid elements other than tetrahedra: {}\n\
+                 Fix: tetrahedra() returns CTETRA only. \
+                 For a model with mixed element types, use solid_cells()",
                 "[未対応] 四面体以外のソリッド要素があります: {}\n\
                  対処: tetrahedra() は CTETRA だけを返します。\
                  要素種が混ざったモデルは solid_cells() を使ってください",
@@ -788,9 +794,10 @@ impl PyCase {
         }
         let pid: u32 = pid_or_map.extract()?;
         let Some(s) = sigma else {
-            return Err(pyo3::exceptions::PyTypeError::new_err(
-                "set_conductivity(pid, sigma) の形で σ [S/m] を指定してください",
-            ));
+            return Err(pyo3::exceptions::PyTypeError::new_err(gfem_core::tr!(
+                "Specify σ [S/m] as set_conductivity(pid, sigma)",
+                "set_conductivity(pid, sigma) の形で σ [S/m] を指定してください"
+            )));
         };
         self.inner.set_conductivity(pid, s).map_err(to_py)
     }
@@ -1105,7 +1112,8 @@ impl PySolution {
             "j_magnitude" => &f.j_magnitude,
             "power_density" => &f.power_density,
             other => {
-                return Err(GfemError::new_err(format!(
+                return Err(GfemError::new_err(gfem_core::tr!(
+                    "Unknown quantity: \"{other}\" (phi / e_magnitude / j_magnitude / power_density)",
                     "未知の量です: \"{other}\"（phi / e_magnitude / j_magnitude / power_density）"
                 )));
             }
@@ -1218,7 +1226,8 @@ impl PySolution {
             "j_magnitude" => &f.j_magnitude,
             "power_density" => &f.power_density,
             other => {
-                return Err(GfemError::new_err(format!(
+                return Err(GfemError::new_err(gfem_core::tr!(
+                    "Unknown quantity: \"{other}\" (e_magnitude / j_magnitude / power_density)",
                     "未知の量です: \"{other}\"（e_magnitude / j_magnitude / power_density）"
                 )));
             }
@@ -1469,7 +1478,8 @@ impl PySolution {
                 "forward" => TraceDirection::Forward,
                 "backward" => TraceDirection::Backward,
                 other => {
-                    return Err(GfemError::new_err(format!(
+                    return Err(GfemError::new_err(gfem_core::tr!(
+                        "Unknown direction: \"{other}\" (forward / backward)",
                         "未知の向きです: \"{other}\"（forward / backward）"
                     )));
                 }
@@ -1527,7 +1537,8 @@ fn parse_role(role: &str) -> PyResult<ElectrodeRole> {
     match role.to_ascii_lowercase().as_str() {
         "anode" => Ok(ElectrodeRole::Anode),
         "cathode" => Ok(ElectrodeRole::Cathode),
-        other => Err(GfemError::new_err(format!(
+        other => Err(GfemError::new_err(gfem_core::tr!(
+            "Unknown electrode role: \"{other}\" (anode / cathode)",
             "未知の電極の役割です: \"{other}\"（anode / cathode）"
         ))),
     }
@@ -1553,12 +1564,14 @@ fn build_electrode(
     for (i, patch) in patches.unwrap_or_default().iter().enumerate() {
         parsed.push(parse_patch(patch, name, i + 1)?);
     }
-    let to_refs = |v: Option<Vec<(u32, u8)>>, what: &str| -> PyResult<Vec<FaceRef>> {
+    let to_refs = |v: Option<Vec<(u32, u8)>>, what: String| -> PyResult<Vec<FaceRef>> {
         v.unwrap_or_default()
             .into_iter()
             .map(|(eid, local)| {
                 if local == 0 {
-                    return Err(GfemError::new_err(format!(
+                    return Err(GfemError::new_err(gfem_core::tr!(
+                        "A face number in the {what} of electrode {name} is 0 (EID={eid}). \
+                         Face numbers start at 1",
                         "電極 {name} の{what}の面番号が 0 です（EID={eid}）。\
                          面番号は 1 始まりで指定してください"
                     )));
@@ -1574,8 +1587,14 @@ fn build_electrode(
         shell_pids: shell_pids.unwrap_or_default(),
         element_ids: element_ids.unwrap_or_default(),
         patches: parsed,
-        added_faces: to_refs(added, "手で足した面")?,
-        removed_faces: to_refs(removed, "手で外した面")?,
+        added_faces: to_refs(
+            added,
+            gfem_core::tr!("manually added faces", "手で足した面"),
+        )?,
+        removed_faces: to_refs(
+            removed,
+            gfem_core::tr!("manually removed faces", "手で外した面"),
+        )?,
     })
 }
 
@@ -1584,7 +1603,13 @@ fn build_electrode(
 /// エラーは「どの電極の何番目のパッチが」「何が足りないか」まで出す
 /// （CLAUDE.md 設計原則 6）。
 fn parse_patch(obj: &Bound<'_, PyAny>, electrode: &str, index: usize) -> PyResult<SurfacePatch> {
-    parse_patch_at(obj, &format!("電極 {electrode} のパッチ {index}"))
+    parse_patch_at(
+        obj,
+        &gfem_core::tr!(
+            "Patch {index} of electrode {electrode}",
+            "電極 {electrode} のパッチ {index}"
+        ),
+    )
 }
 
 /// パッチの辞書で使えるキー。
@@ -1606,13 +1631,14 @@ const PATCH_KEYS: [&str; 9] = [
 /// 角の半径が短い辺の半分まで、など）はコアの [`SurfacePatch::check`] が見る。
 /// ここは「キーがそろっているか」「型が合っているか」だけを見る。
 fn parse_patch_at(obj: &Bound<'_, PyAny>, where_: &str) -> PyResult<SurfacePatch> {
-    let err = |msg: String| GfemError::new_err(format!("{where_}{msg}"));
+    let err = |msg: String| GfemError::new_err(msg);
     if let Ok(d) = obj.cast::<PyDict>() {
         for key in d.keys() {
             let key: String = key.extract().unwrap_or_default();
             if !PATCH_KEYS.contains(&key.as_str()) {
-                return Err(err(format!(
-                    "に使えないキー {key:?} があります。使えるのは {} です",
+                return Err(err(gfem_core::tr!(
+                    "{where_}: unknown key {key:?}. Allowed keys are {}",
+                    "{where_}に使えないキー {key:?} があります。使えるのは {} です",
                     PATCH_KEYS.join(" / ")
                 )));
             }
@@ -1623,40 +1649,59 @@ fn parse_patch_at(obj: &Bound<'_, PyAny>, where_: &str) -> PyResult<SurfacePatch
     let real = |key: &str, what: &str| -> PyResult<Option<f64>> {
         get(key)
             .map(|v| {
-                v.extract::<f64>()
-                    .map_err(|_| err(format!("の {key} は実数で指定してください（{what}）")))
+                v.extract::<f64>().map_err(|_| {
+                    err(gfem_core::tr!(
+                        "{where_}: give {key} as a real number ({what})",
+                        "{where_}の {key} は実数で指定してください（{what}）"
+                    ))
+                })
             })
             .transpose()
     };
     let vec3 = |key: &str, what: &str| -> PyResult<Option<[f64; 3]>> {
         let Some(v) = get(key) else { return Ok(None) };
         let v: Vec<f64> = v.extract().map_err(|_| {
-            err(format!(
-                "の {key} は 3 個の実数 [x, y, z] で指定してください（{what}）"
+            err(gfem_core::tr!(
+                "{where_}: give {key} as 3 real numbers [x, y, z] ({what})",
+                "{where_}の {key} は 3 個の実数 [x, y, z] で指定してください（{what}）"
             ))
         })?;
         <[f64; 3]>::try_from(v.as_slice()).map(Some).map_err(|_| {
-            err(format!(
-                "の {key} の要素数が {} 個です（[x, y, z] の 3 個で指定してください）",
+            err(gfem_core::tr!(
+                "{where_}: {key} has {} elements (give 3 as [x, y, z])",
+                "{where_}の {key} の要素数が {} 個です（[x, y, z] の 3 個で指定してください）",
                 v.len()
             ))
         })
     };
 
-    let center = vec3("center", "単位は m")?.ok_or_else(|| {
-        err("に center がありません。             {\"center\": [x, y, z], \"radius\": r, \"pid\": 51} の形で指定してください（単位は m）"
-            .to_string())
+    let center = vec3("center", &gfem_core::tr!("in m", "単位は m"))?.ok_or_else(|| {
+        err(gfem_core::tr!(
+            "{where_}: center is missing. \
+             Give it as {{\"center\": [x, y, z], \"radius\": r, \"pid\": 51}} (in m)",
+            "{where_}に center がありません。\
+             {{\"center\": [x, y, z], \"radius\": r, \"pid\": 51}} の形で指定してください（単位は m）"
+        ))
     })?;
     let pid: Option<u32> = get("pid")
         .map(|v| {
-            v.extract()
-                .map_err(|_| err("の pid は整数で指定してください".to_string()))
+            v.extract().map_err(|_| {
+                err(gfem_core::tr!(
+                    "{where_}: give pid as an integer",
+                    "{where_}の pid は整数で指定してください"
+                ))
+            })
         })
         .transpose()?;
     let shape: String = match get("shape") {
         Some(v) => v
             .extract::<String>()
-            .map_err(|_| err("の shape は \"circle\" か \"rect\" で指定してください".to_string()))?
+            .map_err(|_| {
+                err(gfem_core::tr!(
+                    "{where_}: give shape as \"circle\" or \"rect\"",
+                    "{where_}の shape は \"circle\" か \"rect\" で指定してください"
+                ))
+            })?
             .trim()
             .to_ascii_lowercase(),
         None => "circle".to_string(),
@@ -1671,8 +1716,9 @@ fn parse_patch_at(obj: &Bound<'_, PyAny>, where_: &str) -> PyResult<SurfacePatch
             "angle",
         ] {
             if !allowed.contains(&key) && get(key).is_some() {
-                return Err(err(format!(
-                    "は {shape_name} なので {key} は使えません（使えるのは {}）",
+                return Err(err(gfem_core::tr!(
+                    "{where_} is {shape_name}, so {key} cannot be used (allowed: {})",
+                    "{where_}は {shape_name} なので {key} は使えません（使えるのは {}）",
                     allowed.join(" / ")
                 )));
             }
@@ -1681,37 +1727,58 @@ fn parse_patch_at(obj: &Bound<'_, PyAny>, where_: &str) -> PyResult<SurfacePatch
     };
     match shape.as_str() {
         "circle" => {
-            only(&["radius"], "円（shape: circle）")?;
-            let radius = real("radius", "単位は m")?
-                .ok_or_else(|| err("に radius がありません（単位は m）".to_string()))?;
+            only(
+                &["radius"],
+                &gfem_core::tr!("a circle (shape: circle)", "円（shape: circle）"),
+            )?;
+            let radius = real("radius", &gfem_core::tr!("in m", "単位は m"))?.ok_or_else(|| {
+                err(gfem_core::tr!(
+                    "{where_}: radius is missing (in m)",
+                    "{where_}に radius がありません（単位は m）"
+                ))
+            })?;
             Ok(SurfacePatch::circle(center, radius, pid))
         }
         "rect" => {
             only(
                 &["width", "height", "corner_radius", "axis", "angle"],
-                "矩形（shape: rect）",
+                &gfem_core::tr!("a rectangle (shape: rect)", "矩形（shape: rect）"),
             )?;
             let need = |key: &str, what: &str| -> PyResult<f64> {
                 real(key, what)?.ok_or_else(|| {
-                    err(format!(
-                        "に {key} がありません（矩形は width と height が必要です。{what}）"
+                    err(gfem_core::tr!(
+                        "{where_}: {key} is missing (a rectangle needs width and height; {what})",
+                        "{where_}に {key} がありません（矩形は width と height が必要です。{what}）"
                     ))
                 })
             };
             let rect = RectShape {
-                width: need("width", "単位は m。20 mm なら 0.02")?,
-                height: need("height", "単位は m")?,
-                corner_radius: real("corner_radius", "単位は m")?.unwrap_or(0.0),
-                axis: vec3("axis", "幅の辺の向き")?.ok_or_else(|| {
-                    err("に axis がありません。矩形は幅の辺の向きを [x, y, z] で指定してください                         （例: [1, 0, 0]。体表面に沿う向きに投影して使います）"
-                        .to_string())
+                width: need(
+                    "width",
+                    &gfem_core::tr!("in m; 20 mm is 0.02", "単位は m。20 mm なら 0.02"),
+                )?,
+                height: need("height", &gfem_core::tr!("in m", "単位は m"))?,
+                corner_radius: real("corner_radius", &gfem_core::tr!("in m", "単位は m"))?
+                    .unwrap_or(0.0),
+                axis: vec3(
+                    "axis",
+                    &gfem_core::tr!("direction of the width edge", "幅の辺の向き"),
+                )?
+                .ok_or_else(|| {
+                    err(gfem_core::tr!(
+                        "{where_}: axis is missing. For a rectangle, give the direction of the width \
+                         edge as [x, y, z] (e.g. [1, 0, 0]; it is projected onto the body surface)",
+                        "{where_}に axis がありません。矩形は幅の辺の向きを [x, y, z] で指定してください\
+                         （例: [1, 0, 0]。体表面に沿う向きに投影して使います）"
+                    ))
                 })?,
-                angle: real("angle", "単位は度")?.unwrap_or(0.0),
+                angle: real("angle", &gfem_core::tr!("in degrees", "単位は度"))?.unwrap_or(0.0),
             };
             Ok(SurfacePatch::rect(center, rect, pid))
         }
-        other => Err(err(format!(
-            "の shape が {other:?} です。\"circle\"（円）か \"rect\"（矩形）で指定してください"
+        other => Err(err(gfem_core::tr!(
+            "{where_}: shape is {other:?}. Give \"circle\" or \"rect\"",
+            "{where_}の shape が {other:?} です。\"circle\"（円）か \"rect\"（矩形）で指定してください"
         ))),
     }
 }
@@ -1741,16 +1808,19 @@ fn describe_patch(d: &Bound<'_, PyDict>, patch: &SurfacePatch) -> PyResult<()> {
 fn parse_reference(reference: &str) -> PyResult<ReferencePotential> {
     let r = reference.trim();
     if let Some(rest) = r.strip_prefix("node:") {
-        let id: u32 = rest
-            .trim()
-            .parse()
-            .map_err(|_| GfemError::new_err(format!("節点 ID として解釈できません: \"{rest}\"")))?;
+        let id: u32 = rest.trim().parse().map_err(|_| {
+            GfemError::new_err(gfem_core::tr!(
+                "Cannot interpret as a node ID: \"{rest}\"",
+                "節点 ID として解釈できません: \"{rest}\""
+            ))
+        })?;
         return Ok(ReferencePotential::Node(id));
     }
     match r.to_ascii_lowercase().as_str() {
         "zero_mean" => Ok(ReferencePotential::ZeroMean),
         "cathode_mean" => Ok(ReferencePotential::CathodeMean),
-        other => Err(GfemError::new_err(format!(
+        other => Err(GfemError::new_err(gfem_core::tr!(
+            "Unknown reference potential: \"{other}\" (zero_mean / cathode_mean / node:<ID>)",
             "未知の基準電位です: \"{other}\"（zero_mean / cathode_mean / node:<ID>）"
         ))),
     }
@@ -1797,13 +1867,15 @@ fn read_nastran(py: Python<'_>, path: PathBuf, length_unit: Option<&str>) -> PyR
         return Err(to_py(
             gfem_core::GfemError::new(
                 gfem_core::ErrorKind::Case,
-                "長さ単位が指定されていません",
+                gfem_core::tr!("No length unit was given", "長さ単位が指定されていません"),
             )
             .with_file(&path)
-            .with_hint(
+            .with_hint(gfem_core::tr!(
+                "Give mm / cm / m / inch, as in read_nastran(path, length_unit=\"mm\"). Nastran \
+                 files carry no unit information, so there is no default (SPEC §3.2)",
                 "read_nastran(path, length_unit=\"mm\") のように mm / cm / m / inch を指定して\
-                 ください。Nastran ファイルには単位情報が無いので、既定値は置いていません（SPEC §3.2）",
-            ),
+                 ください。Nastran ファイルには単位情報が無いので、既定値は置いていません（SPEC §3.2）"
+            )),
         ));
     };
     let unit: LengthUnit = LengthUnit::parse(length_unit).map_err(to_py)?;
@@ -1825,6 +1897,31 @@ fn length_units() -> Vec<&'static str> {
 #[pyfunction]
 fn metres_per_unit(unit: &str) -> PyResult<f64> {
     Ok(LengthUnit::parse(unit).map_err(to_py)?.to_meters())
+}
+
+/// 表示言語を決める（`"en"` / `"ja"`。SPEC §6.6）。エラー・警告・レポートの文言が変わる。
+#[pyfunction]
+fn set_language(code: &str) -> PyResult<()> {
+    let lang = gfem_core::Language::parse(code).ok_or_else(|| {
+        to_py(
+            gfem_core::GfemError::new(
+                gfem_core::ErrorKind::Case,
+                gfem_core::tr!("Unknown language: {code}", "知らない言語です: {code}"),
+            )
+            .with_hint(gfem_core::tr!(
+                "Use \"en\" or \"ja\"",
+                "\"en\" か \"ja\" を指定してください"
+            )),
+        )
+    })?;
+    gfem_core::set_language(lang);
+    Ok(())
+}
+
+/// いまの表示言語（`"en"` / `"ja"`）。
+#[pyfunction]
+fn language() -> &'static str {
+    gfem_core::language().code()
 }
 
 /// 指定できる計算バックエンド（既定が先頭）。別名（`"gpu"` など）も解釈はできる。
@@ -1860,7 +1957,7 @@ fn parse_preconditioner(name: &str) -> PyResult<&'static str> {
 /// 向きの軸が面の法線と平行かどうかはメッシュが無いと分からないので、solve 時に見る。
 #[pyfunction]
 fn check_patch(py: Python<'_>, patch: Bound<'_, PyAny>) -> PyResult<Py<PyDict>> {
-    let parsed = parse_patch_at(&patch, "パッチ")?;
+    let parsed = parse_patch_at(&patch, &gfem_core::tr!("Patch", "パッチ"))?;
     parsed.check().map_err(to_py)?;
     let d = PyDict::new(py);
     describe_patch(&d, &parsed)?;
@@ -1920,6 +2017,8 @@ fn _gfem(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(read_nastran, m)?)?;
     m.add_function(wrap_pyfunction!(length_units, m)?)?;
     m.add_function(wrap_pyfunction!(metres_per_unit, m)?)?;
+    m.add_function(wrap_pyfunction!(set_language, m)?)?;
+    m.add_function(wrap_pyfunction!(language, m)?)?;
     m.add_function(wrap_pyfunction!(backend_choices, m)?)?;
     m.add_function(wrap_pyfunction!(preconditioner_choices, m)?)?;
     m.add_function(wrap_pyfunction!(parse_backend, m)?)?;

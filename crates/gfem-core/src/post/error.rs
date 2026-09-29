@@ -141,7 +141,8 @@ where
 {
     let n_elements = mesh.n_solid_elements();
     if field.len() != 3 * n_elements {
-        return Err(GfemError::internal(format!(
+        return Err(GfemError::internal(crate::tr!(
+            "Wrong length of the element values: {} given, but 3 × {n_elements} expected",
             "要素値の長さが合いません: {} 個ですが 3 × {n_elements} であるべきです",
             field.len()
         )));
@@ -200,14 +201,17 @@ pub fn mean_element_size(mesh: &Mesh) -> Result<f64> {
 /// 理論値は φ が 2、E が 1（SPEC §8 M2）。
 pub fn convergence_order(sizes: &[f64], errors: &[f64]) -> Result<f64> {
     if sizes.len() != errors.len() || sizes.len() < 2 {
-        return Err(GfemError::internal(
-            "収束次数の推定には長さの等しい 2 点以上のデータが必要です",
-        ));
+        return Err(GfemError::internal(crate::tr!(
+            "Estimating the convergence order needs at least 2 data points of equal length",
+            "収束次数の推定には長さの等しい 2 点以上のデータが必要です"
+        )));
     }
     if sizes.iter().chain(errors).any(|v| *v <= 0.0 || v.is_nan()) {
-        return Err(GfemError::internal(
-            "収束次数の推定には正の要素寸法と誤差が必要です（誤差が 0 だと対数が取れません）",
-        ));
+        return Err(GfemError::internal(crate::tr!(
+            "Estimating the convergence order needs positive element sizes and errors \
+             (the logarithm of a zero error is undefined)",
+            "収束次数の推定には正の要素寸法と誤差が必要です（誤差が 0 だと対数が取れません）"
+        )));
     }
     let xs: Vec<f64> = sizes.iter().map(|h| h.ln()).collect();
     let ys: Vec<f64> = errors.iter().map(|e| e.ln()).collect();
@@ -222,9 +226,10 @@ pub fn convergence_order(sizes: &[f64], errors: &[f64]) -> Result<f64> {
     let var: Vec<f64> = xs.iter().map(|x| (x - mean_x) * (x - mean_x)).collect();
     let denominator = reduce::sum(&var);
     if denominator <= 0.0 {
-        return Err(GfemError::internal(
-            "要素寸法が全て同じなので収束次数を推定できません",
-        ));
+        return Err(GfemError::internal(crate::tr!(
+            "All element sizes are equal, so the convergence order cannot be estimated",
+            "要素寸法が全て同じなので収束次数を推定できません"
+        )));
     }
     Ok(reduce::sum(&cov) / denominator)
 }

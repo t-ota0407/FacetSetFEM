@@ -53,13 +53,14 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from ._gfem import GfemError, Mesh
+from .i18n import error_text, tr
 from .study import Study
 
 __all__ = ["SweepTable", "sweep"]
 
 
 def _error(what: str, where_: str, hint: str) -> GfemError:
-    return GfemError(f"[設定エラー] {what}\n  場所: {where_}\n  対処: {hint}")
+    return GfemError(error_text(what, where_, hint))
 
 
 @dataclass
@@ -118,18 +119,18 @@ def sweep(
     """
     if not parameters:
         raise _error(
-            "振るパラメータが 1 つも指定されていません",
+            tr("No parameters to vary were given"),
             "sweep()",
-            'たとえば {"sigma.3": [0.30, 0.35]} のように渡してください',
+            tr('Pass something like {example}', example='{"sigma.3": [0.30, 0.35]}'),
         )
     names = list(parameters)
     values = [list(parameters[n]) for n in names]
     for name, vs in zip(names, values):
         if not vs:
             raise _error(
-                f"パラメータ {name} の値が空です",
+                tr("Parameter {name} has no values", name=name),
                 "sweep()",
-                "少なくとも 1 つの値を並べてください",
+                tr("List at least one value"),
             )
     if product:
         combinations = list(itertools.product(*values))
@@ -137,10 +138,14 @@ def sweep(
         lengths = {len(v) for v in values}
         if len(lengths) != 1:
             raise _error(
-                "product=False では全てのパラメータの値の個数が同じでなければなりません: "
-                + ", ".join(f"{n} は {len(v)} 個" for n, v in zip(names, values)),
+                tr(
+                    "With product=False every parameter must have the same number of values: {counts}",
+                    counts=", ".join(
+                        tr("{name} has {n}", name=n, n=len(v)) for n, v in zip(names, values)
+                    ),
+                ),
                 "sweep()",
-                "個数を揃えるか、product=True（既定）で直積にしてください",
+                tr("Make the counts equal, or use product=True (default) for the Cartesian product"),
             )
         combinations = list(zip(*values))
 
@@ -160,9 +165,9 @@ def sweep(
         except GfemError as exc:
             if not keep_going:
                 raise _error(
-                    f"ケース {index + 1}/{total} が解けませんでした: {exc}",
+                    tr("Case {i}/{total} could not be solved: {error}", i=index + 1, total=total, error=exc),
                     ", ".join(f"{k}={v}" for k, v in assignment.items()),
-                    "keep_going=True にすると、残りのケースを続けて回せます",
+                    tr("With keep_going=True the remaining cases keep running"),
                 ) from exc
             table.failures.append((assignment, str(exc)))
             if progress is not None:
@@ -207,14 +212,14 @@ def _summarise(solution: Any) -> dict[str, Any]:
 def _apply(study: Study, name: str, value: Any) -> None:
     """`name` が指すところに `value` を入れる。"""
     parts = name.split(".")
-    where = f"パラメータ {name}"
+    where = tr("parameter {name}", name=name)
 
     if parts[0] == "sigma":
         if len(parts) != 2:
             raise _error(
-                f"導電率の指定は sigma.<PID> か sigma.<領域名> です: {name}",
+                tr("A conductivity is given as sigma.<PID> or sigma.<region name>: {name}", name=name),
                 where,
-                "たとえば sigma.3 や sigma.muscle",
+                tr("For example sigma.3 or sigma.muscle"),
             )
         _set_sigma(study, parts[1], float(value), where)
         return
@@ -227,9 +232,9 @@ def _apply(study: Study, name: str, value: Any) -> None:
     if parts[0] == "electrode":
         if len(parts) != 3:
             raise _error(
-                f"電極の指定は electrode.<名前>.<項目> です: {name}",
+                tr("An electrode is given as electrode.<name>.<item>: {name}", name=name),
                 where,
-                "たとえば electrode.E1.current",
+                tr("For example electrode.E1.current"),
             )
         _set_electrode(study, parts[1], parts[2], value, where)
         return
@@ -238,19 +243,18 @@ def _apply(study: Study, name: str, value: Any) -> None:
         if len(parts) != 2 or not hasattr(study.solver, parts[1]):
             known = ", ".join(sorted(vars(study.solver)))
             raise _error(
-                f"ソルバの項目が見つかりません: {name}",
+                tr("No such solver item: {name}", name=name),
                 where,
-                f"使えるのは {known} です",
+                tr("Available: {known}", known=known),
             )
         current = getattr(study.solver, parts[1])
         setattr(study.solver, parts[1], type(current)(value))
         return
 
     raise _error(
-        f"振り方が分からないパラメータです: {name}",
+        tr("Don't know how to vary the parameter: {name}", name=name),
         where,
-        "current / sigma.<PID> / electrode.<名前>.<項目> / solver.<項目> "
-        "のいずれかで指定してください",
+        tr("Use one of current / sigma.<PID> / electrode.<name>.<item> / solver.<item>"),
     )
 
 
@@ -262,12 +266,12 @@ def _set_sigma(study: Study, key: str, value: float, where: str) -> None:
     ]
     if not matched:
         known = ", ".join(
-            f"{m.pid}" + (f"（{m.name}）" if m.name else "") for m in study.materials
+            f"{m.pid}" + (tr(" ({name})", name=m.name) if m.name else "") for m in study.materials
         )
         raise _error(
-            f"領域が見つかりません: {key}",
+            tr("No such region: {key}", key=key),
             where,
-            f"このケースにある領域は {known} です",
+            tr("The regions in this case are {known}", known=known),
         )
     for m in matched:
         m.sigma = value
@@ -282,9 +286,9 @@ def _set_electrode(study: Study, name: str, field_: str, value: Any, where: str)
     if not matched:
         known = ", ".join(e.name for e in study.electrodes)
         raise _error(
-            f"電極が見つかりません: {name}",
+            tr("No such electrode: {name}", name=name),
             where,
-            f"このケースにある電極は {known} です",
+            tr("The electrodes in this case are {known}", known=known),
         )
     for e in matched:
         if field_ == "current":
@@ -297,9 +301,9 @@ def _set_electrode(study: Study, name: str, field_: str, value: Any, where: str)
             e.role = str(value)
         else:
             raise _error(
-                f"電極の項目が見つかりません: {field_}",
+                tr("No such electrode item: {item}", item=field_),
                 where,
-                "current / shell_pids / element_ids / role のいずれかです",
+                tr("Use one of current / shell_pids / element_ids / role"),
             )
 
 
