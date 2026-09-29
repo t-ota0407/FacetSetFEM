@@ -27,6 +27,13 @@ __all__ = ["DisplayField", "DISPLAY_FIELDS", "SHAPE_FIELD", "Session"]
 #: 色分けせず形だけを見せる表示（既定）
 SHAPE_FIELD = "shape"
 
+#: 領域・電極ごとの見せ方（SPEC §6.3「パーツごとの表示」）。既定は VISIBLE
+VISIBLE, TRANSPARENT, HIDDEN = "visible", "transparent", "hidden"
+PART_STATES = (VISIBLE, TRANSPARENT, HIDDEN)
+
+#: VTK の要素種の番号 → 節点数（`Mesh.solid_cells` を読むため）
+_VTK_CELL_SIZES = {10: 4, 12: 8, 13: 6}
+
 
 @dataclass(frozen=True)
 class DisplayField:
@@ -233,6 +240,13 @@ class Session:
         self._region_boundaries: dict[int, pv.PolyData] = {}
         #: 電極の縁（`electrode_outline`）。電極名 → (電極の指定の repr, 折れ線)
         self._outlines: dict[str, tuple[str, pv.PolyData]] = {}
+        #: 領域・電極ごとの見せ方（見方の好みなので解析条件には入れない。Undo の対象でもない）
+        self._region_view: dict[int, str] = {}
+        self._electrode_view: dict[str, str] = {}
+        #: 全領域の境界面（`region_boundaries_polydata`）。メッシュを開き直すまで使い回す
+        self._boundaries: pv.PolyData | None = None
+        #: 領域の組 → その要素が使う節点（色の範囲を表示中の領域に合わせるとき）
+        self._region_nodes: dict[tuple[int, ...], np.ndarray] = {}
         # Undo / Redo（SPEC §8 M7）。
         # 解析条件は Study 1 つに閉じていて、メッシュも結果も含まないので、
         # 操作ごとに丸ごと複製して積むだけで済む。差分を持つ設計は
@@ -421,6 +435,8 @@ class Session:
             return spec
         self._require_free_name(new)
         spec.name = new
+        if old in self._electrode_view:  # 見せ方は名前で持っているので付け替える
+            self._electrode_view[new] = self._electrode_view.pop(old)
         return spec
 
     def _require_free_name(self, name: str) -> None:
@@ -535,6 +551,7 @@ class Session:
         self._arrays = {}
         self._grid = None  # 表示用データに結果を貼り直す
         self._surface = None
+        self._boundaries = None
 
     def changes_since_solve(self) -> list[str]:
         """結果を出したときから変わった解析条件（人が読める短い言葉で）。空なら結果は最新。
@@ -582,6 +599,11 @@ class Session:
         self._surface = None
         self._region_boundaries = {}
         self._outlines = {}
+        # 見せ方は開いたモデルの領域・電極のものなので、開き直したら捨てる
+        self._region_view = {}
+        self._electrode_view = {}
+        self._boundaries = None
+        self._region_nodes = {}
 
     # --- 表示用データ -------------------------------------------------------
 
@@ -1068,17 +1090,130 @@ class Session:
             auto_orient_normals=False,
         )
 
-    def field_range(self, field: str | None) -> tuple[float, float] | None:
-        """表示量の値域（**モデル全体**）。
+    def field_range(self, field: str | None, pids=None) -> tuple[float, float] | None:
+        """表示量の値域（既定は**モデル全体**）。
 
         外表面だけ、あるいは断面だけで色を決めると、**同じ色が場所によって
         違う値を指す**ことになる。全体の値域に固定すれば、全体表示と断面と
         等値面で色の意味が揃う。
+
+        `pids` を渡すと、その領域の要素（節点値ならその要素の節点）だけの値域にする。
+        皮膚の |J| が大きいと脳の中が全部暗い色になるので、脳だけを見るときに使う
+        （結果ページの「色の範囲を表示中の領域に合わせる」）。
         """
         values = self.result_array(field)
         if values is None:
             return None
+        if pids is not None:
+            spec = field_by_key(field)
+            if spec is not None and spec.is_element_value:
+                values = values[np.isin(self._require_mesh().solid_pid_array(), list(pids))]
+            else:
+                values = values[self._nodes_of_regions(pids)]
+            if values.size == 0:
+                return None
         return (float(np.min(values)), float(np.max(values)))
+
+    def _nodes_of_regions(self, pids) -> np.ndarray:
+        """指定した領域の要素が使う節点（節点索引の昇順）。組ごとに 1 度だけ作る。"""
+        key = tuple(sorted(int(p) for p in pids))
+        if key not in self._region_nodes:
+            mesh = self._require_mesh()
+            cells, types = mesh.solid_cells()
+            sizes = np.vectorize(_VTK_CELL_SIZES.__getitem__, otypes=[np.int64])(types)
+            starts = np.cumsum(sizes + 1) - sizes  # 各要素の最初の節点の位置
+            chosen = np.isin(mesh.solid_pid_array(), key)
+            n = sizes[chosen]
+            first = np.repeat(starts[chosen], n)
+            step = np.arange(n.sum()) - np.repeat(np.cumsum(n) - n, n)
+            self._region_nodes[key] = np.unique(cells[first + step])
+        return self._region_nodes[key]
+
+    # --- 領域・電極ごとの表示（SPEC §6.3「パーツごとの表示」）-----------------
+
+    def region_view(self, pid: int) -> str:
+        """領域の見せ方（`VISIBLE` / `TRANSPARENT` / `HIDDEN`）。"""
+        return self._region_view.get(int(pid), VISIBLE)
+
+    def set_region_view(self, pids, state: str) -> None:
+        """領域の見せ方を決める（複数まとめて）。"""
+        if state not in PART_STATES:
+            raise ValueError(state)
+        for pid in pids:
+            if state == VISIBLE:
+                self._region_view.pop(int(pid), None)
+            else:
+                self._region_view[int(pid)] = state
+
+    def electrode_view(self, name: str) -> str:
+        """電極の見せ方（`VISIBLE` / `TRANSPARENT` / `HIDDEN`）。"""
+        return self._electrode_view.get(name, VISIBLE)
+
+    def set_electrode_view(self, names, state: str) -> None:
+        """電極の見せ方を決める（複数まとめて）。"""
+        if state not in PART_STATES:
+            raise ValueError(state)
+        for name in names:
+            if state == VISIBLE:
+                self._electrode_view.pop(name, None)
+            else:
+                self._electrode_view[name] = state
+
+    def regions_customised(self) -> bool:
+        """どれかの領域を半透明・非表示にしているか（していなければ外表面だけを描けばよい）。"""
+        return bool(self._region_view)
+
+    def shown_region_pids(self) -> list[int]:
+        """非表示にしていない領域（色の範囲を表示中の領域に合わせるときに使う）。"""
+        return [p for p in self._require_mesh().solid_pids() if self.region_view(p) != HIDDEN]
+
+    def region_boundaries_polydata(self) -> pv.PolyData:
+        """全領域の境界面（外表面と、領域どうしの境目を両側とも）。
+
+        Rust 側で 1 回の並べ替えで取り出す（`Mesh.region_boundaries`）。領域ごとに
+        取り出すと、頭部モデルの 62 領域で 5 秒ほどかかる。形だけなので使い回す。
+        """
+        if self._boundaries is not None:
+            return self._boundaries
+        mesh = self._require_mesh()
+        triangles, owners = mesh.region_boundaries()
+        poly = self._polydata(mesh.points(), triangles, {"PID": mesh.solid_pid_array()[owners]})
+        if poly.n_cells:
+            # 陰影のために法線を付ける。三角形はそれぞれの領域の外向きに並んでいる
+            poly = poly.compute_normals(
+                cell_normals=True,
+                point_normals=True,
+                split_vertices=False,
+                consistent_normals=False,
+                auto_orient_normals=False,
+            )
+        poly.cell_data["__owner"] = owners
+        self._boundaries = poly
+        return poly
+
+    def part_surfaces(self, field: str | None) -> dict[str, pv.PolyData]:
+        """表示・半透明にした領域の境界面（表示量を貼ったもの）。`{VISIBLE: …, TRANSPARENT: …}`。
+
+        非表示の領域の面は入らない。面はそれぞれの領域の要素の値で塗る（境目では両側の
+        面が重なるが、表示している側の値が見える）。
+        """
+        poly = self.region_boundaries_polydata()
+        values = self.result_array(field) if field_by_key(field) else None
+        if values is not None and field not in poly.array_names:
+            if field_by_key(field).is_element_value:
+                poly.cell_data[field] = values[poly.cell_data["__owner"]]
+            else:
+                poly.point_data[field] = values
+        out: dict[str, pv.PolyData] = {}
+        if not poly.n_cells:
+            return out
+        pids = poly.cell_data["PID"]
+        for state in (VISIBLE, TRANSPARENT):
+            wanted = [p for p in np.unique(pids) if self.region_view(p) == state]
+            cells = np.flatnonzero(np.isin(pids, wanted))
+            if len(cells):
+                out[state] = poly.extract_cells(cells)
+        return out
 
     def region_polydata(self, pid: int) -> pv.PolyData:
         """指定した領域が体表面に出している面（ハイライト表示用）。

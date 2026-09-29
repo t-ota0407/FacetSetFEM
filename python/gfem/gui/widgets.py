@@ -7,11 +7,17 @@ from __future__ import annotations
 
 import math
 
-from PySide6.QtCore import QPointF, Qt
-from PySide6.QtGui import QColor, QFontMetrics, QPainter, QPen
-from PySide6.QtWidgets import QSizePolicy, QWidget
+from PySide6.QtCore import QPointF, QRectF, Qt, Signal
+from PySide6.QtGui import QColor, QFontMetrics, QIcon, QPainter, QPen, QPixmap
+from PySide6.QtWidgets import QSizePolicy, QTreeWidget, QWidget
 
-__all__ = ["ConvergencePlot", "MixedValueSpinBox", "UnitSelector"]
+__all__ = [
+    "ConvergencePlot",
+    "MixedValueSpinBox",
+    "PartTree",
+    "UnitSelector",
+    "part_view_icon",
+]
 
 from PySide6.QtWidgets import (
     QComboBox,
@@ -263,3 +269,61 @@ class UnitSelector(QDialog):
         # ファイル中の生の寸法を、選んだ単位で読んだときの m に直して見せる
         scale = metres_per_unit(unit)
         self.preview.setText(describe_extent([v * scale for v in self._raw], unit))
+
+
+class PartTree(QTreeWidget):
+    """モデルツリー。2 列目に領域・電極の見せ方（表示 / 半透明 / 非表示）の目のアイコンを出す。
+
+    **目の列をクリックしても選択を変えない。** 見せ方を変えるたびに、右のページが
+    その項目に切り替わったり、複数選択が外れたりすると使いにくい。押したら
+    `viewClicked(item)` を出すだけにする（見せ方の切り替えはメインウィンドウが行う）。
+    """
+
+    #: 目の列（列番号）
+    VIEW_COLUMN = 1
+
+    viewClicked = Signal(object)
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802 - Qt の規約
+        index = self.indexAt(event.position().toPoint())
+        item = self.itemFromIndex(index) if index.isValid() else None
+        if (
+            item is not None
+            and index.column() == self.VIEW_COLUMN
+            and event.button() == Qt.MouseButton.LeftButton
+            and not item.icon(self.VIEW_COLUMN).isNull()
+        ):
+            self.viewClicked.emit(item)
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+
+_VIEW_ICONS: dict[str, QIcon] = {}
+
+
+def part_view_icon(state: str) -> QIcon:
+    """見せ方のアイコン（目）。表示は濃く、半透明は薄く、非表示は斜線入り。"""
+    if state in _VIEW_ICONS:
+        return _VIEW_ICONS[state]
+    size = 32
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    colour = {
+        "visible": QColor(40, 44, 52),
+        "transparent": QColor(40, 44, 52, 110),
+        "hidden": QColor(150, 150, 150),
+    }[state]
+    painter.setPen(QPen(colour, 2.6))
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    painter.drawEllipse(QRectF(3, 9, 26, 14))
+    if state != "hidden":
+        painter.setBrush(colour)
+        painter.drawEllipse(QPointF(16, 16), 4.5, 4.5)
+    else:
+        painter.drawLine(QPointF(6, 27), QPointF(26, 5))
+    painter.end()
+    _VIEW_ICONS[state] = QIcon(pixmap)
+    return _VIEW_ICONS[state]

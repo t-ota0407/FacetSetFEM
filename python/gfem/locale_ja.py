@@ -487,4 +487,19 @@ JA: dict[str, str] = {
     '{detail}   {suffix}': '{detail}\u3000{suffix}',
     # --- gui/state.py
     '(all regions)': '（全領域）',
+    # --- gui/main_window.py
+    'Shown (click: transparent)': '表示（クリックで半透明）',
+    'Transparent (click: hidden)': '半透明（クリックで非表示）',
+    'Hidden (click: shown)': '非表示（クリックで表示）',
+    'Show': '表示',
+    'Transparent': '半透明',
+    'Hide': '非表示',
+    'Show only these': 'これらだけ表示',
+    'Show only this': 'これだけ表示',
+    'Show all regions': 'すべての領域を表示',
+    'Show all electrodes': 'すべての電極を表示',
+    # --- gui/pages.py
+    'Fit the colour range to the shown regions': '色の範囲を表示中の領域に合わせる',
+    'Normally the colour range covers the whole model, so the same colour means the\nsame value everywhere. Turn this on to use only the regions that are not hidden\n(e.g. to look inside the brain when the skin has much larger values).': 'ふだんは色の範囲をモデル全体で決めるので、同じ色はどこでも同じ値を指します。\n入れると、非表示にしていない領域だけで決めます\n（皮膚の値がずっと大きいときに、脳の中を見分けたい場合など）。',
+    'Available when some regions are transparent or hidden (eye icons in the tree).': '領域を半透明・非表示にしたときに使えます（ツリーの目のアイコン）。',
 }

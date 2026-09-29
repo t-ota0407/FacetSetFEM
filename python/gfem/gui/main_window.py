@@ -23,8 +23,10 @@ from PySide6.QtGui import QAction, QBrush, QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QFileDialog,
+    QHeaderView,
     QLabel,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPlainTextEdit,
     QSplitter,
@@ -47,14 +49,17 @@ from .busy import BusyOverlay, busy_scope, run_in_thread
 from .pages import ElectrodePage, MeshPage, RegionPage, ResultPage, SolverPage
 from .solver_thread import SolverThread
 from .state import (
+    HIDDEN,
     SHAPE_FIELD,
+    TRANSPARENT,
+    VISIBLE,
     REGION_STATS_COLUMNS,
     STALE_COLOR,
     Session,
     field_by_key,
     stale_result_message,
 )
-from .widgets import ConvergencePlot, UnitSelector
+from .widgets import ConvergencePlot, PartTree, UnitSelector, part_view_icon
 
 __all__ = ["MainWindow"]
 
@@ -126,6 +131,10 @@ BACKGROUND_TOP = "#fdfdfe"
 #: 実測（RTX A6000 / 20 コア）で、35.9 万節点だと領域を選び直すだけで 0.98 秒、
 #: 1.5 万節点なら 0.05 秒。10 万節点あたりが「待たされたと感じる」境目にあたる。
 BIG_MODEL_NODES = 100_000
+
+#: 半透明にした領域・電極の不透明度（ツリーの見せ方の列。SPEC §6.3「パーツごとの表示」）
+PART_TRANSPARENT_OPACITY = 0.3
+PART_TRANSPARENT_LINE_OPACITY = 0.35
 
 #: 断面スライスを出している間、体の外形をこの不透明度で薄く重ねる。板だけだと、
 #: どこを切った断面なのか分からなかった
@@ -262,9 +271,18 @@ class MainWindow(QMainWindow):
     def _build_ui(self) -> None:
         from pyvistaqt import QtInteractor
 
-        self.tree = QTreeWidget()
-        self.tree.setHeaderLabels([tr("Model")])
-        self.tree.setMinimumWidth(240)
+        self.tree = PartTree()
+        # 2 列目は領域・電極の見せ方（表示 / 半透明 / 非表示）。目のアイコンを押すと切り替わる
+        self.tree.setColumnCount(2)
+        self.tree.setHeaderLabels([tr("Model"), ""])
+        header = self.tree.header()
+        header.setStretchLastSection(False)
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self.tree.viewClicked.connect(self._cycle_part_view)
+        self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.tree.customContextMenuRequested.connect(self._part_view_menu)
+        self.tree.setMinimumWidth(260)
         # 領域は Ctrl / Shift + クリックで複数選べる（σ をまとめて入れる）
         self.tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.tree.itemSelectionChanged.connect(self._on_tree_selection_changed)
@@ -276,6 +294,8 @@ class MainWindow(QMainWindow):
         # 三点照明キットを入れると、白一色でも形が読める
         self.plotter.enable_lightkit()
         self.plotter.set_background(BACKGROUND_BOTTOM, top=BACKGROUND_TOP)
+        # 半透明の領域が何枚も重なっても前後を正しく描く（半透明の物が無ければ効かない）
+        self.plotter.enable_depth_peeling()
         # カラーバー専用の描画領域（`_make_room_for_scalar_bar`）。背景はモデル側とそろえ、
         # マウス操作は受けない（受けると、ここでドラッグしたときに何も無い視点が回る）
         from vtkmodules.vtkRenderingCore import vtkRenderer
@@ -1280,6 +1300,7 @@ class MainWindow(QMainWindow):
             child = QTreeWidgetItem([label])
             child.setData(0, ROLE_KIND, "region")
             child.setData(0, ROLE_KEY, m.pid)
+            self._show_part_view(child, self.session.region_view(m.pid))
             regions.addChild(child)
         self.tree.addTopLevelItem(regions)
         regions.setExpanded(True)
@@ -1292,6 +1313,7 @@ class MainWindow(QMainWindow):
             )
             child.setData(0, ROLE_KIND, "electrode")
             child.setData(0, ROLE_KEY, e.name)
+            self._show_part_view(child, self.session.electrode_view(e.name))
             electrodes.addChild(child)
         self.tree.addTopLevelItem(electrodes)
         electrodes.setExpanded(True)
@@ -1304,6 +1326,91 @@ class MainWindow(QMainWindow):
         result_item.setData(0, ROLE_KIND, "result")
         self.tree.addTopLevelItem(result_item)
         self._result_item = result_item
+
+    # --- 領域・電極ごとの見せ方（SPEC §6.3「パーツごとの表示」）---------------
+
+    #: 目のアイコンを押したときの切り替わる順
+    _NEXT_VIEW = {VISIBLE: TRANSPARENT, TRANSPARENT: HIDDEN, HIDDEN: VISIBLE}
+
+    def _show_part_view(self, item, state: str) -> None:
+        item.setIcon(PartTree.VIEW_COLUMN, part_view_icon(state))
+        item.setToolTip(
+            PartTree.VIEW_COLUMN,
+            {
+                VISIBLE: tr("Shown (click: transparent)"),
+                TRANSPARENT: tr("Transparent (click: hidden)"),
+                HIDDEN: tr("Hidden (click: shown)"),
+            }[state],
+        )
+
+    def _part_items(self, item) -> list:
+        """見せ方を変える対象。押した項目が複数選択の中なら、選んでいる同じ種類の全部。"""
+        kind = item.data(0, ROLE_KIND)
+        selected = self.tree.selectedItems()
+        if item in selected:
+            return [i for i in selected if i.data(0, ROLE_KIND) == kind]
+        return [item]
+
+    def _part_view_of(self, item) -> str:
+        key = item.data(0, ROLE_KEY)
+        if item.data(0, ROLE_KIND) == "region":
+            return self.session.region_view(key)
+        return self.session.electrode_view(key)
+
+    def set_part_view(self, items, state: str) -> None:
+        """領域・電極の見せ方を変えて描き直す（見方の好みなので Undo の対象にしない）。"""
+        regions = [i.data(0, ROLE_KEY) for i in items if i.data(0, ROLE_KIND) == "region"]
+        electrodes = [i.data(0, ROLE_KEY) for i in items if i.data(0, ROLE_KIND) == "electrode"]
+        if not regions and not electrodes:
+            return
+        self.session.set_region_view(regions, state)
+        self.session.set_electrode_view(electrodes, state)
+        for item in items:
+            if item.data(0, ROLE_KIND) in ("region", "electrode"):
+                self._show_part_view(item, state)
+        self.page_result.update_part_controls()
+        self.refresh_view()
+
+    def _cycle_part_view(self, item) -> None:
+        """目のアイコンを押した。表示 → 半透明 → 非表示 → 表示 の順に切り替える。"""
+        if item.data(0, ROLE_KIND) not in ("region", "electrode"):
+            return
+        self.set_part_view(self._part_items(item), self._NEXT_VIEW[self._part_view_of(item)])
+
+    def _part_view_menu(self, pos) -> None:
+        """領域・電極の右クリックメニュー（表示・半透明・非表示、これだけ表示、すべて表示）。"""
+        item = self.tree.itemAt(pos)
+        if item is None or item.data(0, ROLE_KIND) not in ("region", "electrode"):
+            return
+        kind = item.data(0, ROLE_KIND)
+        targets = self._part_items(item)
+        siblings = [i for i in self._tree_items() if i.data(0, ROLE_KIND) == kind]
+        menu = QMenu(self)
+        for state, label in (
+            (VISIBLE, tr("Show")),
+            (TRANSPARENT, tr("Transparent")),
+            (HIDDEN, tr("Hide")),
+        ):
+            action = menu.addAction(part_view_icon(state), label)
+            action.triggered.connect(lambda _c=False, s=state: self.set_part_view(targets, s))
+        menu.addSeparator()
+        only = menu.addAction(tr("Show only these") if len(targets) > 1 else tr("Show only this"))
+        only.triggered.connect(lambda: self._show_only(targets, siblings))
+        every = menu.addAction(tr("Show all regions") if kind == "region" else tr("Show all electrodes"))
+        every.triggered.connect(lambda: self.set_part_view(siblings, VISIBLE))
+        menu.exec(self.tree.viewport().mapToGlobal(pos))
+
+    def _show_only(self, targets, siblings) -> None:
+        others = [i for i in siblings if i not in targets]
+        self.session.set_region_view(
+            [i.data(0, ROLE_KEY) for i in others if i.data(0, ROLE_KIND) == "region"], HIDDEN
+        )
+        self.session.set_electrode_view(
+            [i.data(0, ROLE_KEY) for i in others if i.data(0, ROLE_KIND) == "electrode"], HIDDEN
+        )
+        for i in others:
+            self._show_part_view(i, HIDDEN)
+        self.set_part_view(targets, VISIBLE)
 
     def refresh_result_status(self) -> None:
         """結果を出したときから条件が変わっていたら、古い結果だと知らせる。
@@ -1430,6 +1537,33 @@ class MainWindow(QMainWindow):
         if names and self.session.electrode(names[0]) is not None:
             return None, names[0]
         return (sorted(pids) or None), None
+
+    def _part_layers(self, target, surface, mode: str, field: str, opacity: float) -> list:
+        """領域ごとの見せ方に従って、描く面を `[(面, 不透明度), …]` に分ける。
+
+        - 全体表示: 外表面の代わりに、表示・半透明の領域の境界面を描く（非表示の領域は
+          描かないので、その内側の領域が見える）
+        - 断面・クリップ: 切り口と残った面を、それぞれの三角形の領域で振り分ける
+        """
+        from .state import TRANSPARENT, VISIBLE
+
+        if mode == "volume" and target is surface:
+            parts = self.session.part_surfaces(field)
+        else:
+            pids = target.cell_data["PID"] if "PID" in target.cell_data else None
+            parts = {}
+            if pids is not None:
+                for state in (VISIBLE, TRANSPARENT):
+                    wanted = [p for p in np.unique(pids) if self.session.region_view(p) == state]
+                    cells = np.flatnonzero(np.isin(pids, wanted))
+                    if len(cells):
+                        parts[state] = target.extract_cells(cells)
+        layers = []
+        if VISIBLE in parts:
+            layers.append((parts[VISIBLE], opacity))
+        if TRANSPARENT in parts:
+            layers.append((parts[TRANSPARENT], min(opacity, PART_TRANSPARENT_OPACITY)))
+        return layers
 
     def _frame_new_mesh(self) -> None:
         """新しいメッシュを開いた直後だけ、視点をモデル全体に合わせる。
@@ -1590,6 +1724,8 @@ class MainWindow(QMainWindow):
 
         if scalars == SHAPE_FIELD or scalars not in target.array_names:
             scalars = None  # 色分けなし（PID には大小の意味が無い）
+        # 領域ごとに表示・半透明・非表示を選んでいれば、描く面を領域で分ける
+        customised = self.session.regions_customised() and mode != "isosurface"
 
         # 選んだ領域を先に用意する。**体表面に出ていない領域**（頭部モデルの
         # 大半がそう）は、外側を半透明にしないと見えないため
@@ -1623,43 +1759,51 @@ class MainWindow(QMainWindow):
         opacity = (
             BURIED_OPACITY if buried else STREAMLINE_SURFACE_OPACITY if see_through else 1.0
         )
+        layers = [(target, opacity)]
+        if customised:
+            layers = self._part_layers(target, surface, mode, options["field"], opacity)
+        clim = None
+        if scalars is not None:
+            shown = self.session.shown_region_pids() if customised and options["fit_range"] else None
+            clim = self.session.field_range(scalars, shown) or self.session.field_range(scalars)
 
         scope.step(tr("Building the view"))
         edges = options["edges"]
         # **視点は利用者のものとして保つ。** pyvista の add_mesh は既定で視点を
         # 合わせ直すことがあるので、どれも reset_camera=False で足し、モデル全体に
         # 合わせ直すのは新しいメッシュを開いたときだけにする（下の `_frame_new_mesh`）
-        if scalars is None:
-            # 色分けなし。形は**陰影と稜線**で見せる（SPEC §6.3）
+        for layer, layer_opacity in layers:
+            if scalars is None:
+                # 色分けなし。形は**陰影と稜線**で見せる（SPEC §6.3）
+                self.plotter.add_mesh(
+                    layer,
+                    color=SURFACE_COLOR,
+                    show_edges=edges,
+                    edge_color=EDGE_COLOR,
+                    line_width=1,
+                    specular=0.25,
+                    specular_power=18,
+                    smooth_shading=False,
+                    opacity=layer_opacity,
+                    reset_camera=False,
+                )
+            else:
+                self.plotter.add_mesh(
+                    layer,
+                    scalars=scalars,
+                    cmap=options["cmap"],
+                    show_edges=edges,
+                    edge_color=EDGE_COLOR,
+                    clim=clim,
+                    scalar_bar_args=SCALAR_BAR,
+                    categories=scalars == "PID",
+                    opacity=layer_opacity,
+                    reset_camera=False,
+                    **SCALAR_LIGHTING,
+                )
+        if options["nodes"] and layers:
             self.plotter.add_mesh(
-                target,
-                color=SURFACE_COLOR,
-                show_edges=edges,
-                edge_color=EDGE_COLOR,
-                line_width=1,
-                specular=0.25,
-                specular_power=18,
-                smooth_shading=False,
-                opacity=opacity,
-                reset_camera=False,
-            )
-        else:
-            self.plotter.add_mesh(
-                target,
-                scalars=scalars,
-                cmap=options["cmap"],
-                show_edges=edges,
-                edge_color=EDGE_COLOR,
-                clim=self.session.field_range(scalars),
-                scalar_bar_args=SCALAR_BAR,
-                categories=scalars == "PID",
-                opacity=opacity,
-                reset_camera=False,
-                **SCALAR_LIGHTING,
-            )
-        if options["nodes"]:
-            self.plotter.add_mesh(
-                target,
+                layers[0][0],
                 style="points",
                 color=NODE_COLOR,
                 point_size=NODE_SIZE,
@@ -1685,10 +1829,25 @@ class MainWindow(QMainWindow):
                 )
             )
         # ほかの電極の位置も見えるように、縁を役割の色で描く（選んでいる電極は下で面を塗る）
+        # クリップでは電極の縁と面も同じ平面で切る（切り落とした側に宙に浮いて見えないように）
+        clip_plane = (
+            self.session.section_plane(options["slice_normal"], options["slice_position"])
+            if mode == "clip"
+            else None
+        )
+
+        def clipped(poly):
+            if clip_plane is None or not poly.n_cells:
+                return poly
+            origin, normal = clip_plane
+            return poly.clip(normal=normal, origin=origin)
+
+        # 非表示にした電極は描かない（選んで編集している電極だけは、非表示でも面を塗る）
         for spec in self.session.study.electrodes:
-            if spec.name == highlight_electrode:
+            view = self.session.electrode_view(spec.name)
+            if spec.name == highlight_electrode or view == HIDDEN:
                 continue
-            outline = self.session.electrode_outline(spec.name)
+            outline = clipped(self.session.electrode_outline(spec.name))
             if outline.n_cells:
                 self.plotter.add_mesh(
                     outline,
@@ -1697,13 +1856,20 @@ class MainWindow(QMainWindow):
                     lighting=False,
                     pickable=False,
                     reset_camera=False,
+                    opacity=PART_TRANSPARENT_LINE_OPACITY if view == TRANSPARENT else 1.0,
                 )
         if highlight_electrode is not None:
             scope.step(tr("Extracting the electrode faces"))
-            faces = self.session.electrode_polydata(highlight_electrode)
+            faces = clipped(self.session.electrode_polydata(highlight_electrode))
             if faces.n_cells:
+                faded = self.session.electrode_view(highlight_electrode) == TRANSPARENT
                 draw_on_top(
-                    self.plotter.add_mesh(faces, color="red", opacity=1.0, reset_camera=False)
+                    self.plotter.add_mesh(
+                        faces,
+                        color="red",
+                        opacity=0.5 if faded else 1.0,
+                        reset_camera=False,
+                    )
                 )
 
         scope.step(tr("Rendering"))

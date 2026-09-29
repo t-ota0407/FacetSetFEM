@@ -1072,11 +1072,20 @@ class ResultPage(ScrollPage):
         self.shape_button.clicked.connect(self.toggle_shape)
         layout.addWidget(self.shape_button)
 
+        self.fit_range = QCheckBox(tr("Fit the colour range to the shown regions"))
+        self.fit_range.setToolTip(
+            tr(
+                "Normally the colour range covers the whole model, so the same colour means the\n"
+                "same value everywhere. Turn this on to use only the regions that are not hidden\n"
+                "(e.g. to look inside the brain when the skin has much larger values)."
+            )
+        )
         self.edges = QCheckBox(tr("Show element edges"))
         self.nodes = QCheckBox(tr("Show nodes"))
         self.nodes.setToolTip(
             tr("Draws nodes as points. On fine meshes they merge, so zoom in.")
         )
+        layout.addWidget(self.fit_range)
         layout.addWidget(self.edges)
         layout.addWidget(self.nodes)
 
@@ -1134,6 +1143,7 @@ class ResultPage(ScrollPage):
             widget.currentTextChanged.connect(self._refresh)
         self.edges.toggled.connect(self._refresh)
         self.nodes.toggled.connect(self._refresh)
+        self.fit_range.toggled.connect(self._refresh)
         self.streamlines.toggled.connect(self._refresh)
         self.slice_position.valueChanged.connect(self._refresh)
         self.iso_level.valueChanged.connect(self._refresh)
@@ -1171,6 +1181,7 @@ class ResultPage(ScrollPage):
         self._loading = False
         self._update_shape_button()
         self._update_enabled()
+        self.update_part_controls()
 
     def _apply_size_defaults(self) -> None:
         """モデルを開き直したとき、規模に合わせて稜線の既定を決める。
@@ -1282,6 +1293,15 @@ class ResultPage(ScrollPage):
             box.setToolTip("" if on else hint)
         self.n_seeds.setEnabled(self.streamlines.isChecked())
 
+    def update_part_controls(self) -> None:
+        """領域の見せ方を変えたとき。色の範囲の切り替えは、隠した・透かした領域があるときだけ効く。"""
+        customised = self.window.session.mesh is not None and self.window.session.regions_customised()
+        self.fit_range.setEnabled(customised)
+        self.fit_range.setToolTip(
+            self.fit_range.toolTip() if customised
+            else tr("Available when some regions are transparent or hidden (eye icons in the tree).")
+        )
+
     def _face_section(self, *_args) -> None:
         mode = self.mode.currentData()
         if self._loading:
@@ -1323,6 +1343,7 @@ class ResultPage(ScrollPage):
             "mode": self.mode.currentData() or "volume",
             "cmap": self.cmap.currentText(),
             "edges": self.edges.isChecked(),
+            "fit_range": self.fit_range.isChecked(),
             "nodes": self.nodes.isChecked(),
             "slice_normal": self.slice_normal.currentText(),
             "slice_position": self.slice_position.value() / 100.0,

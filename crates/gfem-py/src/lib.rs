@@ -423,6 +423,24 @@ impl PyMesh {
         flat.into_pyarray(py).reshape([rows, 3])
     }
 
+    /// 全領域の境界面 `(三角形 (n, 3), 元のソリッド要素 (n,))`（SPEC §6.3）。
+    ///
+    /// 外表面と、隣り合う要素の PID が違う面を両側とも。元の要素の PID で振り分ければ、
+    /// 領域ごとの `region_surface` を全領域ぶん呼んだのと同じ面になる（1 回の並べ替えで済む）。
+    /// 領域ごとに表示・半透明・非表示を選ぶ描画に使う。
+    fn region_boundaries<'py>(&self, py: Python<'py>) -> PyResult<RegionSurface<'py>> {
+        let surface = py
+            .detach(|| gfem_core::mesh::extract_region_boundaries(&self.inner))
+            .map_err(to_py)?;
+        let (tris, owners) = surface.triangulate();
+        let flat: Vec<u32> = tris.into_iter().flatten().collect();
+        let rows = flat.len() / 3;
+        Ok((
+            flat.into_pyarray(py).reshape([rows, 3])?,
+            owners.into_pyarray(py),
+        ))
+    }
+
     /// 指定した領域（PID）の要素の集まりの境界面 `(三角形 (n, 3), 元のソリッド要素 (n,))`。
     ///
     /// 体表面に出ていない領域をハイライトするために使う（SPEC §6.3）。体積メッシュを

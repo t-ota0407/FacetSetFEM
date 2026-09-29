@@ -29,8 +29,8 @@ pub use spatial::CellGrid;
 pub use streamline::{Navigator, Streamline, TraceDirection, TraceOptions};
 pub use tetview::TetView;
 pub use topology::{
-    FaceAdjacency, Surface, SurfaceFace, build_face_adjacency, extract_region_surface,
-    extract_surface,
+    FaceAdjacency, Surface, SurfaceFace, build_face_adjacency, extract_region_boundaries,
+    extract_region_surface, extract_surface,
 };
 
 /// Nastran の節点 ID。

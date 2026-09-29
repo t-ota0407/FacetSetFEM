@@ -157,6 +157,24 @@ impl Surface {
 /// 以前は 7.8 秒（逐次の面の列挙 4.0 秒 + 比較ソート 2.8 秒）、いまは 1.8 秒
 /// （並べ替えは振り分けソート `parallel::bucket_sort`。SPEC §8 の「2026-09」）。
 pub fn extract_surface(mesh: &Mesh) -> Result<Surface> {
+    surface_from_sorted(mesh, all_faces_sorted(mesh), Boundaries::Outer)
+}
+
+/// 全領域の境界面を 1 回で取り出す（領域ごとの表示・半透明・非表示。SPEC §6.3）。
+///
+/// 外表面に加えて、**隣り合う要素の PID が違う面を両側とも**残す。面はそれぞれ自分の側の
+/// 要素（[`SurfaceFace::element`]）を持ち、向きはその領域の外向き。PID で振り分ければ、
+/// 領域ごとの [`extract_region_surface`] を全領域ぶん呼んだのと同じ面になる（頭部モデルの
+/// 62 領域で 1 領域ずつ取り出すと 5 秒ほどかかる。これは外表面の抽出 1 回ぶん）。
+///
+/// 領域の境目の面は 2 枚（両側）入るので、面キーの並び（[`Surface::find`] で使うもの）は
+/// 重複を含む。この面の集まりは描画のためだけに使うこと。
+pub fn extract_region_boundaries(mesh: &Mesh) -> Result<Surface> {
+    surface_from_sorted(mesh, all_faces_sorted(mesh), Boundaries::BetweenRegions)
+}
+
+/// 全ソリッド要素の全面を、面キーの順に並べる。
+fn all_faces_sorted(mesh: &Mesh) -> Vec<FaceEntry> {
     // ブロックごとの面の通し番号の始まり。ブロックの中では要素あたりの面の数が一定なので、
     // 面の通し番号から要素と局所面番号が決まる
     let mut blocks = Vec::with_capacity(mesh.solids.len());
@@ -179,7 +197,7 @@ pub fn extract_surface(mesh: &Mesh) -> Result<Surface> {
         }
         (nodes, local.len(), (first_element + i) as u32, lf as u8)
     };
-    let entries = bucket_sort(
+    bucket_sort(
         first_face,
         mesh.nodes.len(),
         |k| {
@@ -194,9 +212,16 @@ pub fn extract_surface(mesh: &Mesh) -> Result<Surface> {
             let (nodes, len, element, lf) = face(k);
             (face_key(&nodes[..len]), element, lf)
         },
-    );
+    )
+}
 
-    surface_from_sorted(mesh, entries)
+/// どの面を境界として拾うか。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Boundaries {
+    /// 出現回数 1 の面（外表面）だけ
+    Outer,
+    /// それに加えて、両側の要素の PID が違う面を両側とも
+    BetweenRegions,
 }
 
 /// 指定した領域（PSOLID の PID）の要素の集まりの境界面。
@@ -253,18 +278,18 @@ pub fn extract_region_surface(mesh: &Mesh, pid: PropId) -> Result<Surface> {
             (face_key(&nodes[..len]), element, lf)
         },
     );
-    surface_from_sorted(mesh, entries)
+    surface_from_sorted(mesh, entries, Boundaries::Outer)
 }
 
 /// 面キーの順に並べた面の列から、出現回数 1 の面（境界）を拾って [`Surface`] にする。
 ///
 /// 3 回以上現れる面（非多様体）があればエラー。
-fn surface_from_sorted(mesh: &Mesh, entries: Vec<FaceEntry>) -> Result<Surface> {
+fn surface_from_sorted(mesh: &Mesh, entries: Vec<FaceEntry>, which: Boundaries) -> Result<Surface> {
     // 同じ面キーの並びが途中で切れないように区切って、区間ごとに並列に走査する。
     // 区間の結果を区間の順につなぐので、逐次に走査したのと同じ並びになる
     let parts: Vec<Scan> = group_ranges(&entries, rayon::current_num_threads() * 4)
         .into_par_iter()
-        .map(|range| scan_surface(mesh, &entries[range]))
+        .map(|range| scan_surface(mesh, &entries[range], which))
         .collect();
     drop_in_background(entries);
     let mut faces: Vec<SurfaceFace> = Vec::with_capacity(parts.iter().map(|p| p.faces.len()).sum());
@@ -331,11 +356,27 @@ struct Scan {
 }
 
 /// 並べた列の 1 区間から、出現回数 1 の面（外表面）と、3 回以上の面（非多様体）を拾う。
-fn scan_surface(mesh: &Mesh, entries: &[FaceEntry]) -> Scan {
+/// `which` が [`Boundaries::BetweenRegions`] なら、両側の PID が違う面も両側とも拾う。
+fn scan_surface(mesh: &Mesh, entries: &[FaceEntry], which: Boundaries) -> Scan {
     let mut out = Scan {
         faces: Vec::new(),
         keys: Vec::new(),
         non_manifold: Vec::new(),
+    };
+    let push = |out: &mut Scan, (key, elem, local_face): FaceEntry| {
+        let e = mesh.solid(elem as usize);
+        let local = e.kind.faces()[local_face as usize];
+        let mut nodes = [NO_NODE; 4];
+        for (k, &l) in local.iter().enumerate() {
+            nodes[k] = e.conn[l];
+        }
+        out.faces.push(SurfaceFace {
+            nodes,
+            n_nodes: local.len() as u8,
+            element: elem,
+            local_face,
+        });
+        out.keys.push(key);
     };
     let mut i = 0;
     while i < entries.len() {
@@ -345,20 +386,13 @@ fn scan_surface(mesh: &Mesh, entries: &[FaceEntry]) -> Scan {
         }
         let count = j - i;
         if count == 1 {
-            let (key, elem, local_face) = entries[i];
-            let e = mesh.solid(elem as usize);
-            let local = e.kind.faces()[local_face as usize];
-            let mut nodes = [NO_NODE; 4];
-            for (k, &l) in local.iter().enumerate() {
-                nodes[k] = e.conn[l];
+            push(&mut out, entries[i]);
+        } else if count == 2 && which == Boundaries::BetweenRegions {
+            let (a, b) = (entries[i], entries[i + 1]);
+            if mesh.solid(a.1 as usize).pid != mesh.solid(b.1 as usize).pid {
+                push(&mut out, a);
+                push(&mut out, b);
             }
-            out.faces.push(SurfaceFace {
-                nodes,
-                n_nodes: local.len() as u8,
-                element: elem,
-                local_face,
-            });
-            out.keys.push(key);
         } else if count > 2 {
             let ids: Vec<String> = entries[i..j]
                 .iter()
@@ -599,7 +633,7 @@ CTETRA,11,1,5,4,3,2
             }
         }
         entries.sort_unstable();
-        let scan = scan_surface(mesh, &entries);
+        let scan = scan_surface(mesh, &entries, Boundaries::Outer);
         (scan.faces, scan.keys)
     }
 
@@ -792,6 +826,40 @@ CTETRA,11,1,5,4,3,2
         );
         // 無い PID は空
         assert!(extract_region_surface(&mesh, 99).unwrap().is_empty());
+    }
+
+    #[test]
+    fn all_region_boundaries_match_the_regions_one_by_one() {
+        // 3 層（PID 1・2・3）に、中に埋もれた PID 4 の塊。1 回で取り出した境界面を PID で
+        // 振り分けると、領域ごとに取り出した境界面と面の組がそのまま一致する
+        let mesh = crate::testing::kuhn_box_with([4, 4, 6], [4.0, 4.0, 6.0], |[i, j, k]| {
+            if (1..3).contains(&i) && (1..3).contains(&j) && (2..4).contains(&k) {
+                4
+            } else {
+                1 + (k / 2) as u32
+            }
+        });
+        let all = extract_region_boundaries(&mesh).unwrap();
+        let faces_of = |s: &Surface, pid: PropId| {
+            let mut v: Vec<(u32, u8)> = s
+                .faces()
+                .iter()
+                .filter(|f| mesh.solid(f.element as usize).pid == pid)
+                .map(|f| (f.element, f.local_face))
+                .collect();
+            v.sort_unstable();
+            v
+        };
+        let mut total = 0;
+        for pid in [1, 2, 3, 4] {
+            let one = extract_region_surface(&mesh, pid).unwrap();
+            assert_eq!(faces_of(&all, pid), faces_of(&one, pid), "PID {pid}");
+            total += one.len();
+        }
+        assert_eq!(all.len(), total, "どの領域にも属さない面が混ざっている");
+        // 同じ PID どうしの内部の面は入らない
+        let outer = extract_surface(&mesh).unwrap().len();
+        assert!(all.len() > outer);
     }
 
     #[test]
