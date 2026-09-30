@@ -265,6 +265,10 @@ def test_the_scalar_bar_title_drops_the_bars_and_splits_the_unit():
     assert scalar_bar_title("|J| [A/m2]") == "J\n[A/m2]"
     assert scalar_bar_title("power density [W/m3]") == "power density\n[W/m3]"
     assert scalar_bar_title("PID") == "PID"
+    # 長い名前は語の切れ目で折り返す（帯の外に切れないように。M11）
+    assert scalar_bar_title("electrode current density [A/m2]") == (
+        "electrode\ncurrent\ndensity\n[A/m2]"
+    )
 
 
 def test_the_scalar_bar_gets_its_own_strip_beside_the_model(window, qt_app):

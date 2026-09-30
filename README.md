@@ -23,6 +23,7 @@
 | M8: 処理中のローディング表示 | **完了**（2026-08-22） |
 | M9: 体表面から選ぶ電極（クリック・筆） | **完了**（2026-08-23） |
 | M10: 3D ビューの描画の作り直し | **完了**（2026-08-23） |
+| M11: 完全電極モデル（接触インピーダンス付きの等電位電極） | **完了**（2026-09-30） |
 | 全体の見直し（リファクタリング） | **進行中**（2026-09〜。残りは「次にやること」） |
 
 マイルストーンの定義と経緯（入れたもの・実測・見つけた不具合）は SPEC.md §8 にまとめてある。
@@ -127,6 +128,37 @@ GUI では「クリックで選ぶ」を押して 3D ビューの体表面をク
 result = gfem.Study.load("tests/models/slab_3layer.yaml").solve()
 ```
 
+**完全電極モデル**（M11。SPEC §2.5）。電極の板は等電位で、皮膚との境目に接触インピーダンス
+z [Ω·m²] がある、という現実に近いモデル。**電流が電極の縁に集まる様子**を出せる
+（既定の一様電流密度では出ない）。電極ごとに選べ、既定は一様電流密度のまま:
+
+```python
+case.add_electrode("E1", role="anode", current=2e-3, shell_pids=[101],
+                   distribution="complete_electrode", contact_impedance=0.01)   # Ω·m²
+case.add_electrode("E2", role="cathode", current=2e-3, shell_pids=[201],
+                   distribution="complete_electrode", contact_impedance=0.01)
+result = case.solve()
+print(result.impedance)      # 接触抵抗を含む電極間抵抗 [Ω]（実測と直接比べられる）
+for e in result.electrodes:  # 板の電位・皮膚へ流れ込む電流密度の最大（縁の集中）など
+    print(e["name"], e["potential"], e["peak_current_density"], e["mean_current_density"])
+j = result.electrode_current_density   # 節点ごとの、皮膚へ流れ込む電流密度 [A/m²]
+```
+
+ケースファイルでは `distribution: complete_electrode` と `contact_impedance: 0.01` を電極に書く。
+GUI では電極ページの「電極のモデル」と「接触インピーダンス」（Ω·cm² で入れる。1 Ω·m² = 10⁴ Ω·cm²）。
+
+**接触インピーダンスは 1 つの文献値で決めないこと。** ゲルや皮膚の状態で何倍も変わるので、
+刺激装置で測った電極間抵抗に合わせるか、何通りかの値で解いて結論が変わらないかを確かめる:
+
+```python
+fit = gfem.fit_contact_impedance(study, measured_ohm=1200.0)   # 実測の電極間抵抗に合わせる
+print(fit.contact_impedance, fit.evaluations)                   # 数回の求解で収まる
+table = gfem.sweep(study, {"contact_impedance": [0.001, 0.01, 0.1]})   # 何通りかで比べる
+```
+
+縁のピークを使うときは、電極の縁のメッシュが十分細かいか（要素の大きさ < ℓ = zσ）を確かめる。
+足りなければ警告が出る。電極 2 枚なら解く手間は一様電流密度と同じ（1000 万節点・GPU で 10.7 秒）。
+
 パラメータスタディ（M7）。σ・刺激電流・電極の面・ソルバ設定を振って一括で解く:
 
 ```python
@@ -159,6 +191,7 @@ library = gfem.load_library("my_tissues.yaml")   # 自前の表に差し替え�
 | Tet4 の CSR アセンブリ | ✔ |
 | 射影付き前処理付き CG（ゲージ固定は射影。1 節点ピン留めはしない） | ✔ |
 | 電極荷重（面積按分の一様電流密度） | ✔ |
+| 完全電極モデル（接触インピーダンス・重ね合わせ・実測抵抗への合わせ込み。SPEC §2.5） | ✔ |
 | 体表面から電極を選ぶ（3D ビューのクリック。シェル要素の無いモデル用） | ✔ |
 | 電極面を筆で 1 枚ずつ足す・外す（差分でケースファイルに残る） | ✔ |
 | 電極の形（円 / 角丸の矩形、画面に対してまっすぐ置く、指定面積とのずれの警告） | ✔ |
@@ -204,6 +237,7 @@ RTX A6000 / 20 コア、release ビルドでの目安:
 cargo test --release -p gfem-core --test scaling -- --ignored --nocapture
 cargo test --release -p gfem-core --test amg -- --ignored --nocapture      # AMG と Jacobi の比較
 cargo test --release -p gfem-cuda -- --ignored --nocapture   # GPU の計測と 1000 万節点
+cargo test --release -p gfem-core --test complete_electrode -- --include-ignored --nocapture   # 完全電極モデルの解析解
 ```
 
 使える GPU は Python から確認できる:
@@ -218,6 +252,8 @@ print(gfem.cuda_check(10_000_000))   # この規模を GPU に載せられるか
 
 解析解ベンチマーク 5 件（一様場・層状媒質・同心球殻・半無限媒質上の点電極・二層半無限媒質）と、
 メッシュ収束次数（φ 1.93 次 / E 0.87 次。理論は 2 / 1）を回帰テストで確かめている（SPEC §8 M2）。
+完全電極モデルは、直列抵抗の厳密解（相対 1e-9）と、半無限媒質上の正方形電極の解析解
+（等電位の板と一様電流密度の抵抗の差。外挿で 0.1 % 以内）で確かめている（SPEC §8 M11）。
 保存則（電流保存・エネルギー収支・離散残差）は**全ての solve で自動チェック**され、
 逸脱があれば結果に警告として載る。
 
@@ -329,9 +365,18 @@ GPU のテストは GPU が無い機械では skip される。ただし `backen
   `load_library` と同じ形）。必要なら、電極アレイ（ピッチを指定して格子状に一括で置く）と、
   面を形で切り抜いて面積をメッシュに依らず正確にする荷重（SPEC §2.4 に手が入るので要議論）
 
+### 完全電極モデル（M11）の残り
+
+- **定電圧刺激**（電極の電圧を指定する）。重ね合わせの形なら、コンダクタンス行列を使わずに
+  板の電位を与えるだけで入る（SPEC §2.5 の「このモデルの限界」）
+- **GUI からの接触インピーダンスの合わせ込み**。いまは Python の `gfem.fit_contact_impedance` だけ。
+  1 回ごとに丸ごと解くので、パラメータスタディと同じくワーカースレッドで進捗を出す形になる
+- **実際の頭部モデルでの確認**。縁の分解能（ℓ = zσ と電極面の要素の大きさ）がどの程度足りるか、
+  AMG の反復回数が導電率の大きなコントラストでどうなるか
+
 ### その先
 
-- SPEC §9 に穴を空けてある拡張（異方性導電率・2 次要素・完全電極モデル）
+- SPEC §9 に穴を空けてある拡張（異方性導電率・2 次要素）
 - CI の設定（いまは手元で `cargo test` と `pytest` を回している）
 
 ---

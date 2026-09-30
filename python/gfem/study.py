@@ -20,6 +20,7 @@ YAML の解釈を Rust ではなく Python 側に置いているのは、
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -33,6 +34,7 @@ from ._gfem import (
     Solution,
     backend_choices,
     check_patch,
+    distribution_choices,
     parse_backend,
     parse_preconditioner,
     preconditioner_choices,
@@ -52,8 +54,11 @@ __all__ = [
 #: 現在のケースファイル形式のバージョン
 CASE_VERSION = 1
 
-#: v1.0 で対応している電極の電流分布（SPEC §2.4）
-_SUPPORTED_DISTRIBUTIONS = {"uniform_current_density"}
+#: 一様電流密度（SPEC §2.4）。電極の既定
+UNIFORM = "uniform_current_density"
+
+#: 完全電極モデル（SPEC §2.5）。`contact_impedance` [Ω·m²] が必須
+COMPLETE = "complete_electrode"
 
 
 def _error(what: str, where_: str, hint: str) -> GfemError:
@@ -194,7 +199,16 @@ class ElectrodeSpec:
     added_faces: list[tuple[int, int]] = field(default_factory=list)
     #: 手で外した体表面の面。パッチや added_faces より優先される
     removed_faces: list[tuple[int, int]] = field(default_factory=list)
-    distribution: str = "uniform_current_density"
+    #: 電流の配り方: "uniform_current_density"（SPEC §2.4）/ "complete_electrode"（SPEC §2.5）
+    distribution: str = UNIFORM
+    #: 接触インピーダンス [Ω·m²]。complete_electrode のときだけ使う。
+    #: GUI で一様電流密度に戻しても値は覚えておき、ケースファイルには書かない
+    contact_impedance: float | None = None
+
+    @property
+    def is_complete(self) -> bool:
+        """完全電極モデルか。"""
+        return self.distribution == COMPLETE
 
     def to_dict(self) -> dict[str, Any]:
         faces: dict[str, Any] = {
@@ -207,13 +221,16 @@ class ElectrodeSpec:
             faces["added"] = [[int(e), int(f)] for e, f in self.added_faces]
         if self.removed_faces:
             faces["removed"] = [[int(e), int(f)] for e, f in self.removed_faces]
-        return {
+        data: dict[str, Any] = {
             "name": self.name,
             "role": self.role,
             "current": self.current,
             "distribution": self.distribution,
-            "faces": faces,
         }
+        if self.is_complete:
+            data["contact_impedance"] = self.contact_impedance
+        data["faces"] = faces
+        return data
 
 
 @dataclass
@@ -419,6 +436,8 @@ class Study:
                 patches=[p.to_dict() for p in e.patches],
                 added=[tuple(f) for f in e.added_faces],
                 removed=[tuple(f) for f in e.removed_faces],
+                distribution=e.distribution,
+                contact_impedance=e.contact_impedance if e.is_complete else None,
             )
         case.set_solver(
             tolerance=self.solver.tolerance,
@@ -495,13 +514,17 @@ def _electrode_from(data: Any, where_: str) -> ElectrodeSpec:
     name = _require(data, "name", where_, tr("Write the electrode name"))
     role = _require(data, "role", where_, tr("Write anode or cathode"))
     current = _require(data, "current", where_, tr("Write the total current in A (e.g. 2.0e-3)"))
-    distribution = str(data.get("distribution", "uniform_current_density"))
-    if distribution not in _SUPPORTED_DISTRIBUTIONS:
+    distribution = str(data.get("distribution", UNIFORM))
+    if distribution not in distribution_choices():
         raise _error(
             tr("Unsupported current distribution: {d}", d=distribution),
             _in(where_, "distribution"),
-            tr("v1.0 supports only uniform_current_density (area-weighted) (SPEC §2.4)"),
+            tr(
+                "Choose one of {choices} (SPEC §2.4 / §2.5)",
+                choices=" / ".join(distribution_choices()),
+            ),
         )
+    contact_impedance = _contact_impedance_from(data, distribution, where_)
     faces = data.get("faces") or {}
     if not isinstance(faces, dict):
         raise _error(
@@ -544,7 +567,56 @@ def _electrode_from(data: Any, where_: str) -> ElectrodeSpec:
         added_faces=added,
         removed_faces=removed,
         distribution=distribution,
+        contact_impedance=contact_impedance,
     )
+
+
+def _contact_impedance_from(data: dict, distribution: str, where_: str) -> float | None:
+    """接触インピーダンス [Ω·m²] を読む（SPEC §2.5 / §3.3）。
+
+    complete_electrode には必須。uniform_current_density に書いてあればエラーにする
+    （書いた値が黙って使われないのを避ける）。
+    """
+    where_z = _in(where_, "contact_impedance")
+    if "contact_impedance" not in data or data["contact_impedance"] is None:
+        if distribution == COMPLETE:
+            raise _error(
+                tr("complete_electrode needs contact_impedance"),
+                where_,
+                tr(
+                    "Write the contact impedance in Ω·m² (e.g. 0.01). Fitting it to the "
+                    "measured inter-electrode resistance is the most reliable way (SPEC §2.5)"
+                ),
+            )
+        return None
+    if distribution != COMPLETE:
+        raise _error(
+            tr("contact_impedance is written, but distribution is {d}", d=distribution),
+            where_z,
+            tr(
+                "The contact impedance is used only by complete_electrode (SPEC §2.5). "
+                "Either write distribution: complete_electrode or remove contact_impedance"
+            ),
+        )
+    value = data["contact_impedance"]
+    try:
+        z = float(value)
+    except (TypeError, ValueError) as exc:
+        raise _error(
+            tr("Cannot read contact_impedance as a number: {value}", value=repr(value)),
+            where_z,
+            tr("Write the contact impedance in Ω·m² (e.g. 0.01)"),
+        ) from exc
+    if not (math.isfinite(z) and z > 0.0):
+        raise _error(
+            tr("contact_impedance must be a positive finite value: {value}", value=value),
+            where_z,
+            tr(
+                "Write it as a positive value in Ω·m². For an ideal equipotential "
+                "electrode use a small positive value instead of 0"
+            ),
+        )
+    return z
 
 
 def _require_unique_names(electrodes: list[ElectrodeSpec], where_: str) -> None:

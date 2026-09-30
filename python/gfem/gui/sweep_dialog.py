@@ -51,6 +51,17 @@ def parameter_choices(study: Study) -> list[tuple[str, str]]:
         out.append((f"{label} [S/m]", f"sigma.{m.pid}"))
     for e in study.electrodes:
         out.append((tr("Current of electrode {name} [mA]", name=e.name), f"electrode.{e.name}.current"))
+    # 接触インピーダンスを入れた電極は完全電極モデルになる（SPEC §2.5）。GUI では Ω·cm²
+    out.append(
+        (tr("Contact impedance (all electrodes, complete electrode model) [Ω·cm²]"), "contact_impedance")
+    )
+    for e in study.electrodes:
+        out.append(
+            (
+                tr("Contact impedance of electrode {name} [Ω·cm²]", name=e.name),
+                f"electrode.{e.name}.contact_impedance",
+            )
+        )
     out.append((tr("Convergence tolerance (relative residual)"), "solver.tolerance"))
     return out
 
@@ -59,6 +70,9 @@ def display_scale(key: str) -> float:
     """入力欄・表の値に掛けると SI になる係数（電流は mA で扱うので 1e-3）。"""
     if key == "current" or (key.startswith("electrode.") and key.endswith(".current")):
         return 1e-3
+    # 接触インピーダンスは Ω·cm² で扱う（電極のページと同じ。1 Ω·cm² = 1e-4 Ω·m²）
+    if key.endswith("contact_impedance"):
+        return 1e-4
     return 1.0
 
 
@@ -66,6 +80,7 @@ def display_scale(key: str) -> float:
 VALUE_EXAMPLES = {
     "current": N_("1, 2, 4  or  1:4:1"),
     "sigma": N_("0.02, 0.04, 0.08  or  0.02:0.08:0.02"),
+    "contact_impedance": "10, 100, 1000",
     "solver.tolerance": "1e-8, 1e-10, 1e-12",
 }
 
@@ -76,6 +91,7 @@ RESULT_HEADINGS = {
     "power_W": N_("Power [W]"),
     "j_max_A_per_m2": N_("|J| max [A/m²]"),
     "e_max_V_per_m": N_("|E| max [V/m]"),
+    "contact_j_max_A_per_m2": N_("Current density into the skin max [A/m²]"),
     "phi_min_V": N_("φ min [V]"),
     "phi_max_V": N_("φ max [V]"),
     "iterations": N_("Iterations"),
@@ -232,7 +248,14 @@ class SweepDialog(QDialog):
     def _show_example(self, *_args) -> None:
         """入力欄の例を、振るものに合わせて出す（表示の単位で）。"""
         key = self.parameter.currentData() or ""
-        head = "sigma" if key.startswith("sigma.") else "current" if display_scale(key) != 1.0 else key
+        if key.startswith("sigma."):
+            head = "sigma"
+        elif key.endswith("contact_impedance"):
+            head = "contact_impedance"
+        elif display_scale(key) != 1.0:
+            head = "current"
+        else:
+            head = key
         self.values.setPlaceholderText(
             tr(VALUE_EXAMPLES.get(head, N_("0.02, 0.04  or  0.02:0.06:0.01")))
         )

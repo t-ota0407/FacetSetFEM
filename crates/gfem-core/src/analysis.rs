@@ -6,8 +6,8 @@
 //!   → 検証（ケースの整合性・電流保存）
 //!   → CSR 構造の構築
 //!   → 剛性のアセンブリ
-//!   → 電極荷重ベクトルの構築
-//!   → 射影付き前処理付き CG
+//!   → 電極荷重ベクトルの構築（CEM の電極があれば接触インピーダンスの項も。SPEC §2.5）
+//!   → 射影付き前処理付き CG（CEM があれば射影なしで重ね合わせ。[`crate::contact`]）
 //!   → ポスト処理（E, J, 保存則チェック）
 //! ```
 //!
@@ -15,18 +15,19 @@
 
 use crate::assemble::{LinearSystem, assemble, load::ElectrodeGeometry};
 use crate::case::{Backend, Case, ElectrodeRole, FaceLookup, ReferencePotential};
+use crate::contact::{self, ElectrodeState};
 use crate::error::{ErrorKind, GfemError, Result};
 use crate::io::json::Json;
 use crate::io::vtu::{DataArray, VtuData, VtuOptions, write_vtu};
 use crate::mesh::Mesh;
 use crate::mesh::topology::extract_surface;
 use crate::post::{
-    ConservationReport, FieldResult, RegionStats, check_conservation, compute_fields,
+    ConservationReport, FieldResult, RegionStats, check_conservation_with, compute_fields,
     pad_for_shells, region_stats, write_convergence_csv, write_region_stats_csv,
 };
 use crate::provenance::Provenance;
 use crate::solver::backend::{CpuParallel, CpuSerial, LinearBackend};
-use crate::solver::cg::{CgReport, ProgressFn};
+use crate::solver::cg::{CgReport, Gauge, ProgressFn};
 use crate::solver::external::{BackendSolver, LinearSolver};
 use std::path::Path;
 use std::time::Instant;
@@ -55,9 +56,14 @@ pub struct Analysis {
     pub fields: FieldResult,
     /// 保存則チェックと電極間インピーダンス
     pub conservation: ConservationReport,
-    /// CG の収束状況
+    /// CG の収束状況。重ね合わせで何度か解いたときは、反復回数の合計・残差の最大・
+    /// つないだ収束履歴（SPEC §4.3）
     pub solver: CgReport,
-    /// 電極ごとの幾何情報
+    /// 右辺ごとの `(反復回数, 相対残差)`（解いた順。一様電流密度だけなら 1 本）
+    pub solves: Vec<(usize, f64)>,
+    /// 解いた系が特異（全 Neumann）か正則（CEM の電極がある）か
+    pub gauge: Gauge,
+    /// 電極ごとの幾何情報（CEM の電極には板の電位 `terminal_potential` が入っている）
     pub electrodes: Vec<ElectrodeGeometry>,
     /// 実行中に出た警告（ケース検証 + 保存則チェック）
     pub warnings: Vec<String>,
@@ -69,6 +75,16 @@ impl Analysis {
     /// 電極間の等価抵抗 [Ω]（SPEC §5.3）。
     pub fn impedance(&self) -> f64 {
         self.conservation.impedance
+    }
+
+    /// 電極ごとの電位・電流・接触電流密度の最大・接触面の消費電力（SPEC §2.5）。
+    pub fn electrode_states(&self) -> Vec<ElectrodeState> {
+        contact::electrode_states(&self.electrodes, &self.potential)
+    }
+
+    /// 電極面の節点ごとの、皮膚を通って流れ込む電流密度 [A/m²]（電極の外は 0。SPEC §5.5）。
+    pub fn electrode_current_density(&self, mesh: &Mesh) -> Vec<f64> {
+        contact::electrode_current_density(mesh, &self.electrodes, &self.potential)
     }
 
     /// 電位の最小値と最大値 [V]。
@@ -153,18 +169,29 @@ impl Analysis {
             .collect();
         root.set("materials", Json::Array(materials));
 
+        let states = self.electrode_states();
         let electrodes: Vec<Json> = self
             .electrodes
             .iter()
-            .map(|e| {
+            .zip(&states)
+            .map(|(e, state)| {
                 let mut j = Json::object();
                 j.set("name", e.name.clone())
                     .set("role", e.role.label())
+                    .set("distribution", e.model.label())
                     .set("current_A", e.signed_current)
                     .set("n_faces", e.n_faces)
                     .set("area_m2", e.area)
                     .set("current_density_A_per_m2", e.current_density)
-                    .set("mean_potential_V", e.mean_potential(&self.potential));
+                    .set("mean_potential_V", state.mean_surface_potential)
+                    .set("peak_current_density_A_per_m2", state.peak_current_density);
+                // 完全電極モデル（SPEC §2.5）の電極だけが持つ量
+                if let Some(z) = e.contact_impedance() {
+                    j.set("contact_impedance_ohm_m2", z)
+                        .set("electrode_potential_V", state.potential)
+                        .set("current_from_field_A", state.current)
+                        .set("contact_power_W", state.contact_power);
+                }
                 j
             })
             .collect();
@@ -174,15 +201,36 @@ impl Analysis {
         solver
             .set("backend", self.solver.backend)
             .set("backend_setting", case.solver.backend.label())
-            .set("method", "projected_preconditioned_cg")
-            .set("gauge", "mean_zero")
+            .set(
+                "method",
+                match self.gauge {
+                    Gauge::MeanZero => "projected_preconditioned_cg",
+                    Gauge::NotNeeded => "preconditioned_cg_superposition",
+                },
+            )
+            .set("gauge", self.gauge.label())
             .set("preconditioner", case.solver.preconditioner.label())
             .set("tolerance", case.solver.tolerance)
             .set("max_iterations", case.solver.max_iterations)
             .set("iterations", self.solver.iterations)
             .set("relative_residual", self.solver.relative_residual)
             .set("converged", self.solver.converged)
-            .set("preconditioner_setup_s", self.solver.setup_seconds);
+            .set("preconditioner_setup_s", self.solver.setup_seconds)
+            .set("n_solves", self.solves.len());
+        if self.solves.len() > 1 {
+            // 重ね合わせで何度か解いた（SPEC §2.5）。右辺ごとの反復回数と残差を残す
+            let solves: Vec<Json> = self
+                .solves
+                .iter()
+                .map(|&(iterations, residual)| {
+                    let mut j = Json::object();
+                    j.set("iterations", iterations)
+                        .set("relative_residual", residual);
+                    j
+                })
+                .collect();
+            solver.set("solves", Json::Array(solves));
+        }
         if let Some(info) = &self.solver.amg {
             // 「どんな階層で解いたか」は後から結果を読み解くのに要る（SPEC §4.5 / §5.5）
             let levels: Vec<Json> = info
@@ -207,7 +255,9 @@ impl Analysis {
         let mut checks = Json::object();
         checks
             .set("current_balance", c.current_balance)
+            .set("electrode_current_error", c.electrode_current_error)
             .set("power_from_field_W", c.power_from_field)
+            .set("contact_power_W", c.contact_power)
             .set("power_from_load_W", c.power_from_load)
             .set("energy_relative_error", c.energy_relative_error)
             .set("discrete_residual", c.discrete_residual)
@@ -221,6 +271,7 @@ impl Analysis {
             .set("impedance_ohm", c.impedance)
             .set("total_current_A", c.total_current)
             .set("power_W", c.power_from_field)
+            .set("contact_power_W", c.contact_power)
             .set("potential_min_V", phi_min)
             .set("potential_max_V", phi_max)
             .set(
@@ -475,17 +526,44 @@ fn run_with(
     let LinearSystem {
         matrix,
         load,
-        electrodes,
+        mut electrodes,
+        gauge,
     } = assemble(mesh, case, lookup, parallel_assembly)?;
     let assemble_time = mark.elapsed().as_secs_f64();
+    // 縁のピークがメッシュで決まってしまう電極を知らせる（SPEC §2.5）
+    warnings.extend(contact::resolution_warnings(&electrodes));
 
     // --- 求解 ---
     let mark = Instant::now();
-    let mut potential = vec![0.0; mesh.nodes.len()];
-    let report = solver.solve(&matrix, &load, &mut potential, &case.solver, progress)?;
+    let (mut potential, reports, rhs_scale) = match gauge {
+        Gauge::MeanZero => {
+            let mut potential = vec![0.0; mesh.nodes.len()];
+            let report = solver.solve(&matrix, &load, &mut potential, &case.solver, progress)?;
+            (potential, vec![report], None)
+        }
+        // 完全電極モデル: 電極の電位を仮に決めた系を重ね合わせる（SPEC §2.5）
+        Gauge::NotNeeded => {
+            let solution = contact::solve_superposition(
+                solver,
+                &matrix,
+                &load,
+                &electrodes,
+                &case.solver,
+                progress,
+            )?;
+            for (e, &u) in electrodes.iter_mut().zip(&solution.terminal_potentials) {
+                e.terminal_potential = u;
+            }
+            (
+                solution.potential,
+                solution.reports,
+                Some(solution.rhs_scale),
+            )
+        }
+    };
     let solve_time = mark.elapsed().as_secs_f64();
 
-    if !report.converged {
+    if let Some(report) = reports.iter().find(|r| !r.converged) {
         let reason = report.failure_reason().unwrap_or_default();
         let kind = if report.cancelled {
             ErrorKind::Cancelled
@@ -515,19 +593,36 @@ fn run_with(
         }));
     }
 
+    let report = if reports.len() == 1 {
+        reports[0].clone()
+    } else {
+        contact::merge_reports(&reports)
+    };
+    let solves: Vec<(usize, f64)> = reports
+        .iter()
+        .map(|r| (r.iterations, r.relative_residual))
+        .collect();
+    drop(reports);
+
     // --- 表示基準の適用（SPEC §2.2 の「基準点の付け替え」）---
-    apply_reference(mesh, &mut potential, &electrodes, case.reference)?;
+    apply_reference(mesh, &mut potential, &mut electrodes, case.reference, gauge)?;
 
     // --- ポスト処理 ---
     let mark = Instant::now();
     let fields = compute_fields(mesh, &case.conductivity, &potential)?;
-    let conservation = check_conservation(
+    // CEM では電極の電位を入れた右辺で離散残差を見る（SPEC §5.4）。付け替えた後の電位で作る
+    let full_rhs = match gauge {
+        Gauge::MeanZero => None,
+        Gauge::NotNeeded => Some(contact::full_rhs(&load, &electrodes)),
+    };
+    let conservation = check_conservation_with(
         &matrix,
-        &load,
+        full_rhs.as_deref().unwrap_or(&load),
         &potential,
         &fields,
         &electrodes,
         case.solver.tolerance,
+        rhs_scale,
     );
     warnings.extend(conservation.warnings.iter().cloned());
     // AMG の最粗レベルを直接解けなかった（SPEC §4.5）。答えは変わらないが、
@@ -550,6 +645,8 @@ fn run_with(
         fields,
         conservation,
         solver: report,
+        solves,
+        gauge,
         electrodes,
         warnings,
         timings: Timings {
@@ -565,15 +662,20 @@ fn run_with(
 /// 電位の基準点を付け替える。
 ///
 /// E と J は基準に依存しないので、この操作は表示のためだけのもの（SPEC §2.2）。
+/// 完全電極モデルの板の電位も同じだけずらす（φ と U を一緒にずらせば、電流も
+/// 保存則チェックも変わらない。SPEC §5.4）。
 fn apply_reference(
     mesh: &Mesh,
     phi: &mut [f64],
-    electrodes: &[ElectrodeGeometry],
+    electrodes: &mut [ElectrodeGeometry],
     reference: ReferencePotential,
+    gauge: Gauge,
 ) -> Result<()> {
     let shift = match reference {
-        // ソルバの射影で既に平均ゼロになっている
-        ReferencePotential::ZeroMean => return Ok(()),
+        // 全 Neumann ならソルバの射影で既に平均ゼロになっている
+        ReferencePotential::ZeroMean if gauge == Gauge::MeanZero => return Ok(()),
+        // 完全電極モデルは基準の電極の板が 0 V で解けているので、平均を落とす
+        ReferencePotential::ZeroMean => crate::solver::reduce::sum(phi) / phi.len().max(1) as f64,
         ReferencePotential::CathodeMean => {
             if !electrodes.iter().any(|e| e.role == ElectrodeRole::Cathode) {
                 return Err(GfemError::new(
@@ -606,6 +708,11 @@ fn apply_reference(
     for v in phi.iter_mut() {
         *v -= shift;
     }
+    for e in electrodes.iter_mut() {
+        if let Some(u) = e.terminal_potential.as_mut() {
+            *u -= shift;
+        }
+    }
     Ok(())
 }
 
@@ -625,6 +732,7 @@ pub fn write_analysis_vtu(
     // 節点値（表示用に平滑化した量）
     let nodal_e = crate::post::nodal_average(mesh, &fields.e_magnitude, volumes, 1);
     let nodal_j = crate::post::nodal_average(mesh, &fields.j_magnitude, volumes, 1);
+    let electrode_j = analysis.electrode_current_density(mesh);
 
     // 要素値。VTU のセルはソリッド → シェルの順なので、シェル側は 0 で埋める
     let cell_e = pad_for_shells(mesh, &fields.electric_field, 3, 0.0);
@@ -642,6 +750,8 @@ pub fn write_analysis_vtu(
             DataArray::scalars_f64("phi [V]", &analysis.potential),
             DataArray::scalars_f64("|E| (nodal) [V/m]", &nodal_e),
             DataArray::scalars_f64("|J| (nodal) [A/m2]", &nodal_j),
+            // 皮膚を通って流れ込む電流密度。電極の外は 0（SPEC §2.5 / §5.5）
+            DataArray::scalars_f64("electrode current density [A/m2]", &electrode_j),
         ],
         cell_data: vec![
             DataArray::vectors_f64("E [V/m]", &cell_e),

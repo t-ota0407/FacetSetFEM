@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import textwrap
 from pathlib import Path
 
 from PySide6.QtCore import QItemSelectionModel, Qt
@@ -114,7 +115,14 @@ def scalar_bar_title(key: str) -> str:
     """
     name, bracket, unit = key.partition(" [")
     name = name.replace("|", "").strip()
+    # 帯に収まる長さ（"power density" の 13 文字）を超える名前は語の切れ目で折り返す
+    # （"electrode current density" は 1 行だと "density" が帯の外に切れた）
+    name = "\n".join(textwrap.wrap(name, width=SCALAR_BAR_TITLE_WIDTH)) or name
     return f"{name}\n[{unit}" if bracket else name
+
+
+#: カラーバーの見出しの 1 行の文字数の上限
+SCALAR_BAR_TITLE_WIDTH = 13
 
 #: 値で色分けしているときの陰影。**色は値を表すので、陰影で色を変えすぎない。**
 #: 形状表示と同じ強い陰影だと、光の当たらない側面が真っ黒に近くなり、同じ値でも
@@ -1130,6 +1138,20 @@ class MainWindow(QMainWindow):
                 n=solution.iterations, r=solution.residual, ohm=solution.impedance,
             )
         )
+        # 完全電極モデルの電極は、板の電位と縁の集中を残す（SPEC §2.5）
+        for e in solution.electrodes:
+            if e["contact_impedance"] is not None:
+                self.log(
+                    "  "
+                    + tr(
+                        "{name}: plate {u:.6g} V, current density into the skin max {peak:.4g} A/m² "
+                        "(mean {mean:.4g} A/m²)",
+                        name=e["name"],
+                        u=e["potential"],
+                        peak=e["peak_current_density"],
+                        mean=abs(e["mean_current_density"]),
+                    )
+                )
         for w in solution.warnings:
             self.log("  " + tr("[Warning] {text}", text=w))
         self.refresh_tree()

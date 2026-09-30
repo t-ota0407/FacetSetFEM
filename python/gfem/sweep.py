@@ -19,7 +19,14 @@
 | `current` | 全電極の電流 [A]。刺激強度を振るのはたいていこれ |
 | `electrode.E1.current` | 電極 `E1` だけの電流 [A] |
 | `electrode.*.current` | `current` と同じ（明示的な書き方） |
+| `contact_impedance` | 全電極の接触インピーダンス [Ω·m²]（全電極が完全電極モデルになる。SPEC §2.5） |
+| `electrode.E1.contact_impedance` | 電極 `E1` だけの接触インピーダンス [Ω·m²]（`E1` が完全電極モデルになる） |
+| `electrode.E1.distribution` | 電極 `E1` の電流の配り方（`uniform_current_density` / `complete_electrode`） |
 | `solver.tolerance` / `solver.backend` / `solver.preconditioner` | ソルバ設定 |
+
+**接触インピーダンスを入れた電極は完全電極モデルになる。** 一様電流密度のケースに
+`contact_impedance` を振ると、「一様電流密度と比べてどれだけ変わるか」をそのまま見られる。
+値の決め方は SPEC §2.5（実測の電極間抵抗に合わせるなら :func:`gfem.fit_contact_impedance`）。
 
 **電極の位置**は面（`shell_pids`）の指定そのものなので、
 `electrode.E1.shell_pids` に PID のリストを並べて振る。
@@ -54,7 +61,7 @@ from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from ._gfem import GfemError, Mesh
 from .i18n import error_text, tr
-from .study import Study
+from .study import COMPLETE, Study
 
 __all__ = ["SweepTable", "sweep"]
 
@@ -191,6 +198,7 @@ def _summarise(solution: Any) -> dict[str, Any]:
     # 配列は取り出すたびに複製されるので 1 度だけ受け取り、numpy で集計する
     # （Python の組み込み max は 1 要素ずつ回るので、大規模モデルで遅い）
     potential = solution.potential
+    electrodes = solution.electrodes
     return {
         "impedance_ohm": solution.impedance,
         "voltage_V": solution.voltage,
@@ -199,6 +207,8 @@ def _summarise(solution: Any) -> dict[str, Any]:
         "e_max_V_per_m": float(solution.e_magnitude.max()),
         "phi_min_V": float(potential.min()),
         "phi_max_V": float(potential.max()),
+        # 皮膚を通って流れ込む電流密度の最大（縁の集中の指標。SPEC §2.5）
+        "contact_j_max_A_per_m2": max(e["peak_current_density"] for e in electrodes),
         "iterations": solution.iterations,
         "residual": solution.residual,
         "backend": solution.backend,
@@ -229,6 +239,10 @@ def _apply(study: Study, name: str, value: Any) -> None:
         _set_electrode(study, "*", "current", value, where)
         return
 
+    if parts[0] == "contact_impedance" and len(parts) == 1:
+        _set_electrode(study, "*", "contact_impedance", value, where)
+        return
+
     if parts[0] == "electrode":
         if len(parts) != 3:
             raise _error(
@@ -254,7 +268,10 @@ def _apply(study: Study, name: str, value: Any) -> None:
     raise _error(
         tr("Don't know how to vary the parameter: {name}", name=name),
         where,
-        tr("Use one of current / sigma.<PID> / electrode.<name>.<item> / solver.<item>"),
+        tr(
+            "Use one of current / contact_impedance / sigma.<PID> / electrode.<name>.<item> "
+            "/ solver.<item>"
+        ),
     )
 
 
@@ -299,11 +316,30 @@ def _set_electrode(study: Study, name: str, field_: str, value: Any, where: str)
             e.element_ids = [int(v) for v in _as_list(value)]
         elif field_ == "role":
             e.role = str(value)
+        elif field_ == "contact_impedance":
+            # 接触インピーダンスを入れた電極は完全電極モデルになる（SPEC §2.5）
+            e.contact_impedance = float(value)
+            e.distribution = COMPLETE
+        elif field_ == "distribution":
+            e.distribution = str(value)
+            if e.is_complete and e.contact_impedance is None:
+                raise _error(
+                    tr("Electrode {name} has no contact impedance", name=e.name),
+                    where,
+                    tr(
+                        "Vary electrode.{name}.contact_impedance together with it, "
+                        "or set the contact impedance in the case first",
+                        name=e.name,
+                    ),
+                )
         else:
             raise _error(
                 tr("No such electrode item: {item}", item=field_),
                 where,
-                tr("Use one of current / shell_pids / element_ids / role"),
+                tr(
+                    "Use one of current / shell_pids / element_ids / role / distribution "
+                    "/ contact_impedance"
+                ),
             )
 
 

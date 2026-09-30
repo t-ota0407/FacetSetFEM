@@ -52,6 +52,88 @@ impl ElectrodeRole {
     }
 }
 
+/// 電極のモデル（電流の配り方）。ケースファイルの `distribution`（SPEC §3.3）。
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum ElectrodeModel {
+    /// 一様電流密度（面積按分。SPEC §2.4）。既定
+    #[default]
+    UniformCurrentDensity,
+    /// 完全電極モデル（SPEC §2.5）。板は等電位で、皮膚との境目に接触インピーダンスがある
+    Complete {
+        /// 接触インピーダンス z [Ω·m²]（面積あたりの抵抗。正の有限値）
+        contact_impedance: f64,
+    },
+}
+
+impl ElectrodeModel {
+    /// ケースファイルと GUI の選択肢（Python は `gfem.distribution_choices()` で引く。SPEC §6.5）。
+    pub const CHOICES: [&'static str; 2] = ["uniform_current_density", "complete_electrode"];
+
+    /// ケースファイルの名前。
+    pub const fn label(self) -> &'static str {
+        match self {
+            ElectrodeModel::UniformCurrentDensity => "uniform_current_density",
+            ElectrodeModel::Complete { .. } => "complete_electrode",
+        }
+    }
+
+    /// 接触インピーダンス [Ω·m²]。一様電流密度なら `None`。
+    pub const fn contact_impedance(self) -> Option<f64> {
+        match self {
+            ElectrodeModel::UniformCurrentDensity => None,
+            ElectrodeModel::Complete { contact_impedance } => Some(contact_impedance),
+        }
+    }
+
+    /// 名前と接触インピーダンスから組み立てる。
+    ///
+    /// `complete_electrode` には接触インピーダンスが必須で、`uniform_current_density` に
+    /// 渡すとエラーにする（書いた値が黙って使われないのを避ける。SPEC §3.3）。
+    /// 値そのものの範囲は [`Case::validate`] が確かめる。
+    pub fn parse(name: &str, contact_impedance: Option<f64>) -> Result<Self> {
+        match (name, contact_impedance) {
+            ("uniform_current_density", None) => Ok(ElectrodeModel::UniformCurrentDensity),
+            ("uniform_current_density", Some(_)) => Err(GfemError::new(
+                ErrorKind::Case,
+                crate::tr!(
+                    "contact_impedance is given, but the current distribution is uniform_current_density",
+                    "contact_impedance が指定されていますが、電流の配り方が uniform_current_density です"
+                ),
+            )
+            .with_hint(crate::tr!(
+                "The contact impedance is used only by complete_electrode (SPEC §2.5).                  Either set distribution: complete_electrode or remove contact_impedance",
+                "接触インピーダンスを使うのは complete_electrode だけです（SPEC §2.5）。                 distribution: complete_electrode にするか、contact_impedance を消してください"
+            ))),
+            ("complete_electrode", Some(z)) => Ok(ElectrodeModel::Complete {
+                contact_impedance: z,
+            }),
+            ("complete_electrode", None) => Err(GfemError::new(
+                ErrorKind::Case,
+                crate::tr!(
+                    "complete_electrode needs a contact impedance, but none is given",
+                    "complete_electrode には接触インピーダンスが必要ですが、指定されていません"
+                ),
+            )
+            .with_hint(crate::tr!(
+                "Give contact_impedance in Ω·m² (e.g. 0.01). Fitting it to the measured                  inter-electrode resistance is the most reliable way (SPEC §2.5)",
+                "contact_impedance を Ω·m² で指定してください（例: 0.01）。                 実測の電極間抵抗に合わせて決めるのが確実です（SPEC §2.5）"
+            ))),
+            (other, _) => Err(GfemError::new(
+                ErrorKind::Case,
+                crate::tr!(
+                    "Unknown current distribution: \"{other}\"",
+                    "未知の電流の配り方です: \"{other}\""
+                ),
+            )
+            .with_hint(crate::tr!(
+                "Choose one of {}",
+                "{} のどれかを指定してください",
+                Self::CHOICES.join(" / ")
+            ))),
+        }
+    }
+}
+
 /// 体表面に置く電極パッチ 1 枚（SPEC §3.3 / §11.1）。
 ///
 /// **シェル要素を持たないモデルのための指定方法。** 人体モデルはソリッド要素だけで
@@ -262,6 +344,8 @@ pub struct Electrode {
     pub added_faces: Vec<FaceRef>,
     /// 手で外した体表面の面。パッチや `added_faces` より優先する
     pub removed_faces: Vec<FaceRef>,
+    /// 電流の配り方（SPEC §2.4 / §2.5）
+    pub model: ElectrodeModel,
 }
 
 impl Electrode {
@@ -285,6 +369,7 @@ impl Electrode {
             patches: Vec::new(),
             added_faces: Vec::new(),
             removed_faces: Vec::new(),
+            model: ElectrodeModel::default(),
         }
     }
 
@@ -315,6 +400,12 @@ impl Electrode {
     /// 手で外した面。
     pub fn with_removed_faces(mut self, faces: impl IntoIterator<Item = FaceRef>) -> Self {
         self.removed_faces.extend(faces);
+        self
+    }
+
+    /// 完全電極モデルにする（SPEC §2.5）。`contact_impedance` は Ω·m²。
+    pub fn with_contact_impedance(mut self, contact_impedance: f64) -> Self {
+        self.model = ElectrodeModel::Complete { contact_impedance };
         self
     }
 
@@ -564,6 +655,13 @@ impl Case {
         self.electrodes.push(electrode);
     }
 
+    /// 完全電極モデルの電極が 1 つでもあるか（あれば行列が正則になる。SPEC §2.5）。
+    pub fn has_complete_electrodes(&self) -> bool {
+        self.electrodes
+            .iter()
+            .any(|e| matches!(e.model, ElectrodeModel::Complete { .. }))
+    }
+
     /// 陽極の総電流 [A]。
     pub fn total_anode_current(&self) -> f64 {
         self.sum_current(ElectrodeRole::Anode)
@@ -785,6 +883,28 @@ impl Case {
                         "Give the total current as a positive value and express its direction \
                          with role (anode / cathode)",
                         "総電流は正の値で指定し、向きは role（anode / cathode）で表してください"
+                    )),
+                );
+            }
+        }
+
+        for e in &self.electrodes {
+            if let ElectrodeModel::Complete { contact_impedance } = e.model
+                && !(contact_impedance.is_finite() && contact_impedance > 0.0)
+            {
+                problems.push(
+                    GfemError::new(
+                        ErrorKind::Case,
+                        crate::tr!(
+                            "The contact impedance of electrode {} is not a positive finite value: {} Ω·m²",
+                            "電極 {} の接触インピーダンスが正の有限値ではありません: {} Ω·m²",
+                            e.name,
+                            contact_impedance
+                        ),
+                    )
+                    .with_hint(crate::tr!(
+                        "Give the contact impedance as a positive value in Ω·m² (SPEC §2.5).                          For an ideal equipotential electrode use a small positive value instead of 0",
+                        "接触インピーダンスは Ω·m² の正の値で指定してください（SPEC §2.5）。                         理想的な等電位電極にしたいときは、0 ではなく小さな正の値にしてください"
                     )),
                 );
             }

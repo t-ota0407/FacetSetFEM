@@ -27,8 +27,16 @@
 //! 確保しようとしてプロセスごと落ちるか、O(n³) の分解で何時間も止まる。
 //! [`MAX_DIRECT_SIZE`] を超えたら分解せず、呼び出し側の平滑化による代用に任せる
 //! （反復回数は増えるが答えは変わらない。実行サマリに `direct_coarse_solve: false` が残る）。
+//!
+//! # 正則な系（完全電極モデル。SPEC §2.5 / §4.5）
+//!
+//! 接触インピーダンスの項が入ると行列は正則になり、`A_c b_c = 0` は成り立たない。
+//! そこへ `c b_c b_cᵀ` を足すと別の行列を解くことになり、解いた後に `b_c` 成分を落とすと
+//! 前処理が正定値でなくなる（CG が破綻する）。[`Gauge::NotNeeded`] のときは `A_c` を
+//! そのまま分解し、成分も落とさない。
 
 use crate::assemble::csr::CsrMatrix;
+use crate::solver::cg::Gauge;
 
 /// 密 Cholesky で分解する最粗レベルの上限（節点数）。
 ///
@@ -45,22 +53,29 @@ pub struct CoarseSolver {
     nullspace: Vec<f64>,
     /// ‖b‖²
     null_norm2: f64,
+    /// 零空間方向の rank-1 項で正則化し、解の `b` 成分を落とすか（特異な系のときだけ）
+    deflate: bool,
     /// Cholesky に成功したか。失敗したら呼び出し側は平滑化で代用する
     direct: bool,
 }
 
 impl CoarseSolver {
     /// 分解する。失敗しても panic せず、[`is_direct`](Self::is_direct) が `false` になる。
-    pub fn factor(a: &CsrMatrix, nullspace: &[f64]) -> Self {
+    ///
+    /// `gauge` が [`Gauge::MeanZero`] なら `A_c` は特異（零空間 span{b}）として扱い、
+    /// [`Gauge::NotNeeded`] なら正則としてそのまま分解する（モジュールの説明を参照）。
+    pub fn factor(a: &CsrMatrix, nullspace: &[f64], gauge: Gauge) -> Self {
         let n = a.n_rows();
+        let deflate = gauge == Gauge::MeanZero;
         let mut solver = Self {
             n,
             l: Vec::new(),
             nullspace: nullspace.to_vec(),
             null_norm2: nullspace.iter().map(|v| v * v).sum(),
+            deflate,
             direct: false,
         };
-        if n == 0 || n > MAX_DIRECT_SIZE || solver.null_norm2 == 0.0 {
+        if n == 0 || n > MAX_DIRECT_SIZE || (deflate && solver.null_norm2 == 0.0) {
             return solver;
         }
 
@@ -79,10 +94,12 @@ impl CoarseSolver {
         if trace <= 0.0 || !trace.is_finite() {
             return solver;
         }
-        let c = (trace / n as f64) / solver.null_norm2;
-        for i in 0..n {
-            for j in 0..n {
-                m[i * n + j] += c * nullspace[i] * nullspace[j];
+        if deflate {
+            let c = (trace / n as f64) / solver.null_norm2;
+            for i in 0..n {
+                for j in 0..n {
+                    m[i * n + j] += c * nullspace[i] * nullspace[j];
+                }
             }
         }
 
@@ -122,7 +139,7 @@ impl CoarseSolver {
         self.n
     }
 
-    /// `A_c x = rhs` の擬似逆行列解（`b_c` 成分を落とした代表元）。
+    /// `A_c x = rhs` の擬似逆行列解（特異な系では `b_c` 成分を落とした代表元、正則な系では解そのもの）。
     ///
     /// [`is_direct`](Self::is_direct) が `false` のときは何もしない。
     // 三角行列の前進・後退代入は「既に求めた成分を添字で引く」形が自然で、
@@ -151,6 +168,9 @@ impl CoarseSolver {
                 s -= self.l[k * n + i] * out[k];
             }
             out[i] = s / self.l[i * n + i];
+        }
+        if !self.deflate {
+            return;
         }
         // 零空間成分を落として代表元を揃える
         let mut proj = 0.0;
@@ -201,7 +221,7 @@ mod tests {
         let n = 40;
         let a = laplacian_1d(n);
         let b = vec![1.0; n];
-        let solver = CoarseSolver::factor(&a, &b);
+        let solver = CoarseSolver::factor(&a, &b, Gauge::MeanZero);
         assert!(solver.is_direct());
 
         // 零空間に直交する右辺
@@ -231,7 +251,7 @@ mod tests {
         let n = 30;
         let a = laplacian_1d(n);
         let b = vec![1.0; n];
-        let solver = CoarseSolver::factor(&a, &b);
+        let solver = CoarseSolver::factor(&a, &b, Gauge::MeanZero);
         let rhs: Vec<f64> = (0..n).map(|i| (i as f64).sin()).collect();
         let mut first = vec![0.0; n];
         solver.solve(&rhs, &mut first);
@@ -248,7 +268,7 @@ mod tests {
         // 確保しに行かない（以前は大きさを見ずに展開していた）
         let n = MAX_DIRECT_SIZE + 1;
         let a = laplacian_1d(n);
-        let solver = CoarseSolver::factor(&a, &vec![1.0; n]);
+        let solver = CoarseSolver::factor(&a, &vec![1.0; n], Gauge::MeanZero);
         assert!(!solver.is_direct());
         assert_eq!(solver.n(), n);
         assert!(solver.l.is_empty(), "密行列を確保している");
@@ -260,10 +280,38 @@ mod tests {
         let col_idx = vec![0, 1];
         let mut m = CsrMatrix::from_structure(2, row_ptr, col_idx);
         m.values_mut().copy_from_slice(&[-1.0, -1.0]);
-        let solver = CoarseSolver::factor(&m, &[1.0, 1.0]);
+        let solver = CoarseSolver::factor(&m, &[1.0, 1.0], Gauge::MeanZero);
         assert!(!solver.is_direct());
         let mut out = vec![9.0; 2];
         solver.solve(&[1.0, 1.0], &mut out);
         assert_eq!(out, vec![0.0, 0.0]);
+    }
+
+    #[test]
+    fn a_regular_system_is_solved_as_it_is() {
+        // 完全電極モデル（SPEC §2.5）の粗い行列を模して、両端にだけ正の対角を足す。
+        // 零空間方向の項を足したり b 成分を落としたりすると、ここで答えがずれる
+        let n = 25;
+        let mut a = laplacian_1d(n);
+        let (row_ptr, col_idx, values) = a.parts_mut();
+        for i in [0, n - 1] {
+            let k = (row_ptr[i]..row_ptr[i + 1])
+                .find(|&k| col_idx[k] as usize == i)
+                .unwrap();
+            values[k] += 0.3;
+        }
+        let solver = CoarseSolver::factor(&a, &vec![1.0; n], Gauge::NotNeeded);
+        assert!(solver.is_direct());
+        let rhs: Vec<f64> = (0..n).map(|i| 1.0 + (i as f64).cos()).collect();
+        let mut x = vec![0.0; n];
+        solver.solve(&rhs, &mut x);
+        let mut ax = vec![0.0; n];
+        a.spmv(&x, &mut ax);
+        let worst = ax
+            .iter()
+            .zip(&rhs)
+            .map(|(p, q)| (p - q).abs())
+            .fold(0.0f64, f64::max);
+        assert!(worst < 1e-10, "残差 {worst}");
     }
 }

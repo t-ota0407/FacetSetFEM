@@ -18,8 +18,8 @@
 mod cuda;
 
 use gfem_core::case::{
-    Backend, Electrode, ElectrodeRole, FaceLookup, FaceRef, PatchShape, Preconditioner, RectShape,
-    ReferencePotential, SurfaceIndex, SurfacePatch,
+    Backend, Electrode, ElectrodeModel, ElectrodeRole, FaceLookup, FaceRef, PatchShape,
+    Preconditioner, RectShape, ReferencePotential, SurfaceIndex, SurfacePatch,
 };
 use gfem_core::mesh::streamline::{TraceDirection, TraceOptions};
 use gfem_core::mesh::{Plane, TriangleMesh};
@@ -855,9 +855,14 @@ impl PyCase {
     /// case.add_electrode("E1", role="anode", current=2e-3,
     ///                    patches=[{"center": [0.0, 1.76, 0.02], "radius": 0.025, "pid": 51}])
     /// ```
+    ///
+    /// `distribution` は `"uniform_current_density"`（既定。SPEC §2.4）か
+    /// `"complete_electrode"`（完全電極モデル。SPEC §2.5）。後者には
+    /// `contact_impedance`（接触インピーダンス [Ω·m²]）が必須。
     #[pyo3(signature = (
         name, role, current,
-        shell_pids = None, element_ids = None, patches = None, added = None, removed = None
+        shell_pids = None, element_ids = None, patches = None, added = None, removed = None,
+        distribution = None, contact_impedance = None
     ))]
     #[allow(clippy::too_many_arguments)] // Python 側の名前つき引数に合わせる
     fn add_electrode(
@@ -870,8 +875,10 @@ impl PyCase {
         patches: Option<Vec<Bound<'_, PyAny>>>,
         added: Option<Vec<(u32, u8)>>,
         removed: Option<Vec<(u32, u8)>>,
+        distribution: Option<&str>,
+        contact_impedance: Option<f64>,
     ) -> PyResult<()> {
-        let electrode = build_electrode(
+        let mut electrode = build_electrode(
             name,
             parse_role(role)?,
             current,
@@ -881,6 +888,11 @@ impl PyCase {
             added,
             removed,
         )?;
+        electrode.model = ElectrodeModel::parse(
+            distribution.unwrap_or(ElectrodeModel::UniformCurrentDensity.label()),
+            contact_impedance,
+        )
+        .map_err(to_py)?;
         self.inner.add_electrode(electrode);
         Ok(())
     }
@@ -980,12 +992,14 @@ impl PyCase {
         let list = PyList::empty(py);
         for g in geometries {
             let d = PyDict::new(py);
-            d.set_item("name", g.name)?;
+            d.set_item("name", &g.name)?;
             d.set_item("role", g.role.label())?;
             d.set_item("current", g.signed_current)?;
             d.set_item("n_faces", g.n_faces)?;
             d.set_item("area", g.area)?;
             d.set_item("current_density", g.current_density)?;
+            d.set_item("distribution", g.model.label())?;
+            d.set_item("contact_impedance", g.contact_impedance())?;
             list.append(d)?;
         }
         Ok(list.unbind())
@@ -1279,10 +1293,68 @@ impl PySolution {
         self.inner.conservation.power_from_field
     }
 
-    /// 電極ごとの面積重み平均電位 [V]。
+    /// 電極ごとの電位 [V]。一様電流密度は面積重み平均電位、完全電極モデルは板の電位（SPEC §5.3）。
     #[getter]
     fn electrode_potentials(&self) -> Vec<(String, f64)> {
         self.inner.conservation.electrode_potentials.clone()
+    }
+
+    /// 電極ごとの状態（SPEC §2.5 / §5.5）。
+    ///
+    /// 辞書の項目: `name` / `role` / `distribution` / `contact_impedance`（Ω·m²。一様電流密度は
+    /// `None`）/ `current`（指定した流入電流 [A]。陰極は負）/ `current_from_field`（φ から求め直した
+    /// 電流）/ `area` [m²] / `n_faces` / `potential`（電極の電位 [V]）/ `mean_surface_potential`
+    /// （電極の下の皮膚の平均電位）/ `mean_current_density`（I/A）/ `peak_current_density`
+    /// （皮膚を通って流れ込む電流密度の最大 [A/m²]）/ `contact_power`（接触面の消費電力 [W]）。
+    #[getter]
+    fn electrodes(&self, py: Python<'_>) -> PyResult<Py<PyList>> {
+        let list = PyList::empty(py);
+        for (e, state) in self
+            .inner
+            .electrodes
+            .iter()
+            .zip(self.inner.electrode_states())
+        {
+            let d = PyDict::new(py);
+            d.set_item("name", &e.name)?;
+            d.set_item("role", e.role.label())?;
+            d.set_item("distribution", e.model.label())?;
+            d.set_item("contact_impedance", e.contact_impedance())?;
+            d.set_item("current", e.signed_current)?;
+            d.set_item("current_from_field", state.current)?;
+            d.set_item("area", e.area)?;
+            d.set_item("n_faces", e.n_faces)?;
+            d.set_item("potential", state.potential)?;
+            d.set_item("mean_surface_potential", state.mean_surface_potential)?;
+            d.set_item("mean_current_density", e.current_density)?;
+            d.set_item("peak_current_density", state.peak_current_density)?;
+            d.set_item("contact_power", state.contact_power)?;
+            list.append(d)?;
+        }
+        Ok(list.unbind())
+    }
+
+    /// 電極面の節点ごとの、皮膚を通って流れ込む電流密度 [A/m²]（流入を正、電極の外は 0。SPEC §5.5）。
+    ///
+    /// 完全電極モデルは `(U − φ)/z`、一様電流密度は `I/A`。呼ぶたびに作る（複製ではない）。
+    #[getter]
+    fn electrode_current_density<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
+        array1(
+            py,
+            self.inner.electrode_current_density(&self.mesh.get().inner),
+        )
+    }
+
+    /// 解いた系の数（重ね合わせで何度か解いたときは 2 以上。SPEC §2.5）。
+    #[getter]
+    fn n_solves(&self) -> usize {
+        self.inner.solves.len()
+    }
+
+    /// 右辺ごとの `(反復回数, 相対残差)`（解いた順）。
+    #[getter]
+    fn solves(&self) -> Vec<(usize, f64)> {
+        self.inner.solves.clone()
     }
 
     /// CG の反復回数。
@@ -1339,7 +1411,9 @@ impl PySolution {
         let c = &self.inner.conservation;
         let d = PyDict::new(py);
         d.set_item("current_balance", c.current_balance)?;
+        d.set_item("electrode_current_error", c.electrode_current_error)?;
         d.set_item("power_from_field", c.power_from_field)?;
+        d.set_item("contact_power", c.contact_power)?;
         d.set_item("power_from_load", c.power_from_load)?;
         d.set_item("energy_relative_error", c.energy_relative_error)?;
         d.set_item("discrete_residual", c.discrete_residual)?;
@@ -1613,6 +1687,7 @@ fn build_electrode(
             removed,
             gfem_core::tr!("manually removed faces", "手で外した面"),
         )?,
+        model: ElectrodeModel::default(),
     })
 }
 
@@ -1954,6 +2029,12 @@ fn preconditioner_choices() -> Vec<&'static str> {
     Preconditioner::CHOICES.to_vec()
 }
 
+/// 電極の電流の配り方の選択肢（ケースファイルの `distribution`。SPEC §3.3）。
+#[pyfunction]
+fn distribution_choices() -> Vec<&'static str> {
+    ElectrodeModel::CHOICES.to_vec()
+}
+
 /// バックエンド名を解釈して記録用の名前を返す。解釈できなければ `GfemError`。
 ///
 /// 別名の表は Rust 側にしかないので、ケースファイルの検査もここを通す。
@@ -2039,6 +2120,7 @@ fn _gfem(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(language, m)?)?;
     m.add_function(wrap_pyfunction!(backend_choices, m)?)?;
     m.add_function(wrap_pyfunction!(preconditioner_choices, m)?)?;
+    m.add_function(wrap_pyfunction!(distribution_choices, m)?)?;
     m.add_function(wrap_pyfunction!(parse_backend, m)?)?;
     m.add_function(wrap_pyfunction!(parse_preconditioner, m)?)?;
     m.add_function(wrap_pyfunction!(check_patch, m)?)?;

@@ -18,7 +18,7 @@ use crate::assemble::csr::CsrMatrix;
 use crate::case::SolverOptions;
 use crate::error::Result;
 use crate::solver::backend::LinearBackend;
-use crate::solver::cg::{self, CgReport, ProgressFn};
+use crate::solver::cg::{self, CgReport, Gauge, ProgressFn};
 
 /// 線形システムを解くもの。オブジェクト安全な、バックエンドの外向きの顔。
 pub trait LinearSolver {
@@ -34,6 +34,18 @@ pub trait LinearSolver {
         options: &SolverOptions,
         progress: Option<ProgressFn<'_>>,
     ) -> Result<CgReport>;
+
+    /// 同じ行列で右辺を替えて順に解く。契約は [`cg::solve_many`] と同じ
+    /// （完全電極モデルの重ね合わせ。SPEC §2.5 / §4.3）。
+    fn solve_many(
+        &self,
+        matrix: &CsrMatrix,
+        rhs: &[&[f64]],
+        solutions: &mut [&mut [f64]],
+        options: &SolverOptions,
+        gauge: Gauge,
+        progress: Option<ProgressFn<'_>>,
+    ) -> Result<Vec<CgReport>>;
 }
 
 /// 任意の [`LinearBackend`] を [`LinearSolver`] にする包み。
@@ -56,5 +68,17 @@ impl<B: LinearBackend> LinearSolver for BackendSolver<B> {
         progress: Option<ProgressFn<'_>>,
     ) -> Result<CgReport> {
         cg::solve(&self.0, matrix, rhs, phi, options, progress)
+    }
+
+    fn solve_many(
+        &self,
+        matrix: &CsrMatrix,
+        rhs: &[&[f64]],
+        solutions: &mut [&mut [f64]],
+        options: &SolverOptions,
+        gauge: Gauge,
+        progress: Option<ProgressFn<'_>>,
+    ) -> Result<Vec<CgReport>> {
+        cg::solve_many(&self.0, matrix, rhs, solutions, options, gauge, progress)
     }
 }

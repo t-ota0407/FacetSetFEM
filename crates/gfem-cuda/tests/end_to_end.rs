@@ -129,6 +129,89 @@ fn gpu_and_cpu_solve_bitwise_identically() {
 }
 
 #[test]
+fn gpu_and_cpu_agree_bitwise_with_complete_electrodes() {
+    // 完全電極モデル（SPEC §2.5）: 射影なしの CG・前処理の使い回し・重ね合わせも
+    // バックエンドの演算とホストの逐次計算だけなので、1 ビットも変わってはいけない。
+    // 陰極を 2 枚にして、右辺を 2 本（前処理を使い回す経路）にする
+    let solver = BackendSolver(gpu_or_skip!());
+    let xs = common::linear_grid(0.0, LX, 20);
+    let ys = common::linear_grid(0.0, LY, 14);
+    let zs = common::linear_grid(0.0, 0.02, 11);
+    let mesh = common::box_mesh(
+        &xs,
+        &ys,
+        &zs,
+        &[3; 11],
+        &[
+            common::Patch {
+                pid: TOP_PID,
+                x: [0.02, 0.04],
+                y: [0.01, 0.03],
+                top: true,
+            },
+            common::Patch {
+                pid: 401,
+                x: [0.0, 0.025],
+                y: [0.0, LY],
+                top: false,
+            },
+            common::Patch {
+                pid: 402,
+                x: [0.035, LX],
+                y: [0.0, LY],
+                top: false,
+            },
+        ],
+    );
+    for preconditioner in [Preconditioner::Jacobi, Preconditioner::Amg] {
+        let mut case = Case::new();
+        case.set_conductivity(3, 0.35).unwrap();
+        case.add_electrode(
+            Electrode::anode("A", CURRENT)
+                .with_shell_pids([TOP_PID])
+                .with_contact_impedance(1.0e-3),
+        );
+        case.add_electrode(
+            Electrode::cathode("C1", 0.5 * CURRENT)
+                .with_shell_pids([401])
+                .with_contact_impedance(2.0e-3),
+        );
+        case.add_electrode(
+            Electrode::cathode("C2", 0.5 * CURRENT)
+                .with_shell_pids([402])
+                .with_contact_impedance(2.0e-3),
+        );
+        case.solver = SolverOptions {
+            tolerance: 1.0e-12,
+            max_iterations: 100_000,
+            preconditioner,
+            backend: Backend::CpuSerial,
+            ..Default::default()
+        };
+        let serial = solve_with(&mesh, &case, None, None).unwrap();
+        let cuda = solve_with(&mesh, &case, None, Some(&solver)).unwrap();
+        assert_eq!(cuda.solver.backend, "cuda");
+        assert_eq!(serial.solves.len(), 2);
+        assert_eq!(
+            serial.solves, cuda.solves,
+            "{preconditioner:?}: 右辺ごとの反復"
+        );
+        assert_identical(&serial, &cuda);
+        let us: Vec<_> = serial
+            .electrodes
+            .iter()
+            .map(|e| e.terminal_potential)
+            .collect();
+        let uc: Vec<_> = cuda
+            .electrodes
+            .iter()
+            .map(|e| e.terminal_potential)
+            .collect();
+        assert_eq!(us, uc, "{preconditioner:?}: 板の電位");
+    }
+}
+
+#[test]
 fn gpu_and_cpu_agree_bitwise_with_amg_too() {
     // AMG の V サイクルはバックエンドの演算しか使わないので、
     // CPU 逐次・CPU 並列・GPU で 1 ビットも変わってはいけない（CLAUDE.md 設計原則 1）。
@@ -471,4 +554,68 @@ fn ten_million_nodes_with_amg() {
         analysis.impedance()
     );
     assert!(error < 1e-6, "R の相対誤差 {error}");
+}
+
+#[test]
+#[ignore = "重い（1000 万節点・VRAM 十数 GB）。--ignored で実行する"]
+fn ten_million_nodes_with_complete_electrodes() {
+    // 完全電極モデル（SPEC §2.5）で同じ 1000 万節点を解く。電極 2 枚とも CEM なら右辺は 1 本で、
+    // 一様電流密度（ten_million_nodes_with_amg）と同じ手間に収まるはず。
+    // 上下面が丸ごと電極なので 1 次元の直列抵抗 R = Σ t/(σA) + 2z/A と比べられる
+    use std::time::Instant;
+    let gpu = gpu_or_skip!();
+    let mesh = slab(410, 273, 8);
+    let n = mesh.nodes.len();
+    assert!(n >= 10_000_000, "節点数が足りません: {n}");
+
+    let z = 0.01; // Ω·m²
+    let mut case = Case::new();
+    for (pid, _t, sigma, _d) in LAYERS {
+        case.set_conductivity(pid, sigma).unwrap();
+    }
+    case.add_electrode(
+        Electrode::anode("top", CURRENT)
+            .with_shell_pids([TOP_PID])
+            .with_contact_impedance(z),
+    );
+    case.add_electrode(
+        Electrode::cathode("bottom", CURRENT)
+            .with_shell_pids([BOTTOM_PID])
+            .with_contact_impedance(z),
+    );
+    case.solver = SolverOptions {
+        tolerance: 1.0e-9,
+        max_iterations: 100_000,
+        preconditioner: Preconditioner::Amg,
+        backend: Backend::Cuda,
+        ..Default::default()
+    };
+
+    let t = Instant::now();
+    let analysis = solve_with(&mesh, &case, None, Some(&BackendSolver(gpu))).unwrap();
+    let elapsed = t.elapsed().as_secs_f64();
+    println!(
+        "GPU + AMG + CEM {elapsed:.1} 秒（準備 {:.1} / アセンブリ {:.1} / CG {:.1}（うち階層 {:.1}） / ポスト {:.1}）, {} 反復",
+        analysis.timings.prepare,
+        analysis.timings.assemble,
+        analysis.timings.solve,
+        analysis.solver.setup_seconds,
+        analysis.timings.post,
+        analysis.solver.iterations
+    );
+    assert_eq!(analysis.solves.len(), 1);
+    assert!(
+        analysis.conservation.is_clean(),
+        "{:?}",
+        analysis.conservation.warnings
+    );
+    let area = LX * LY;
+    let body: f64 = LAYERS.iter().map(|&(_, t, s, _)| t / (s * area)).sum();
+    let expected = body + 2.0 * z / area;
+    let rel = (analysis.impedance() - expected).abs() / expected;
+    println!(
+        "R = {:.6} Ω（期待 {expected:.6} Ω、相対誤差 {rel:.2e}）",
+        analysis.impedance()
+    );
+    assert!(rel < 1e-6, "R の相対誤差 {rel:.2e}");
 }

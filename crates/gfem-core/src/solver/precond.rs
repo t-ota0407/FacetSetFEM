@@ -11,6 +11,7 @@ use crate::error::{GfemError, Result};
 use crate::solver::amg::cycle::DeviceHierarchy;
 use crate::solver::amg::{self, AmgInfo, Hierarchy};
 use crate::solver::backend::LinearBackend;
+use crate::solver::cg::Gauge;
 
 /// バックエンドに載せた前処理。
 pub enum DevicePreconditioner<'h, B: LinearBackend> {
@@ -63,13 +64,14 @@ impl<'h, B: LinearBackend> DevicePreconditioner<'h, B> {
 ///
 /// バックエンドを一切使わないので、**CPU 逐次・CPU 並列・GPU のどれで解いても
 /// まったく同じ階層になる**（CLAUDE.md 設計原則 1）。`preconditioner: amg`
-/// 以外では `None` を返す。
+/// 以外では `None` を返す。`gauge` は解く系が特異かどうか（SPEC §4.5）。
 pub fn build_hierarchy<'a>(
     matrix: &'a CsrMatrix,
     options: &SolverOptions,
+    gauge: Gauge,
 ) -> Result<Option<Hierarchy<'a>>> {
     match options.preconditioner {
-        Preconditioner::Amg => Ok(Some(amg::setup(matrix, &options.amg)?)),
+        Preconditioner::Amg => Ok(Some(amg::setup_with(matrix, &options.amg, gauge)?)),
         _ => Ok(None),
     }
 }

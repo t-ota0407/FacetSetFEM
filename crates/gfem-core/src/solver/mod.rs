@@ -16,6 +16,6 @@ pub mod reduce;
 
 pub use amg::{AmgInfo, AmgOptions, Hierarchy};
 pub use backend::{CpuParallel, CpuSerial, LinearBackend};
-pub use cg::{CgReport, ProgressFn};
+pub use cg::{CgReport, Gauge, ProgressFn};
 pub use external::{BackendSolver, LinearSolver};
 pub use precond::DevicePreconditioner;

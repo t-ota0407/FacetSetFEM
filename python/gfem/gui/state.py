@@ -87,6 +87,12 @@ DISPLAY_FIELDS: list[DisplayField] = [
         "point",
         iso_quantity="j_magnitude",
     ),
+    # 皮膚を通って電極から流れ込む電流密度。電極の外は 0（SPEC §2.5 / §5.5）
+    DisplayField(
+        "electrode current density [A/m2]",
+        N_("Current density into the skin at the electrodes [A/m²]"),
+        "point",
+    ),
 ]
 
 
@@ -102,6 +108,7 @@ FIELD_ARRAYS = {
     "power density [W/m3]": lambda r: r.power_density,
     "|E| (nodal) [V/m]": lambda r: r.nodal_average("e_magnitude"),
     "|J| (nodal) [A/m2]": lambda r: r.nodal_average("j_magnitude"),
+    "electrode current density [A/m2]": lambda r: r.electrode_current_density,
 }
 
 
@@ -197,6 +204,8 @@ def _electrode_changes(old: list[ElectrodeSpec], new: list[ElectrodeSpec]) -> li
             what.append(tr("faces"))
         if a.distribution != b.distribution:
             what.append(tr("load distribution"))
+        elif a.is_complete and a.contact_impedance != b.contact_impedance:
+            what.append(tr("contact impedance"))
         return what
 
     def changed(name: str, what: list[str]) -> str:
@@ -1410,6 +1419,27 @@ class Session:
         )
         if reference:
             lines.append("  " + tr("(potential reference: {what} = 0 V)", what=tr(reference)))
+        # 完全電極モデルの電極（SPEC §2.5）。電位は板の電位なので、皮膚の電位と縁の集中も出す
+        complete = [e for e in result.electrodes if e["contact_impedance"] is not None]
+        if complete:
+            lines += ["", tr("Complete electrode model (SPEC §2.5):")]
+            for e in complete:
+                lines.append(
+                    "  "
+                    + tr(
+                        "{name}: z = {z:.4g} Ω·cm², plate {u:.6g} V, skin mean {s:.6g} V, "
+                        "current density into the skin max {peak:.4g} A/m² (mean {mean:.4g} A/m²)",
+                        name=e["name"],
+                        z=e["contact_impedance"] * 1e4,
+                        u=e["potential"],
+                        s=e["mean_surface_potential"],
+                        peak=e["peak_current_density"],
+                        mean=abs(e["mean_current_density"]),
+                    )
+                )
+            lines.append(
+                "  " + tr("Power lost at the contacts: {p:.6g} W", p=c["contact_power"])
+            )
         lines += [
             "",
             tr("Conservation checks (SPEC §5.4):"),
@@ -1418,6 +1448,14 @@ class Session:
             "  " + tr("Energy balance relative error: {v:.3e}", v=c["energy_relative_error"]),
             "  " + tr("Discrete residual ‖Kφ−f‖/‖f‖: {v:.3e}", v=c["discrete_residual"]),
         ]
+        if complete:
+            lines.append(
+                "  "
+                + tr(
+                    "Largest deviation of the electrode currents from the settings: {v:.3e}",
+                    v=c["electrode_current_error"],
+                )
+            )
         warnings = list(c["warnings"]) + [
             w for w in result.warnings if w not in c["warnings"]
         ]

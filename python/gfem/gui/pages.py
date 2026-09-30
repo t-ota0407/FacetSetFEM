@@ -69,6 +69,16 @@ PATCH_SHAPES = [
     (N_("Rectangle (rounded corners allowed)"), "rect"),
 ]
 
+#: 電極のモデル（表示名, ケースファイルの distribution。SPEC §2.4 / §2.5）
+ELECTRODE_MODELS = [
+    (N_("Uniform current density"), "uniform_current_density"),
+    (N_("Complete electrode model"), "complete_electrode"),
+]
+
+#: 完全電極モデルに初めて切り替えたときの接触インピーダンス [Ω·cm²]（= 0.01 Ω·m²）。
+#: 入力欄を埋めるための仮の値で、推奨値ではない（SPEC §6.2 の手順 3）
+DEFAULT_CONTACT_IMPEDANCE_OHM_CM2 = 100.0
+
 #: 指定面積と実際の面積がずれているときの説明（SPEC §11.1）
 AREA_MISMATCH_HINT = N_(
     "The area of the selected faces differs from the nominal area by {limit:.0%} or more. "
@@ -300,9 +310,37 @@ class ElectrodePage(ScrollPage):
         self.current_spin.setDecimals(4)
         self.current_spin.setRange(0.0, 1.0e6)
         self.current_spin.setSuffix(" mA")
+        # 電極のモデル（SPEC §2.5）。接触インピーダンスは文献に合わせて Ω·cm² で入れる
+        self.model_combo = QComboBox()
+        for label, key in ELECTRODE_MODELS:
+            self.model_combo.addItem(tr(label), key)
+        self.model_combo.setToolTip(
+            tr(
+                "Uniform current density: the same current density flows out of every part of the\n"
+                "electrode (does not show the concentration at the edge).\n"
+                "Complete electrode model: the electrode plate is at one potential and a contact\n"
+                "impedance sits between it and the skin, so current gathers at the edge (SPEC §2.5)."
+            )
+        )
+        self.contact_spin = QDoubleSpinBox()
+        self.contact_spin.setDecimals(3)
+        self.contact_spin.setRange(0.001, 1.0e8)
+        self.contact_spin.setStepType(QDoubleSpinBox.StepType.AdaptiveDecimalStepType)
+        self.contact_spin.setValue(DEFAULT_CONTACT_IMPEDANCE_OHM_CM2)
+        self.contact_spin.setSuffix(" Ω·cm²")
+        self.contact_spin.setToolTip(
+            tr(
+                "Resistance per area between the electrode and the skin (gel and skin surface).\n"
+                "It varies many-fold with the gel and the skin condition, so fit it to the measured\n"
+                "inter-electrode resistance (gfem.fit_contact_impedance) rather than picking one value.\n"
+                "1 Ω·m² = 10⁴ Ω·cm²."
+            )
+        )
         form.addRow(tr("Name"), self.name_edit)
         form.addRow(tr("Role"), self.role_combo)
         form.addRow(tr("Total current"), self.current_spin)
+        form.addRow(tr("Electrode model"), self.model_combo)
+        form.addRow(tr("Contact impedance"), self.contact_spin)
         layout.addLayout(form)
 
         layout.addWidget(QLabel(tr("Electrode faces (shell PID)")))
@@ -462,6 +500,8 @@ class ElectrodePage(ScrollPage):
         self.name_edit.editingFinished.connect(self._commit)
         self.role_combo.currentTextChanged.connect(self._commit)
         self.current_spin.valueChanged.connect(self._commit)
+        self.model_combo.currentIndexChanged.connect(self._on_model_changed)
+        self.contact_spin.valueChanged.connect(self._commit)
         self.pid_list.itemChanged.connect(self._commit)
         self.pick_button.toggled.connect(self._toggle_picking)
         self.shape_combo.currentIndexChanged.connect(self._on_shape_changed)
@@ -493,6 +533,13 @@ class ElectrodePage(ScrollPage):
         self.name_edit.setText(spec.name)
         self.role_combo.setCurrentText(spec.role)
         self.current_spin.setValue(spec.current * 1e3)
+        self.model_combo.setCurrentIndex(max(self.model_combo.findData(spec.distribution), 0))
+        self.contact_spin.setValue(
+            spec.contact_impedance * 1e4
+            if spec.contact_impedance is not None
+            else DEFAULT_CONTACT_IMPEDANCE_OHM_CM2
+        )
+        self.contact_spin.setEnabled(spec.is_complete)
         self.pid_list.clear()
         for pid in session.mesh.shell_pids():
             item = QListWidgetItem(f"PID {pid}")
@@ -874,6 +921,10 @@ class ElectrodePage(ScrollPage):
             self.name_edit.setText(spec.name)
         spec.role = self.role_combo.currentText()
         spec.current = self.current_spin.value() * 1e-3
+        spec.distribution = self.model_combo.currentData()
+        # 一様電流密度に戻しても接触インピーダンスは覚えておく（ケースファイルには書かない）
+        if spec.is_complete:
+            spec.contact_impedance = self.contact_spin.value() * 1e-4
         spec.shell_pids = [
             self.pid_list.item(i).data(Qt.ItemDataRole.UserRole)
             for i in range(self.pid_list.count())
@@ -883,6 +934,11 @@ class ElectrodePage(ScrollPage):
         self._update_summary()
         self.window.refresh_tree()
         self.window.refresh_view(highlight_electrode=spec.name)
+
+    def _on_model_changed(self, *_args) -> None:
+        """電極のモデルを切り替えた（SPEC §2.5）。接触インピーダンスの欄は CEM のときだけ使う。"""
+        self.contact_spin.setEnabled(self.model_combo.currentData() == "complete_electrode")
+        self._commit()
 
     def _update_summary(self) -> None:
         session = self.window.session

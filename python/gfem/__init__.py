@@ -34,12 +34,14 @@ from ._gfem import (
     cuda_available,
     cuda_check,
     cuda_devices,
+    distribution_choices,
     length_units,
     metres_per_unit,
     preconditioner_choices,
     read_nastran,
 )
 from . import i18n
+from .contact import ContactFit, fit_contact_impedance
 from .study import ElectrodeSpec, Material, OutputSpec, SolverSpec, Study, SurfacePatch
 from .i18n import tr
 from .sweep import SweepTable, sweep
@@ -47,6 +49,7 @@ from .tissues import TISSUES, Tissue, load_library, tissue, tissue_names
 
 __all__ = [
     "Case",
+    "ContactFit",
     "ElectrodeSpec",
     "SurfacePatch",
     "GfemError",
@@ -69,6 +72,8 @@ __all__ = [
     "describe_bounding_box",
     "describe_extent",
     "describe_gpus",
+    "distribution_choices",
+    "fit_contact_impedance",
     "i18n",
     "length_units",
     "load_library",

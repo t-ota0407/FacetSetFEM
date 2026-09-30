@@ -255,16 +255,23 @@ pub struct ConservationReport {
     ///
     /// 「差し引き何アンペア余っているか」を注入電流と比べた値なので、
     /// メッシュを細かくしても意味が変わらない。
+    ///
+    /// 完全電極モデル（SPEC §5.4）では、φ から求め直した全電極の電流の総和を総注入電流で割ったもの。
     pub current_balance: f64,
+    /// 完全電極モデルで φ から求め直した電流と指定値のずれの最大（総注入電流で割る。SPEC §5.4）。
+    /// CEM の電極が無ければ 0
+    pub electrode_current_error: f64,
     /// ∫σ|E|² dΩ [W]
     pub power_from_field: f64,
-    /// `fᵀφ` [W]。電極から注入された電力
+    /// 接触面での消費電力 `Σ_l (1/z_l)∫(U_l − φ)² dS` [W]（SPEC §5.4）。CEM の電極が無ければ 0
+    pub contact_power: f64,
+    /// `fᵀφ` [W]。電極から注入された電力（CEM の電極は `I_l U_l`）
     pub power_from_load: f64,
-    /// 上 2 つの相対誤差
+    /// 注入された電力と消費（体内 + 接触面）の相対誤差
     pub energy_relative_error: f64,
     /// `‖Kφ − f‖ / ‖f‖`
     pub discrete_residual: f64,
-    /// 電極ごとの面積重み平均電位 [V]
+    /// 電極ごとの電位 [V]（一様電流密度は面積重み平均電位、CEM は板の電位。SPEC §5.3）
     pub electrode_potentials: Vec<(String, f64)>,
     /// 電極間電位差 ΔV [V]
     pub voltage: f64,
@@ -294,65 +301,156 @@ pub fn check_conservation(
     electrodes: &[ElectrodeGeometry],
     tolerance: f64,
 ) -> ConservationReport {
-    let mut warnings = Vec::new();
+    check_conservation_with(matrix, load, phi, fields, electrodes, tolerance, None)
+}
 
-    // 1. 電流保存: 1ᵀf = 0（SPEC §2.2 の適合条件）
-    //
-    // 正規化には**総注入電流**を使う。SPEC v0.3 までは max|f| で割っていたが、
-    // これは節点あたりの荷重で割ることになるためメッシュ依存になる:
-    // 細かくすると max|f| は節点数に反比例して小さくなる一方、総和の丸め誤差は
-    // √N で増えるので、同じ精度で解いているのに判定だけが厳しくなってしまう。
-    // 総注入電流で割れば「差し引き何 A 余っているか」を測ることになり、
-    // 分割によらず同じ意味になる。
-    let sum_f = reduce::sum(load);
+/// [`check_conservation`] の、離散残差を割る右辺の大きさを指定する版。
+///
+/// 完全電極モデル（SPEC §2.5 / §5.4）では、`load` に電極の電位を入れた右辺を渡し、
+/// `rhs_scale` に CG が抑えた右辺の大きさ（[`crate::contact::ContactSolution::rhs_scale`]）を渡す。
+/// `None` なら `‖load‖` で割る。
+pub fn check_conservation_with(
+    matrix: &CsrMatrix,
+    load: &[f64],
+    phi: &[f64],
+    fields: &FieldResult,
+    electrodes: &[ElectrodeGeometry],
+    tolerance: f64,
+    rhs_scale: Option<f64>,
+) -> ConservationReport {
+    let mut warnings = Vec::new();
+    let residual_limit = (DISCRETE_RESIDUAL_FACTOR * tolerance).max(DISCRETE_RESIDUAL_FLOOR);
+    let norm_f = rhs_scale.unwrap_or_else(|| reduce::norm2(load));
     let total_current: f64 = electrodes
         .iter()
         .filter(|e| e.role == ElectrodeRole::Anode)
         .map(|e| e.signed_current)
         .sum();
-    let scale = if total_current > 0.0 {
-        total_current
-    } else {
-        load.iter().fold(0.0f64, |m, v| m.max(v.abs()))
-    };
-    let current_balance = if scale > 0.0 { sum_f / scale } else { 0.0 };
-    if current_balance.abs() > CURRENT_BALANCE_TOLERANCE {
-        warnings.push(crate::tr!(
-            "The current conservation residual is too large: 1ᵀf/I = {current_balance:.3e} \
-             (tolerance {CURRENT_BALANCE_TOLERANCE:.0e})",
-            "電流保存の残差が大きすぎます: 1ᵀf/I = {current_balance:.3e}（許容 {CURRENT_BALANCE_TOLERANCE:.0e}）"
-        ));
-    }
+    // 完全電極モデル（SPEC §2.5）で解いたか。解いた後は板の電位が入っている
+    let complete = electrodes.iter().any(|e| e.terminal_potential.is_some());
 
-    // 2. エネルギー収支: ∫σ|E|²dΩ と fᵀφ
     let power_from_field = fields.total_power();
-    let power_from_load = reduce::dot(load, phi);
-    let scale = power_from_field.abs().max(power_from_load.abs());
+    let (current_balance, electrode_current_error, power_from_load, contact_power) = if complete {
+        // 1'. 電流保存（SPEC §5.4 の CEM の読み替え）: φ から電極ごとの電流を求め直す
+        let states = crate::contact::electrode_states(electrodes, phi);
+        let scale = if total_current > 0.0 {
+            total_current
+        } else {
+            1.0
+        };
+        let sum: f64 = states.iter().map(|s| s.current).sum();
+        let current_balance = sum / scale;
+        // 基準以外の電極は重ね合わせで電流を決めているので、丸めの範囲で指定値に一致するはず
+        let reference = crate::contact::reference_electrode(electrodes);
+        let electrode_current_error = electrodes
+            .iter()
+            .zip(&states)
+            .enumerate()
+            .filter(|&(l, _)| Some(l) != reference)
+            .map(|(_, (e, s))| (s.current - e.signed_current).abs() / scale)
+            .fold(0.0f64, f64::max);
+        let tol = crate::contact::CONTACT_CURRENT_TOLERANCE;
+        if electrode_current_error > tol {
+            warnings.push(crate::tr!(
+                "The electrode currents recomputed from the potential do not match the settings: \
+                 largest deviation {electrode_current_error:.3e} (relative to the injected current; \
+                 tolerance {tol:.0e}). The superposition was assembled incorrectly",
+                "電位から求め直した電極の電流が設定と合いません: ずれの最大 {electrode_current_error:.3e}\
+                 （総注入電流に対する比。許容 {tol:.0e}）。重ね合わせの組み立ての誤りです"
+            ));
+        }
+        // 総和（＝基準の電極の電流のずれ）は −1ᵀ(Aφ − f)/I に等しく、CG の残差で決まる。
+        // 収束判定から見込まれる大きさ |1ᵀr| ≲ ‖r‖ ≤ limit × (右辺の大きさ) と比べる
+        let balance_limit = (residual_limit * norm_f / scale).max(tol);
+        if current_balance.abs() > balance_limit {
+            warnings.push(crate::tr!(
+                "The total of the electrode currents recomputed from the potential is \
+                 {current_balance:.3e} of the injected current, more than the convergence tolerance \
+                 leads one to expect ({balance_limit:.0e}). Solve again with a tighter tolerance",
+                "電位から求め直した電極の電流の総和が総注入電流の {current_balance:.3e} で、\
+                 収束判定から見込まれる大きさ（{balance_limit:.0e}）を超えています。\
+                 収束判定を厳しくして解き直してください"
+            ));
+        }
+        // 2'. 電極から入る電力: 一様電流密度は J ∫φ dS、CEM は I_l U_l
+        let power_from_load: f64 = electrodes
+            .iter()
+            .zip(&states)
+            .map(|(e, s)| match e.terminal_potential {
+                Some(u) => s.current * u,
+                None => e.current_density * e.integrate(phi),
+            })
+            .sum();
+        let contact_power: f64 = states.iter().map(|s| s.contact_power).sum();
+        (
+            current_balance,
+            electrode_current_error,
+            power_from_load,
+            contact_power,
+        )
+    } else {
+        // 1. 電流保存: 1ᵀf = 0（SPEC §2.2 の適合条件）
+        //
+        // 正規化には**総注入電流**を使う。SPEC v0.3 までは max|f| で割っていたが、
+        // これは節点あたりの荷重で割ることになるためメッシュ依存になる:
+        // 細かくすると max|f| は節点数に反比例して小さくなる一方、総和の丸め誤差は
+        // √N で増えるので、同じ精度で解いているのに判定だけが厳しくなってしまう。
+        // 総注入電流で割れば「差し引き何 A 余っているか」を測ることになり、
+        // 分割によらず同じ意味になる。
+        let sum_f = reduce::sum(load);
+        let scale = if total_current > 0.0 {
+            total_current
+        } else {
+            load.iter().fold(0.0f64, |m, v| m.max(v.abs()))
+        };
+        let current_balance = if scale > 0.0 { sum_f / scale } else { 0.0 };
+        if current_balance.abs() > CURRENT_BALANCE_TOLERANCE {
+            warnings.push(crate::tr!(
+                "The current conservation residual is too large: 1ᵀf/I = {current_balance:.3e} \
+                 (tolerance {CURRENT_BALANCE_TOLERANCE:.0e})",
+                "電流保存の残差が大きすぎます: 1ᵀf/I = {current_balance:.3e}（許容 {CURRENT_BALANCE_TOLERANCE:.0e}）"
+            ));
+        }
+        // 2. エネルギー収支: ∫σ|E|²dΩ と fᵀφ
+        (current_balance, 0.0, reduce::dot(load, phi), 0.0)
+    };
+
+    let consumed = power_from_field + contact_power;
+    let scale = consumed.abs().max(power_from_load.abs());
     let energy_relative_error = if scale > 0.0 {
-        (power_from_field - power_from_load).abs() / scale
+        (consumed - power_from_load).abs() / scale
     } else {
         0.0
     };
     if energy_relative_error > ENERGY_TOLERANCE {
-        warnings.push(crate::tr!(
-            "The energy balance does not match: ∫σ|E|²dΩ = {power_from_field:.6e} W, fᵀφ = {power_from_load:.6e} W, \
-             relative error {energy_relative_error:.3e} (tolerance {ENERGY_TOLERANCE:.0e})",
-            "エネルギー収支が合いません: ∫σ|E|²dΩ = {power_from_field:.6e} W, fᵀφ = {power_from_load:.6e} W, \
-             相対誤差 {energy_relative_error:.3e}（許容 {ENERGY_TOLERANCE:.0e}）"
-        ));
+        warnings.push(if complete {
+            crate::tr!(
+                "The energy balance does not match: ∫σ|E|²dΩ + contact losses = {consumed:.6e} W, \
+                 power delivered by the electrodes = {power_from_load:.6e} W, \
+                 relative error {energy_relative_error:.3e} (tolerance {ENERGY_TOLERANCE:.0e})",
+                "エネルギー収支が合いません: ∫σ|E|²dΩ + 接触面の消費 = {consumed:.6e} W、\
+                 電極から入る電力 = {power_from_load:.6e} W、\
+                 相対誤差 {energy_relative_error:.3e}（許容 {ENERGY_TOLERANCE:.0e}）"
+            )
+        } else {
+            crate::tr!(
+                "The energy balance does not match: ∫σ|E|²dΩ = {power_from_field:.6e} W, fᵀφ = {power_from_load:.6e} W, \
+                 relative error {energy_relative_error:.3e} (tolerance {ENERGY_TOLERANCE:.0e})",
+                "エネルギー収支が合いません: ∫σ|E|²dΩ = {power_from_field:.6e} W, fᵀφ = {power_from_load:.6e} W, \
+                 相対誤差 {energy_relative_error:.3e}（許容 {ENERGY_TOLERANCE:.0e}）"
+            )
+        });
     }
 
-    // 3. 離散残差: ‖Kφ − f‖/‖f‖
+    // 3. 離散残差: ‖Kφ − f‖/‖f‖（CEM では `load` に電極の電位を入れた右辺を渡す。SPEC §5.4）
     let mut kphi = vec![0.0; phi.len()];
     matrix.spmv(phi, &mut kphi);
     let diff: Vec<f64> = kphi.iter().zip(load).map(|(a, b)| a - b).collect();
-    let norm_f = reduce::norm2(load);
     let discrete_residual = if norm_f > 0.0 {
         reduce::norm2(&diff) / norm_f
     } else {
         0.0
     };
-    let residual_limit = (DISCRETE_RESIDUAL_FACTOR * tolerance).max(DISCRETE_RESIDUAL_FLOOR);
     if discrete_residual > residual_limit {
         warnings.push(crate::tr!(
             "The discrete residual ‖Kφ−f‖/‖f‖ = {discrete_residual:.3e} exceeds what the convergence \
@@ -365,10 +463,10 @@ pub fn check_conservation(
         ));
     }
 
-    // 4. 電極間インピーダンス（SPEC §5.3）
+    // 4. 電極間インピーダンス（SPEC §5.3）。CEM の電極は板の電位を使うので接触抵抗を含む
     let electrode_potentials: Vec<(String, f64)> = electrodes
         .iter()
-        .map(|e| (e.name.clone(), e.mean_potential(phi)))
+        .map(|e| (e.name.clone(), e.potential(phi)))
         .collect();
     let anode = weighted_potential(electrodes, phi, ElectrodeRole::Anode);
     let cathode = weighted_potential(electrodes, phi, ElectrodeRole::Cathode);
@@ -381,7 +479,9 @@ pub fn check_conservation(
 
     ConservationReport {
         current_balance,
+        electrode_current_error,
         power_from_field,
+        contact_power,
         power_from_load,
         energy_relative_error,
         discrete_residual,
@@ -396,7 +496,8 @@ pub fn check_conservation(
 /// 同じ役割の電極を電流で重み付けした平均電位（その役割の電極が無ければ 0）。
 ///
 /// 電極間インピーダンス（SPEC §5.3）と、基準電位 `cathode_mean` の付け替え
-/// （[`crate::analysis`]）の両方で使う。
+/// （[`crate::analysis`]）の両方で使う。電極の電位は [`ElectrodeGeometry::potential`]
+/// （CEM は板の電位、一様電流密度は面積重み平均電位）。
 pub(crate) fn weighted_potential(
     electrodes: &[ElectrodeGeometry],
     phi: &[f64],
@@ -406,7 +507,7 @@ pub(crate) fn weighted_potential(
     let mut weight = 0.0;
     for e in electrodes.iter().filter(|e| e.role == role) {
         let w = e.signed_current.abs();
-        sum += w * e.mean_potential(phi);
+        sum += w * e.potential(phi);
         weight += w;
     }
     if weight > 0.0 { sum / weight } else { 0.0 }

@@ -72,6 +72,46 @@ pub fn face_integral(kind: ElementKind, p: &[[f64; 3]]) -> FaceIntegral {
     }
 }
 
+/// 面の質量行列 `M_ij = ∫_F N_i N_j dS` [m²]（SPEC §2.5 の完全電極モデル）。
+///
+/// 先頭 `n × n`（n は面の節点数）が有効で、残りは 0。全成分の和は面積に、
+/// 行ごとの和は `∫N_i dS`（[`face_integral`] の `shape_integral`）に等しい。
+///
+/// - Tria3: `M_ij = A (1 + δ_ij) / 12`。解析的に厳密
+/// - Quad4: 2×2 ガウス積分。`N_i N_j |det J|` は ξ・η それぞれについて高々 3 次なので、
+///   非平面の四辺形でも厳密
+pub fn face_mass(kind: ElementKind, p: &[[f64; 3]]) -> [[f64; 4]; 4] {
+    let mut m = [[0.0f64; 4]; 4];
+    match kind {
+        ElementKind::Tria3 => {
+            let area = 0.5 * norm(cross(sub(p[1], p[0]), sub(p[2], p[0])));
+            let off = area / 12.0;
+            for (i, row) in m.iter_mut().take(3).enumerate() {
+                for (j, v) in row.iter_mut().take(3).enumerate() {
+                    *v = if i == j { 2.0 * off } else { off };
+                }
+            }
+        }
+        ElementKind::Quad4 => {
+            for &eta in &GAUSS2 {
+                for &xi in &GAUSS2 {
+                    let n = quad4_shape(xi, eta);
+                    let (dxi, deta) = quad4_jacobian(p, xi, eta);
+                    // 重みは 1 × 1
+                    let detj = norm(cross(dxi, deta));
+                    for i in 0..4 {
+                        for j in 0..4 {
+                            m[i][j] += n[i] * n[j] * detj;
+                        }
+                    }
+                }
+            }
+        }
+        other => panic!("面要素ではありません: {other:?}"),
+    }
+    m
+}
+
 /// 面の単位法線。節点の並びに対する右ねじの向き。
 ///
 /// 四辺形は 2 本の対角線の外積（＝平均的な法線）を使う。
@@ -195,5 +235,89 @@ mod tests {
     fn triangle_normal_follows_the_right_hand_rule() {
         let p = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
         assert_eq!(face_normal(ElementKind::Tria3, &p), [0.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    #[allow(clippy::needless_range_loop)] // 行列の添字で書くほうが式と対応が取れる
+    fn face_mass_rows_sum_to_the_shape_integrals() {
+        // Σ_j N_j ≡ 1 なので、質量行列の行和は ∫N_i dS、総和は面積（SPEC §2.5）
+        let quad = [
+            [0.0, 0.0, 0.0],
+            [2.0, 0.3, 0.1],
+            [2.4, 3.1, -0.2],
+            [-0.2, 2.7, 0.4],
+        ];
+        let tri = [[0.1, 0.2, 0.3], [1.7, -0.4, 0.9], [0.5, 2.2, -0.6]];
+        for (kind, p) in [
+            (ElementKind::Quad4, &quad[..]),
+            (ElementKind::Tria3, &tri[..]),
+        ] {
+            let m = face_mass(kind, p);
+            let f = face_integral(kind, p);
+            for i in 0..f.n_nodes {
+                let row: f64 = m[i].iter().sum();
+                assert!((row - f.shape_integral[i]).abs() < 1e-14, "{kind:?} 行 {i}");
+                for j in 0..4 {
+                    assert_eq!(m[i][j], m[j][i], "{kind:?} が対称でない");
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[allow(clippy::needless_range_loop)] // 行列の添字で書くほうが式と対応が取れる
+    fn triangle_mass_is_the_textbook_matrix() {
+        // 面積 6 の三角形: 対角 A/6 = 1、非対角 A/12 = 0.5
+        let p = [[0.0, 0.0, 0.0], [3.0, 0.0, 0.0], [0.0, 4.0, 0.0]];
+        let m = face_mass(ElementKind::Tria3, &p);
+        for i in 0..3 {
+            for j in 0..3 {
+                let expected = if i == j { 1.0 } else { 0.5 };
+                assert!((m[i][j] - expected).abs() < 1e-15, "({i}, {j})");
+            }
+        }
+        assert_eq!(m[3], [0.0; 4]);
+    }
+
+    #[test]
+    fn quad_mass_integrates_a_product_of_linear_functions_exactly() {
+        // 平行四辺形でない平面四辺形で ∫ x y dS を、M を使った xᵀ M y と比べる。
+        // x・y は双線形補間で厳密に表せるので、M が厳密なら両者は一致する
+        let p = [
+            [0.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+            [2.5, 1.5, 0.0],
+            [0.0, 1.0, 0.0],
+        ];
+        let m = face_mass(ElementKind::Quad4, &p);
+        let x: Vec<f64> = p.iter().map(|q| q[0]).collect();
+        let y: Vec<f64> = p.iter().map(|q| q[1]).collect();
+        let mut xmy = 0.0;
+        for i in 0..4 {
+            for j in 0..4 {
+                xmy += x[i] * m[i][j] * y[j];
+            }
+        }
+        // 同じ積分を細かい 3 角形分割の数値積分（重心則を 400×400 回）で求める
+        let n = 400;
+        let mut reference = 0.0;
+        for a in 0..n {
+            for b in 0..n {
+                let (xi, eta) = (
+                    -1.0 + (2 * a + 1) as f64 / n as f64,
+                    -1.0 + (2 * b + 1) as f64 / n as f64,
+                );
+                let nn = quad4_shape(xi, eta);
+                let (dxi, deta) = quad4_jacobian(&p, xi, eta);
+                let detj = norm(cross(dxi, deta));
+                let px: f64 = (0..4).map(|k| nn[k] * p[k][0]).sum();
+                let py: f64 = (0..4).map(|k| nn[k] * p[k][1]).sum();
+                reference += px * py * detj * (2.0 / n as f64).powi(2);
+            }
+        }
+        assert!(
+            (xmy - reference).abs() < 1e-5 * reference.abs(),
+            "{xmy} vs {reference}"
+        );
     }
 }

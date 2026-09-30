@@ -45,6 +45,7 @@ pub mod spmm;
 
 use crate::assemble::csr::CsrMatrix;
 use crate::error::Result;
+use crate::solver::cg::Gauge;
 use coarse::CoarseSolver;
 use std::borrow::Cow;
 
@@ -170,6 +171,19 @@ impl Hierarchy<'_> {
 ///
 /// 近零空間は定数ベクトル span{1}（全 Neumann の電流場。SPEC §2.2）を仮定する。
 pub fn setup<'a>(a: &'a CsrMatrix, options: &AmgOptions) -> Result<Hierarchy<'a>> {
+    setup_with(a, options, Gauge::MeanZero)
+}
+
+/// [`setup`] の、解く系が特異かどうかを指定する版（SPEC §4.5 の「CEM の電極があるとき」）。
+///
+/// 近零空間のベクトルはどちらでも定数 1 を使う。完全電極モデル（SPEC §2.5）の
+/// 接触インピーダンスの項は電極の下にしか効かないので、定数はなお平滑化で消えない成分である。
+/// 違うのは最粗レベルの解き方だけ（[`CoarseSolver::factor`]）。
+pub fn setup_with<'a>(
+    a: &'a CsrMatrix,
+    options: &AmgOptions,
+    gauge: Gauge,
+) -> Result<Hierarchy<'a>> {
     let mut levels: Vec<Level<'a>> = Vec::new();
     // 最細レベルは借りる。CG が同じ行列を持っているので複製しない
     let mut current: Cow<'a, CsrMatrix> = Cow::Borrowed(a);
@@ -235,7 +249,7 @@ pub fn setup<'a>(a: &'a CsrMatrix, options: &AmgOptions) -> Result<Hierarchy<'a>
     }
 
     let last = levels.last().expect("レベルが 1 つも無い");
-    let coarse = CoarseSolver::factor(&last.a, &last.nullspace);
+    let coarse = CoarseSolver::factor(&last.a, &last.nullspace, gauge);
     Ok(Hierarchy {
         levels,
         coarse,

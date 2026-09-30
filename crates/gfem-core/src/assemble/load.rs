@@ -12,10 +12,12 @@
 //!
 //! なおこのモデルは「理想電流源電極」の近似である。実際の金属電極は等電位面になり、
 //! 電流は電極エッジに集中する（理論上は発散する）ため、エッジ近傍の電流密度は
-//! 過小評価になる。将来の完全電極モデル（CEM）は SPEC §9 の予定項目。
+//! 過小評価になる。縁の電流を見たいときは完全電極モデル（SPEC §2.5）を選ぶ。
+//! その電極は荷重を持たず、代わりに面の質量行列（[`ContactFace`]）を持つ。
+//! 行列への組み込みと解き方は [`crate::contact`]。
 
-use crate::case::{Case, ElectrodeRole, FaceLookup, resolve_faces};
-use crate::element::shell::face_integral;
+use crate::case::{Case, ElectrodeFace, ElectrodeModel, ElectrodeRole, FaceLookup, resolve_faces};
+use crate::element::shell::{face_integral, face_mass};
 use crate::error::{ErrorKind, GfemError, Result};
 use crate::mesh::{Mesh, NodeIndex};
 use std::collections::BTreeMap;
@@ -44,21 +46,66 @@ pub struct ElectrodeGeometry {
     /// 節点索引 → `∫N_i dS` [m²]（節点索引の昇順）
     ///
     /// 荷重ベクトルの分配にも、面積重み平均電位 `∫φ dS / A` の計算にも使う。
+    /// 完全電極モデルでは m_l（SPEC §2.5）そのもの。
     pub node_weights: Vec<(NodeIndex, f64)>,
+    /// 電流の配り方（SPEC §2.4 / §2.5）
+    pub model: ElectrodeModel,
+    /// 完全電極モデルの面ごとの質量行列（面の通し番号の昇順）。一様電流密度では空
+    pub contact_faces: Vec<ContactFace>,
+    /// 電極の下の組織の導電率 [S/m]（面積重み平均）。縁の分解能の目安 ℓ = zσ に使う
+    /// （SPEC §2.5）。一様電流密度では 0
+    pub underlying_sigma: f64,
+    /// 板の電位 U_l [V]。完全電極モデルで解いた後に入る（一様電流密度では `None`）
+    pub terminal_potential: Option<f64>,
+}
+
+/// 完全電極モデルの電極面 1 枚（SPEC §2.5）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ContactFace {
+    /// 面の節点索引。先頭 `n_nodes` 個が有効
+    pub nodes: [NodeIndex; 4],
+    /// 面の節点数（3 または 4）
+    pub n_nodes: u8,
+    /// `∫_F N_i N_j dS` [m²]（[`face_mass`]）
+    pub mass: [[f64; 4]; 4],
+}
+
+impl ContactFace {
+    /// 有効な節点索引。
+    pub fn nodes(&self) -> &[NodeIndex] {
+        &self.nodes[..self.n_nodes as usize]
+    }
 }
 
 impl ElectrodeGeometry {
+    /// 接触インピーダンス [Ω·m²]。一様電流密度なら `None`。
+    pub fn contact_impedance(&self) -> Option<f64> {
+        self.model.contact_impedance()
+    }
+
+    /// 電極の電位 [V]（SPEC §5.3）。
+    ///
+    /// 完全電極モデルは板の電位 U_l、一様電流密度は面積重み平均電位。
+    /// 電極間インピーダンスと基準電位 `cathode_mean` はこれを使う。
+    pub fn potential(&self, phi: &[f64]) -> f64 {
+        self.terminal_potential
+            .unwrap_or_else(|| self.mean_potential(phi))
+    }
+
+    /// `m_lᵀ φ = ∫_Γ φ dS` [V·m²]。節点索引の昇順に足す（設計原則 1）。
+    pub fn integrate(&self, phi: &[f64]) -> f64 {
+        self.node_weights
+            .iter()
+            .map(|&(node, w)| w * phi[node as usize])
+            .sum()
+    }
+
     /// 面積重み平均電位 [V]（SPEC §5.3）。
     pub fn mean_potential(&self, phi: &[f64]) -> f64 {
         if self.area <= 0.0 {
             return 0.0;
         }
-        let sum: f64 = self
-            .node_weights
-            .iter()
-            .map(|&(node, w)| w * phi[node as usize])
-            .sum();
-        sum / self.area
+        self.integrate(phi) / self.area
     }
 }
 
@@ -77,9 +124,12 @@ pub fn assemble_load(
     for electrode in &case.electrodes {
         let faces = resolve_faces(lookup, electrode)?;
 
-        // 1. 面積と ∫N_i dS を集める
+        // 1. 面積と ∫N_i dS を集める（完全電極モデルは面の質量行列と、下の組織の σ も）
+        let complete = matches!(electrode.model, ElectrodeModel::Complete { .. });
         let mut weights: BTreeMap<NodeIndex, f64> = BTreeMap::new();
         let mut area = 0.0;
+        let mut contact_faces = Vec::new();
+        let (mut sigma_area, mut sigma_weight) = (0.0, 0.0);
         let mut points = [[0.0f64; 3]; 4];
         for &face in &faces {
             let (kind, conn) = lookup.face_nodes(face);
@@ -103,6 +153,19 @@ pub fn assemble_load(
             for (k, &node) in conn.iter().enumerate() {
                 *weights.entry(node).or_insert(0.0) += integral.shape_integral[k];
             }
+            if complete {
+                let mut nodes = [0; 4];
+                nodes[..n].copy_from_slice(conn);
+                contact_faces.push(ContactFace {
+                    nodes,
+                    n_nodes: n as u8,
+                    mass: face_mass(kind, &points[..n]),
+                });
+                if let Some(sigma) = sigma_under(lookup, case, face, conn) {
+                    sigma_area += sigma * integral.area;
+                    sigma_weight += integral.area;
+                }
+            }
         }
 
         if area <= MIN_ELECTRODE_AREA_M2 {
@@ -120,12 +183,14 @@ pub fn assemble_load(
             )));
         }
 
-        // 2. 一様電流密度で配る（SPEC §2.4）
+        // 2. 一様電流密度で配る（SPEC §2.4）。完全電極モデルは荷重を持たない（SPEC §2.5）
         let signed_current = electrode.signed_current();
         let current_density = signed_current / area;
         let node_weights: Vec<(NodeIndex, f64)> = weights.into_iter().collect();
-        for &(node, w) in &node_weights {
-            f[node as usize] += current_density * w;
+        if !complete {
+            for &(node, w) in &node_weights {
+                f[node as usize] += current_density * w;
+            }
         }
 
         geometries.push(ElectrodeGeometry {
@@ -136,10 +201,36 @@ pub fn assemble_load(
             current_density,
             n_faces: faces.len(),
             node_weights,
+            model: electrode.model,
+            contact_faces,
+            underlying_sigma: if sigma_weight > 0.0 {
+                sigma_area / sigma_weight
+            } else {
+                0.0
+            },
+            terminal_potential: None,
         });
     }
 
     Ok((f, geometries))
+}
+
+/// 電極面の下にあるソリッド要素の導電率（スカラー）。見つからなければ `None`。
+///
+/// シェル要素で指定した面は、同じ節点の外表面の面から元の要素を引く
+/// （外表面に載っていることは検証で確かめてある。SPEC §11.1）。
+fn sigma_under(
+    lookup: &FaceLookup,
+    case: &Case,
+    face: ElectrodeFace,
+    conn: &[NodeIndex],
+) -> Option<f64> {
+    let element = match face {
+        ElectrodeFace::Surface(i) => lookup.surface().faces()[i as usize].element,
+        ElectrodeFace::Shell(_) => lookup.surface().find(conn)?.element,
+    };
+    let pid = lookup.mesh().solid(element as usize).pid;
+    case.conductivity.get(&pid).map(|s| s.scalar())
 }
 
 #[cfg(test)]
