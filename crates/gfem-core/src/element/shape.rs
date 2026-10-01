@@ -167,6 +167,34 @@ pub fn stiffness_with_sign<E: ShapeFunctions>(
     Ok(volume)
 }
 
+/// [`stiffness_with_sign`] の `row` 行目だけ（並列アセンブリ用。SPEC §2.3 / §4.2）。
+///
+/// 並列アセンブリは行ごとに要素をたどるので、要素 1 つにつき要るのはその行だけ。
+/// 全体を作るときと同じ式を同じ順（積分点 → 列）で足すので、値は全体の同じ行と
+/// ビット単位で同じ。先頭 `NODES` 個が有効。
+pub fn stiffness_row_with_sign<E: ShapeFunctions>(
+    points: &[[f64; 3]],
+    sigma: &Conductivity,
+    row: usize,
+    sign: f64,
+) -> Result<[f64; MAX_ELEMENT_NODES]> {
+    let mut out = [0.0f64; MAX_ELEMENT_NODES];
+    for point in E::quadrature() {
+        let geometry = point_geometry::<E>(points, point.local);
+        let det = sign * geometry.det_jacobian;
+        if det <= 0.0 || det.is_nan() {
+            return Err(negative_jacobian(det));
+        }
+        let scale = point.weight * det;
+        let g = geometry.grad[row];
+        for (j, value) in out.iter_mut().enumerate().take(E::NODES) {
+            let sg = sigma.apply(geometry.grad[j]);
+            *value += scale * (g[0] * sg[0] + g[1] * sg[1] + g[2] * sg[2]);
+        }
+    }
+    Ok(out)
+}
+
 /// 要素の体積 [m³]。
 pub fn volume<E: ShapeFunctions>(points: &[[f64; 3]]) -> Result<f64> {
     volume_with_sign::<E>(points, 1.0)

@@ -2,7 +2,7 @@
 
 use crate::assemble::csr::CsrMatrix;
 use crate::element::shape::{self, MAX_ELEMENT_NODES};
-use crate::element::{ElementKind, Hex8, Penta6, tet4};
+use crate::element::{ElementKind, Hex8, Penta6, tet4, tet10};
 use crate::error::{GfemError, Result};
 use crate::material::Conductivity;
 use crate::mesh::{ElementRef, Mesh, PropId};
@@ -66,6 +66,21 @@ pub(crate) fn tet4_row(
     Ok(tet4::tet4_stiffness_row(&shape, sigma, row))
 }
 
+/// 2 次四面体の要素剛性の `row` 行目だけ（並列アセンブリ用。SPEC §2.3）。
+///
+/// 全体を作ったときの同じ行とビット単位で同じ（`element::tet10` のテストで確かめている）。
+/// 全体を作ってから 1 行を取り出すと、1 要素の 10×10 の剛性を 10 回作り直すことになる。
+pub(crate) fn tet10_row(
+    mesh: &Mesh,
+    e: &ElementRef<'_>,
+    sigma: &Conductivity,
+    row: usize,
+) -> Result<[f64; MAX_ELEMENT_NODES]> {
+    let mut points = [[0.0f64; 3]; 10];
+    mesh.gather_coords(e.conn, &mut points);
+    tet10::stiffness_row(&points, sigma, row).map_err(|e2| with_element(e2, e))
+}
+
 /// 体積がゼロ以下の四面体のエラー。
 fn degenerate_tet(e: &ElementRef<'_>) -> GfemError {
     GfemError::model(crate::tr!(
@@ -120,6 +135,10 @@ pub(crate) fn element_stiffness(
         ElementKind::Penta6 => {
             shape::stiffness::<Penta6>(&points[..n], sigma, local)
                 .map_err(|e2| with_element(e2, e))?;
+        }
+        // SPEC §2.3 Tet10（4 点則。節点順序の反転は |det J| で扱う）
+        ElementKind::Tet10 => {
+            tet10::stiffness(&points[..n], sigma, local).map_err(|e2| with_element(e2, e))?;
         }
         other => {
             return Err(GfemError::unsupported(crate::tr!(

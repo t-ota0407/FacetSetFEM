@@ -246,7 +246,8 @@ impl Analysis {
             amg.set("levels", Json::Array(levels))
                 .set("operator_complexity", info.operator_complexity)
                 .set("grid_complexity", info.grid_complexity)
-                .set("direct_coarse_solve", info.direct_coarse_solve);
+                .set("direct_coarse_solve", info.direct_coarse_solve)
+                .set("strength_threshold", info.strength_threshold);
             solver.set("amg", amg);
         }
         root.set("solver", solver);
@@ -560,10 +561,12 @@ fn run_with(
 
     // --- 求解 ---
     let mark = Instant::now();
+    // 2 次要素では AMG の θ を 2 次要素向けにする（SPEC §4.5。1 次要素では何も変えない）
+    let options = case.solver.for_mesh(mesh);
     let (mut potential, reports, rhs_scale) = match gauge {
         Gauge::MeanZero => {
             let mut potential = vec![0.0; mesh.nodes.len()];
-            let report = solver.solve(&matrix, &load, &mut potential, &case.solver, progress)?;
+            let report = solver.solve(&matrix, &load, &mut potential, &options, progress)?;
             (potential, vec![report], None)
         }
         // 完全電極モデル: 電極の電位を仮に決めた系を重ね合わせる（SPEC §2.5）
@@ -573,7 +576,7 @@ fn run_with(
                 &matrix,
                 &load,
                 &electrodes,
-                &case.solver,
+                &options,
                 progress,
             )?;
             for (e, &u) in electrodes.iter_mut().zip(&solution.terminal_potentials) {

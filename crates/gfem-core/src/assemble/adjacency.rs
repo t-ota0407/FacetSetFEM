@@ -10,13 +10,14 @@
 //!
 //! # 代償
 //!
-//! 1 つの要素はその節点数（4〜8）ぶん重複して計算される。要素剛性の再計算は
+//! 1 つの要素はその節点数（4〜10）ぶん重複して計算される（四面体は 1 行ずつ作るので、
+//! 重複するのは要素剛性の 1 行ぶん）。要素剛性の再計算は
 //! キャッシュに載る小さな計算なので、20 コアなら差し引きで十分速くなる。
 //! 逆に要素剛性を全部保存しておく方式は、Tet4 で CSR の 2.5 倍のメモリを食う
 //! （SPEC §4.2 の見積り）ので採らない。
 
 use crate::assemble::csr::CsrMatrix;
-use crate::assemble::stiffness::{element_stiffness, tet4_row};
+use crate::assemble::stiffness::{element_stiffness, tet4_row, tet10_row};
 use crate::element::ElementKind;
 use crate::element::shape::MAX_ELEMENT_NODES;
 use crate::error::{ErrorKind, GfemError, Result};
@@ -220,19 +221,23 @@ pub fn assemble_stiffness_parallel(
                         .iter()
                         .position(|&node| node as usize == i)
                         .expect("隣接表に載っている以上、この要素は節点 i を含む");
-                    // 要るのは要素剛性の row_in_element 行だけ。四面体はその行だけを作る
-                    // （全体を作ったときの同じ行と値はビット単位で同じ）
+                    // 要るのは要素剛性の row_in_element 行だけ。四面体（1 次・2 次）は
+                    // その行だけを作る（全体を作ったときの同じ行と値はビット単位で同じ）
                     let nn = reference.conn.len();
-                    if reference.kind == ElementKind::Tet4 {
-                        row[..4].copy_from_slice(&tet4_row(
+                    match reference.kind {
+                        ElementKind::Tet4 => row[..4].copy_from_slice(&tet4_row(
                             mesh,
                             &reference,
                             sigma,
                             row_in_element,
-                        )?);
-                    } else {
-                        element_stiffness(mesh, &reference, sigma, &mut local)?;
-                        row[..nn].copy_from_slice(&local[row_in_element][..nn]);
+                        )?),
+                        ElementKind::Tet10 => {
+                            row = tet10_row(mesh, &reference, sigma, row_in_element)?;
+                        }
+                        _ => {
+                            element_stiffness(mesh, &reference, sigma, &mut local)?;
+                            row[..nn].copy_from_slice(&local[row_in_element][..nn]);
+                        }
                     }
                     for (j, &column) in reference.conn.iter().enumerate() {
                         let Ok(k) = columns.binary_search(&column) else {
@@ -324,6 +329,46 @@ mod tests {
         assemble_stiffness_parallel(&mesh, &sigma, &adjacency, &mut parallel).unwrap();
 
         assert_eq!(serial.values(), parallel.values());
+    }
+
+    #[test]
+    fn parallel_assembly_of_second_order_tetrahedra_matches_serial_bitwise() {
+        // 2 次四面体は要素剛性の 1 行だけを作る経路を通る。領域を 2 つに分けて σ を変え、
+        // 行の塊（ROWS_PER_TASK）をまたぐ大きさにする
+        let linear =
+            crate::testing::kuhn_box_with(
+                [7, 5, 4],
+                [1.0, 0.8, 0.6],
+                |[i, ..]| {
+                    if i < 3 { 1 } else { 2 }
+                },
+            );
+        let mesh = crate::mesh::elevate(&linear).unwrap();
+        assert!(mesh.nodes.len() > ROWS_PER_TASK);
+        let mut sigma = sigma_map(1, 0.35);
+        sigma.insert(2, Conductivity::isotropic(0.04).unwrap());
+
+        let mut serial = build_sparsity(&mesh).unwrap();
+        assemble_stiffness(&mesh, &sigma, &mut serial).unwrap();
+        let adjacency = build_node_elements(&mesh);
+        let mut parallel = build_sparsity(&mesh).unwrap();
+        assemble_stiffness_parallel(&mesh, &sigma, &adjacency, &mut parallel).unwrap();
+        let bits = |m: &CsrMatrix| m.values().iter().map(|v| v.to_bits()).collect::<Vec<_>>();
+        assert_eq!(bits(&serial), bits(&parallel));
+
+        // 行和はゼロ（定数ベクトルが零空間。SPEC §2.2）で、対角は正
+        let (row_ptr, col_idx, values) = (serial.row_ptr(), serial.col_idx(), serial.values());
+        for i in 0..serial.n_rows() {
+            let row = &values[row_ptr[i]..row_ptr[i + 1]];
+            let diag = col_idx[row_ptr[i]..row_ptr[i + 1]]
+                .iter()
+                .position(|&c| c as usize == i)
+                .map(|k| row[k])
+                .unwrap();
+            assert!(diag > 0.0, "行 {i}");
+            let sum: f64 = row.iter().sum();
+            assert!(sum.abs() < 1e-13 * diag, "行 {i} の和 {sum}");
+        }
     }
 
     #[test]

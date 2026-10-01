@@ -411,6 +411,27 @@ impl Mesh {
         v
     }
 
+    /// 剛性行列の非ゼロ数の見積り。GPU に載るかを、組み立てる前に判定するのに使う（SPEC §4.4）。
+    ///
+    /// 節点あたりの非ゼロ数は要素の種類で大きく違うので、含まれる種類のうち最大のものを使う
+    /// （実測: Tet4 で 14〜15、2 次の Tet10 で 27〜28。六面体は 27、三角柱は 21 が上限）。
+    /// 以前は種類によらず 15 で見積もっていて、2 次要素では VRAM を半分に見積もってしまい、
+    /// CPU に落ちるべきところで GPU を選んで解いている途中にメモリが尽きうる。
+    pub fn estimated_nnz(&self) -> usize {
+        let per_node = self
+            .solids
+            .iter()
+            .map(|b| match b.kind() {
+                ElementKind::Hex8 => 27,
+                ElementKind::Penta6 => 21,
+                ElementKind::Tet10 => 30,
+                _ => 15,
+            })
+            .max()
+            .unwrap_or(15);
+        self.nodes.len() * per_node
+    }
+
     /// Tet4 要素の符号付き体積（m³）。ブロック内の要素順。
     ///
     /// SPEC §2.3 の要素剛性は |V| を使うが、符号は節点順序の妥当性チェックに使う。

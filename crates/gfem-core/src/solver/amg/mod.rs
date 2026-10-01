@@ -73,10 +73,20 @@ pub struct AmgOptions {
     pub max_coarsening_ratio: f64,
 }
 
+/// 最細レベルの強連結の閾値 θ の既定値（1 次要素で調整した値）。
+pub const DEFAULT_STRENGTH_THRESHOLD: f64 = 0.08;
+
+/// 2 次要素（Tet10）の行列で使う θ（SPEC §4.5「2 次要素の行列」）。
+///
+/// 2 次要素の剛性行列は非対角に正の成分を持ち、1 行の項も倍ほど多い。θ = 0.08 のままだと
+/// 粗化が弱く、反復回数が同じ節点数の 1 次要素の 3 倍前後になる。0.15 にすると 3 割ほど減る
+/// （3 層スラブ、2.7 万〜69 万節点で 78 → 56、87 → 60、97 → 63 回）。
+pub const QUADRATIC_STRENGTH_THRESHOLD: f64 = 0.15;
+
 impl Default for AmgOptions {
     fn default() -> Self {
         Self {
-            strength_threshold: 0.08,
+            strength_threshold: DEFAULT_STRENGTH_THRESHOLD,
             strength_decay: 0.5,
             max_levels: 25,
             coarse_size: 400,
@@ -125,6 +135,8 @@ pub struct Hierarchy<'a> {
     pub coarse: CoarseSolver,
     /// 平滑化回数（[`AmgOptions`] から写す）
     pub presmooth: usize,
+    /// 最細レベルの強連結の閾値 θ（記録用。[`AmgOptions`] から写す）
+    pub strength_threshold: f64,
     /// 上りの平滑化回数
     pub postsmooth: usize,
 }
@@ -140,6 +152,8 @@ pub struct AmgInfo {
     pub grid_complexity: f64,
     /// 最粗レベルを密分解で解けたか
     pub direct_coarse_solve: bool,
+    /// 最細レベルの強連結の閾値 θ
+    pub strength_threshold: f64,
 }
 
 impl Hierarchy<'_> {
@@ -158,6 +172,7 @@ impl Hierarchy<'_> {
             operator_complexity: total_nnz as f64 / nnz0.max(1) as f64,
             grid_complexity: total_n as f64 / n0.max(1) as f64,
             direct_coarse_solve: self.coarse.is_direct(),
+            strength_threshold: self.strength_threshold,
         }
     }
 
@@ -255,6 +270,7 @@ pub fn setup_with<'a>(
         coarse,
         presmooth: options.presmooth,
         postsmooth: options.postsmooth,
+        strength_threshold: options.strength_threshold,
     })
 }
 

@@ -14,7 +14,9 @@ pub mod external;
 pub mod precond;
 pub mod reduce;
 
-pub use amg::{AmgInfo, AmgOptions, Hierarchy};
+pub use amg::{
+    AmgInfo, AmgOptions, DEFAULT_STRENGTH_THRESHOLD, Hierarchy, QUADRATIC_STRENGTH_THRESHOLD,
+};
 pub use backend::{CpuParallel, CpuSerial, LinearBackend};
 pub use cg::{CgReport, Gauge, ProgressFn};
 pub use external::{BackendSolver, LinearSolver};

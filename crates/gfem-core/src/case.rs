@@ -605,6 +605,24 @@ pub struct SolverOptions {
     pub backend: Backend,
 }
 
+impl SolverOptions {
+    /// メッシュに合わせて実際に使う設定（SPEC §4.5）。
+    ///
+    /// 2 次要素のメッシュで AMG の θ が既定値（1 次要素で調整した 0.08）のままなら、
+    /// 2 次要素向けの 0.15 にする。θ はケースファイルや GUI からは変えられない内部の値で、
+    /// 既定値と違う値が入っているのは Rust から明示的に選んだときだけなので、それは尊重する。
+    /// 1 次要素のメッシュでは何も変えない。
+    pub fn for_mesh(&self, mesh: &Mesh) -> SolverOptions {
+        let mut options = *self;
+        let quadratic = mesh.solids.iter().any(|b| b.kind().is_quadratic());
+        if quadratic && options.amg.strength_threshold == crate::solver::DEFAULT_STRENGTH_THRESHOLD
+        {
+            options.amg.strength_threshold = crate::solver::QUADRATIC_STRENGTH_THRESHOLD;
+        }
+        options
+    }
+}
+
 impl Default for SolverOptions {
     fn default() -> Self {
         Self {

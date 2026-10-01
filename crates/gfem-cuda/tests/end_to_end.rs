@@ -298,6 +298,73 @@ fn gpu_result_matches_the_analytic_solution() {
 }
 
 #[test]
+fn gpu_and_cpu_agree_bitwise_on_second_order_elements() {
+    // 2 次四面体（SPEC §8 M12）。求解の入口は後処理が揃うまで止めてあるので、組み立てと
+    // CG を直接つなぐ。一様電流密度（射影 CG）と CEM（重ね合わせ）、Jacobi と AMG
+    use gfem_core::assemble;
+    use gfem_core::case::FaceLookup;
+    use gfem_core::contact::solve_superposition;
+    use gfem_core::mesh::{elevate, topology::extract_surface};
+    use gfem_core::solver::{Gauge, LinearSolver};
+
+    let gpu = gpu_or_skip!();
+    let gpu = BackendSolver(gpu);
+    let mesh = elevate(&slab(8, 6, 1)).unwrap();
+    let surface = extract_surface(&mesh).unwrap();
+    let lookup = FaceLookup::new(&mesh, &surface);
+    let solve = |case: &Case, solver: &dyn LinearSolver| -> (Vec<f64>, Vec<usize>) {
+        let system = assemble(&mesh, case, &lookup, false).unwrap();
+        let options = case.solver.for_mesh(&mesh);
+        match system.gauge {
+            Gauge::MeanZero => {
+                let mut phi = vec![0.0; mesh.nodes.len()];
+                let r = solver
+                    .solve(&system.matrix, &system.load, &mut phi, &options, None)
+                    .unwrap();
+                assert!(r.converged);
+                (phi, vec![r.iterations])
+            }
+            Gauge::NotNeeded => {
+                let s = solve_superposition(
+                    solver,
+                    &system.matrix,
+                    &system.load,
+                    &system.electrodes,
+                    &options,
+                    None,
+                )
+                .unwrap();
+                (
+                    s.potential,
+                    s.reports.iter().map(|r| r.iterations).collect(),
+                )
+            }
+        }
+    };
+    for preconditioner in [Preconditioner::Jacobi, Preconditioner::Amg] {
+        for complete in [false, true] {
+            let mut case = case_with(Backend::CpuSerial);
+            case.solver.preconditioner = preconditioner;
+            if complete {
+                for e in &mut case.electrodes {
+                    *e = e.clone().with_contact_impedance(1.0e-4);
+                }
+            }
+            let (cpu, cpu_its) = solve(&case, &BackendSolver(CpuSerial));
+            let (cuda, cuda_its) = solve(&case, &gpu);
+            println!("{preconditioner:?} CEM={complete}: 反復 {cpu_its:?}");
+            assert_eq!(cpu_its, cuda_its, "{preconditioner:?} CEM={complete}");
+            assert!(
+                cpu.iter()
+                    .zip(&cuda)
+                    .all(|(a, b)| a.to_bits() == b.to_bits()),
+                "{preconditioner:?} CEM={complete}: 電位がビット単位で一致しない"
+            );
+        }
+    }
+}
+
+#[test]
 fn repeated_gpu_runs_are_identical() {
     let gpu = gpu_or_skip!();
     let mesh = slab(12, 8, 1);

@@ -191,6 +191,16 @@ pub fn stiffness(
     shape::stiffness_with_sign::<Tet10>(points, sigma, k, sign)
 }
 
+/// [`stiffness`] の `row` 行目だけ（並列アセンブリ用）。全体の同じ行とビット単位で同じ。
+pub fn stiffness_row(
+    points: &[[f64; 3]],
+    sigma: &Conductivity,
+    row: usize,
+) -> Result<[f64; MAX_ELEMENT_NODES]> {
+    let sign = orientation(points).sign().ok_or_else(twisted)?;
+    shape::stiffness_row_with_sign::<Tet10>(points, sigma, row, sign)
+}
+
 /// 要素の体積 [m³]（常に正）。
 pub fn volume(points: &[[f64; 3]]) -> Result<f64> {
     let sign = orientation(points).sign().ok_or_else(twisted)?;
@@ -401,6 +411,28 @@ mod tests {
         let total: f64 = rule.iter().map(|q| q.weight).sum();
         assert!((total - 1.0 / 6.0).abs() < 1e-15);
         rule
+    }
+
+    #[test]
+    fn a_single_row_is_bitwise_the_row_of_the_full_matrix() {
+        // 並列アセンブリは 1 行ずつ作る。全体を作った行とビット単位で同じでなければならない
+        let mut p = straight(CORNERS);
+        p[7][1] += 0.03; // 辺が曲がった要素でも
+        for sigma in [
+            Conductivity::isotropic(0.35).unwrap(),
+            Conductivity::isotropic(1.0 / 3.0).unwrap(),
+        ] {
+            let mut full = [[0.0; MAX_ELEMENT_NODES]; MAX_ELEMENT_NODES];
+            stiffness(&p, &sigma, &mut full).unwrap();
+            for (row, expected) in full.iter().enumerate().take(10) {
+                let got = stiffness_row(&p, &sigma, row).unwrap();
+                assert_eq!(
+                    got.map(f64::to_bits),
+                    expected.map(f64::to_bits),
+                    "行 {row}"
+                );
+            }
+        }
     }
 
     #[test]

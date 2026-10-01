@@ -1033,7 +1033,8 @@ impl PyCase {
                 case.solver.backend,
                 case.solver.preconditioner,
                 mesh.nodes.len(),
-                None,
+                // 組み立てる前に決めるので、非ゼロ数は要素の種類から見積もる
+                Some(mesh.estimated_nnz()),
             );
             // 外表面と電極面の索引は Mesh が作り置きしたものを使う。何度解いても
             // 抽出し直さない（大規模モデルでは solve の準備の大半を占める）
