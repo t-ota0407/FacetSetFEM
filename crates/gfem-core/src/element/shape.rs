@@ -195,6 +195,32 @@ pub fn stiffness_row_with_sign<E: ShapeFunctions>(
     Ok(out)
 }
 
+/// 要素内の消費電力 `∫σ|E|² dΩ` [W]（SPEC §5.1 / §5.4）。
+///
+/// **要素剛性と同じ積分点で積分する。** そうすると要素ごとに `φᵀ K^e φ` と同じ量になり
+/// （`φᵀKφ = Σ_q w_q |det J| (∇φ_h · σ∇φ_h)`）、離散系では `∫σ|E|² = φᵀKφ = fᵀφ` が
+/// 収束判定の範囲で成り立つ。要素中心の 1 点で数えると、E が要素内で変わる要素
+/// （Hex8 / Penta6 / Tet10）では保存則の検査が誤って警告する。
+/// `sign` は [`stiffness_with_sign`] と同じ（節点順序が反転した要素は −1）。
+pub fn power_with_sign<E: ShapeFunctions>(
+    points: &[[f64; 3]],
+    phi: &[f64],
+    sigma: &Conductivity,
+    sign: f64,
+) -> Result<f64> {
+    let mut power = 0.0;
+    for point in E::quadrature() {
+        let det = sign * point_geometry::<E>(points, point.local).det_jacobian;
+        if det <= 0.0 || det.is_nan() {
+            return Err(negative_jacobian(det));
+        }
+        let e = electric_field::<E>(points, phi, point.local);
+        let j = sigma.apply(e);
+        power += point.weight * det * (e[0] * j[0] + e[1] * j[1] + e[2] * j[2]);
+    }
+    Ok(power)
+}
+
 /// 要素の体積 [m³]。
 pub fn volume<E: ShapeFunctions>(points: &[[f64; 3]]) -> Result<f64> {
     volume_with_sign::<E>(points, 1.0)

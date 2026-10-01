@@ -58,7 +58,8 @@ pub struct FieldResult {
     /// |J| [A/m²]
     pub j_magnitude: Vec<f64>,
     /// 電力密度 σ|E|² [W/m³]。熱連成（SPEC §9）の熱源項にそのまま使える。
-    /// 2 次要素では**要素内の平均**（`∫σ|E|² dΩ / V`。積分点で積分する）。
+    /// E が要素内で変わる要素（Hex8 / Penta6 / Tet10）では**要素内の平均**
+    /// （`∫σ|E|² dΩ / V`。剛性と同じ積分点で積分する）。
     /// どちらでも `電力密度 × 体積` を足せば消費電力になる
     pub power_density: Vec<f64>,
     /// 要素体積 [m³]
@@ -209,21 +210,38 @@ fn element_field(
     }
 
     // Tet4 は E が要素内で一定。Hex8 / Penta6 は要素内で変化するので、
-    // 要素の代表値としては**中心での値**を採る（SPEC §5.1）
-    let (field, volume) = match e.kind {
+    // 要素の代表値としては**中心での値**を採り、電力は剛性と同じ積分点で積分する（SPEC §5.1）。
+    // 戻り値の 3 つ目は電力 ∫σ|E|²dΩ [W]（Tet4 は `None` で、代表値から σ|E|²·V）
+    let (field, volume, power) = match e.kind {
         ElementKind::Tet4 => {
             let p = mesh.tet4_coords(e.conn);
             let shape = tet4::tet4_shape(&p);
             let nodal = [nodal[0], nodal[1], nodal[2], nodal[3]];
-            (tet4::tet4_electric_field(&shape, &nodal), shape.volume)
+            (
+                tet4::tet4_electric_field(&shape, &nodal),
+                shape.volume,
+                None,
+            )
         }
         ElementKind::Hex8 => (
             shape::electric_field::<Hex8>(&points[..n], &nodal[..n], Hex8::CENTRE),
             shape::volume::<Hex8>(&points[..n])?,
+            Some(shape::power_with_sign::<Hex8>(
+                &points[..n],
+                &nodal[..n],
+                sigma,
+                1.0,
+            )?),
         ),
         ElementKind::Penta6 => (
             shape::electric_field::<Penta6>(&points[..n], &nodal[..n], Penta6::CENTRE),
             shape::volume::<Penta6>(&points[..n])?,
+            Some(shape::power_with_sign::<Penta6>(
+                &points[..n],
+                &nodal[..n],
+                sigma,
+                1.0,
+            )?),
         ),
         // 2 次要素は E が要素内で 1 次式で変わる。代表値は中心の値、電力は積分点で積分した
         // 要素内の平均、最大は頂点で取る（element::tet10::field_summary）
@@ -256,8 +274,12 @@ fn element_field(
         current,
         e_magnitude,
         j_magnitude,
-        // σ|E|² = E·(σE) = E·J。異方性でも成り立つ形にしておく
-        power_density: dot(field, current),
+        // σ|E|² = E·(σE) = E·J。異方性でも成り立つ形にしておく。
+        // E が要素内で変わる要素は、積分した電力の要素内の平均
+        power_density: match power {
+            Some(power) => power / volume,
+            None => dot(field, current),
+        },
         volume,
         e_peak: e_magnitude,
         j_peak: j_magnitude,

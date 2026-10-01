@@ -276,13 +276,8 @@ pub fn field_summary(
 ) -> Result<FieldSummary> {
     let sign = orientation(points).sign().ok_or_else(twisted)?;
     let volume = shape::volume_with_sign::<Tet10>(points, sign)?;
-    let mut power = 0.0;
-    for q in Tet10::quadrature() {
-        let det = sign * shape::point_geometry::<Tet10>(points, q.local).det_jacobian;
-        let e = shape::electric_field::<Tet10>(points, phi, q.local);
-        let j = sigma.apply(e);
-        power += q.weight * det * (e[0] * j[0] + e[1] * j[1] + e[2] * j[2]);
-    }
+    // 剛性と同じ 4 点則（離散系で ∫σ|E|² = φᵀKφ になる）
+    let power = shape::power_with_sign::<Tet10>(points, phi, sigma, sign)?;
     let (mut e_peak, mut j_peak) = (0.0f64, 0.0f64);
     for &corner in &LOCAL_NODES[..4] {
         let e = shape::electric_field::<Tet10>(points, phi, corner);

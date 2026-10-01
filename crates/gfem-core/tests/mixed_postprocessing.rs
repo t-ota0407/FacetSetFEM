@@ -557,6 +557,51 @@ fn measure_seed_location() {
     }
 }
 
+#[test]
+fn the_energy_balance_holds_with_a_small_electrode_in_every_element_type() {
+    // 小さな電極の縁では E が要素内で大きく変わる。Hex8 / Penta6 の消費電力を要素中心の
+    // 1 点で数えていた頃は、∫σ|E|²dΩ と fᵀφ が 1 % 前後ずれて誤った警告が出ていた
+    // （SPEC §5.4）。剛性と同じ積分点で積分すれば、離散系の恒等式 φᵀKφ = fᵀφ どおりに合う
+    let zs: Vec<f64> = (0..=8).map(|k| 0.016 * k as f64 / 8.0).collect();
+    let pids: Vec<u32> = (0..8)
+        .map(|k| {
+            if k < 5 {
+                3
+            } else if k < 7 {
+                2
+            } else {
+                1
+            }
+        })
+        .collect();
+    let anode = Patch {
+        pid: 301,
+        x: [0.024, 0.036],
+        y: [0.015, 0.025],
+        top: true,
+    };
+    for kind in SOLID_KINDS {
+        let mesh = box_mesh_of(
+            kind,
+            &common::linear_grid(0.0, LX, 10),
+            &common::linear_grid(0.0, LY, 8),
+            &zs,
+            &pids,
+            &[anode, Patch::whole(BOTTOM_PID, false)],
+        );
+        let mut case = layered_case();
+        case.electrodes[0] = Electrode::anode("top", CURRENT).with_shell_pids([301]);
+        let a = solve(&mesh, &case, None).unwrap();
+        let c = &a.conservation;
+        assert!(c.is_clean(), "{kind:?}: {:?}", c.warnings);
+        assert!(
+            c.energy_relative_error < 1e-9,
+            "{kind:?}: {:.3e}",
+            c.energy_relative_error
+        );
+    }
+}
+
 /// 点が四面体の中にあるか（全走査版の判定。`Navigator::locate_tet` と同じ規則）。
 fn inside(p: &[[f64; 3]; 4], x: [f64; 3]) -> bool {
     let volume = gfem_core::element::tet4_signed_volume(p);
