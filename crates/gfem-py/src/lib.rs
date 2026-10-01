@@ -282,10 +282,10 @@ impl PyMesh {
         let mut refs: Vec<i64> = Vec::with_capacity(faces.len() * 2);
         for &f in faces {
             let face = &surface.faces()[f as usize];
-            let n = face.nodes();
-            flat.extend_from_slice(&[n[0], n[1], n[2]]);
-            if n.len() == 4 {
-                flat.extend_from_slice(&[n[0], n[2], n[3]]);
+            // 体表面の表示（`surface_triangles`）と同じ割り方にする。2 次要素の面は 4 枚
+            let (pieces, n) = face.display_triangles(&self.inner);
+            for tri in &pieces[..n] {
+                flat.extend_from_slice(tri);
             }
             refs.push(self.inner.solid(face.element as usize).id as i64);
             refs.push(face.local_face as i64 + 1);
@@ -345,6 +345,42 @@ impl PyMesh {
             .detach(|| self.inner.reinterpret_length_unit(unit))
             .map_err(to_py)?;
         Ok(PyMesh::new(mesh, self.report.clone()))
+    }
+
+    /// 1 次の四面体メッシュの各辺の中点に節点を足し、2 次（10 節点の CTETRA）にしたもの
+    /// （SPEC §2.3。COMSOL が 1 次のメッシュのまま 2 次の要素で解くのと同じ考え方）。
+    ///
+    /// 要素の ID・PID・面番号は変わらないので、電極の指定はそのまま使える。
+    /// 読み込みレポートは元のものを引き継ぐ。
+    fn elevate(&self, py: Python<'_>) -> PyResult<PyMesh> {
+        let mesh = py
+            .detach(|| gfem_core::mesh::elevate(&self.inner))
+            .map_err(to_py)?;
+        Ok(PyMesh::new(mesh, self.report.clone()))
+    }
+
+    /// 要素の次数（2 次の要素があれば 2、なければ 1）。
+    #[getter]
+    fn element_order(&self) -> u32 {
+        if self.inner.solids.iter().any(|b| b.kind().is_quadratic()) {
+            2
+        } else {
+            1
+        }
+    }
+
+    /// 節点が要素の頂点か（辺の中点なら False）、`(n_nodes,)`。
+    ///
+    /// 2 次要素の表示で、外表面を 4 分割した三角形の辺のうち、元の要素の辺
+    /// （頂点と中点を結ぶもの）だけを線で描くのに使う。1 次要素のメッシュでは全て True。
+    fn corner_node_mask<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<bool>> {
+        let mut mask = vec![false; self.inner.nodes.len()];
+        for e in self.inner.iter_solids() {
+            for &node in &e.conn[..e.kind.corner_count()] {
+                mask[node as usize] = true;
+            }
+        }
+        mask.into_pyarray(py)
     }
 
     /// 読み込み元ファイル。
@@ -1231,7 +1267,32 @@ impl PySolution {
         view1(slf.as_any(), &slf.get().inner.fields.j_magnitude)
     }
 
-    /// 電力密度 σ|E|² [W/m³]、`(n_elements,)`。
+    /// 要素内の |E| の最大 [V/m]、`(n_elements,)`（SPEC §5.1）。
+    ///
+    /// 2 次要素では E が要素内で変わるので、頂点での値の最大（中心の値の `e_magnitude` は
+    /// 最大を過小評価する）。1 次要素では `e_magnitude` と同じ。
+    #[getter]
+    fn e_peak<'py>(slf: &Bound<'py, Self>) -> Bound<'py, PyArray1<f64>> {
+        let fields = &slf.get().inner.fields;
+        if fields.e_peak.is_empty() {
+            view1(slf.as_any(), &fields.e_magnitude)
+        } else {
+            view1(slf.as_any(), &fields.e_peak)
+        }
+    }
+
+    /// 要素内の |J| の最大 [A/m²]、`(n_elements,)`（[`e_peak`](Self::e_peak) と同じ扱い）。
+    #[getter]
+    fn j_peak<'py>(slf: &Bound<'py, Self>) -> Bound<'py, PyArray1<f64>> {
+        let fields = &slf.get().inner.fields;
+        if fields.j_peak.is_empty() {
+            view1(slf.as_any(), &fields.j_magnitude)
+        } else {
+            view1(slf.as_any(), &fields.j_peak)
+        }
+    }
+
+    /// 電力密度 σ|E|² [W/m³]、`(n_elements,)`。E が要素内で変わる要素では要素内の平均。
     #[getter]
     fn power_density<'py>(slf: &Bound<'py, Self>) -> Bound<'py, PyArray1<f64>> {
         view1(slf.as_any(), &slf.get().inner.fields.power_density)

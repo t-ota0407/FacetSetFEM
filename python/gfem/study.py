@@ -54,6 +54,9 @@ __all__ = [
 #: 現在のケースファイル形式のバージョン
 CASE_VERSION = 1
 
+#: 選べる要素の次数（`mesh.element_order`。SPEC §3.3）
+ELEMENT_ORDERS = (1, 2)
+
 #: 一様電流密度（SPEC §2.4）。電極の既定
 UNIFORM = "uniform_current_density"
 
@@ -294,6 +297,9 @@ class Study:
     electrodes: list[ElectrodeSpec] = field(default_factory=list)
     solver: SolverSpec = field(default_factory=SolverSpec)
     output: OutputSpec = field(default_factory=OutputSpec)
+    #: 要素の次数（SPEC §2.3 / §3.3）。2 なら 1 次の四面体メッシュを読み込んでから
+    #: 2 次（10 節点の CTETRA）に上げて解く。もともと 2 次のメッシュはそのまま使う
+    element_order: int = 1
     #: 読み込み元のケースファイル（相対パスの基準になる）
     path: Path | None = None
 
@@ -355,6 +361,16 @@ class Study:
             _in(where, "mesh"),
             tr("Write one of mm / cm / m / inch (required because Nastran carries no unit information)"),
         )
+        element_order = mesh.get("element_order", 1)
+        if isinstance(element_order, bool) or element_order not in ELEMENT_ORDERS:
+            raise _error(
+                tr("Unknown element order: {value}", value=element_order),
+                _in(_in(where, "mesh"), "element_order"),
+                tr(
+                    "Write 1 (first-order elements) or 2 (raise a tetrahedral mesh to "
+                    "second-order elements)"
+                ),
+            )
 
         materials = [
             _material_from(m, _in(where, f"materials[{i}]"))
@@ -375,14 +391,19 @@ class Study:
             electrodes=electrodes,
             solver=solver,
             output=output,
+            element_order=int(element_order),
             path=path,
         )
 
     def to_dict(self) -> dict[str, Any]:
         """YAML に書ける辞書へ変換する。"""
+        mesh: dict[str, Any] = {"file": str(self.mesh_file), "length_unit": self.length_unit}
+        # 既定（1 次）のときは書かない。以前からのケースファイルと同じ形に保つ
+        if self.element_order != 1:
+            mesh["element_order"] = self.element_order
         return {
             "version": CASE_VERSION,
-            "mesh": {"file": str(self.mesh_file), "length_unit": self.length_unit},
+            "mesh": mesh,
             "materials": [m.to_dict() for m in self.materials],
             "electrodes": [e.to_dict() for e in self.electrodes],
             "solver": self.solver.to_dict(),
@@ -415,8 +436,20 @@ class Study:
         return (self.path.parent / self.mesh_file).resolve()
 
     def read_mesh(self) -> Mesh:
-        """メッシュを読み込む。"""
-        return read_nastran(self.resolved_mesh_file(), length_unit=self.length_unit)
+        """メッシュを読み込む。`element_order` が 2 なら 2 次に上げたものを返す。"""
+        mesh = read_nastran(self.resolved_mesh_file(), length_unit=self.length_unit)
+        return self.apply_element_order(mesh)
+
+    def apply_element_order(self, mesh: Mesh) -> Mesh:
+        """読み込んだメッシュを、このケースの要素の次数にしたもの（SPEC §2.3）。
+
+        `element_order` が 2 で 1 次のメッシュなら 2 次に上げる（`Mesh.elevate`）。
+        それ以外はそのまま返す。もともと 2 次のメッシュ（10 節点の CTETRA）は 1 次には
+        下げられないので、`element_order` が 1 でも 2 次のまま解く。
+        """
+        if self.element_order == 2 and mesh.element_order == 1:
+            return mesh.elevate()
+        return mesh
 
     def build_case(self, mesh: Mesh | None = None) -> Case:
         """`gfem.Case` を組み立てる。"""

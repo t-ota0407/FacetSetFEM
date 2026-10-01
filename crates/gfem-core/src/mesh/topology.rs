@@ -65,6 +65,33 @@ impl SurfaceFace {
         }
     }
 
+    /// 表示用の三角形（[`Surface::triangulate`] の 1 面ぶん）。先頭の個数ぶんが有効。
+    ///
+    /// 三角形は 1 枚、四辺形は 2 枚、2 次要素の面は辺の中点で 4 枚。向きは元の面と同じ。
+    pub fn display_triangles(&self, mesh: &Mesh) -> ([[NodeIndex; 3]; 4], usize) {
+        let n = self.nodes();
+        let mut out = [[0; 3]; 4];
+        if n.len() == 4 {
+            out[0] = [n[0], n[1], n[2]];
+            out[1] = [n[0], n[2], n[3]];
+            return (out, 2);
+        }
+        let t = self.trace(mesh);
+        if t.kind() != ElementKind::Tria6 {
+            out[0] = [n[0], n[1], n[2]];
+            return (out, 1);
+        }
+        let [c0, c1, c2, m01, m12, m20] =
+            <[NodeIndex; 6]>::try_from(t.nodes()).expect("2 次要素の面は 6 節点");
+        out = [
+            [c0, m01, m20],
+            [m01, c1, m12],
+            [m20, m12, c2],
+            [m01, m12, m20],
+        ];
+        (out, 4)
+    }
+
     /// 面積分に使う節点と面の種類（SPEC §2.4）。
     ///
     /// 1 次要素の面は頂点そのもの（Tria3 / Quad4）。2 次要素の面は、頂点のあとに
@@ -193,32 +220,9 @@ impl Surface {
         let mut tris = Vec::with_capacity(self.faces.len());
         let mut owners = Vec::with_capacity(self.faces.len());
         for f in &self.faces {
-            let n = f.nodes();
-            if n.len() == 3
-                && !mesh
-                    .solid(f.element as usize)
-                    .kind
-                    .face_mid_nodes()
-                    .is_empty()
-            {
-                let t = f.trace(mesh);
-                let [c0, c1, c2, m01, m12, m20] =
-                    <[NodeIndex; 6]>::try_from(t.nodes()).expect("2 次要素の面は 6 節点");
-                for tri in [
-                    [c0, m01, m20],
-                    [m01, c1, m12],
-                    [m20, m12, c2],
-                    [m01, m12, m20],
-                ] {
-                    tris.push(tri);
-                    owners.push(f.element);
-                }
-                continue;
-            }
-            tris.push([n[0], n[1], n[2]]);
-            owners.push(f.element);
-            if n.len() == 4 {
-                tris.push([n[0], n[2], n[3]]);
+            let (pieces, n) = f.display_triangles(mesh);
+            for &tri in &pieces[..n] {
+                tris.push(tri);
                 owners.push(f.element);
             }
         }

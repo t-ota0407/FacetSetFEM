@@ -31,8 +31,8 @@ SHAPE_FIELD = "shape"
 VISIBLE, TRANSPARENT, HIDDEN = "visible", "transparent", "hidden"
 PART_STATES = (VISIBLE, TRANSPARENT, HIDDEN)
 
-#: VTK の要素種の番号 → 節点数（`Mesh.solid_cells` を読むため）
-_VTK_CELL_SIZES = {10: 4, 12: 8, 13: 6}
+#: VTK の要素種の番号 → 節点数（`Mesh.solid_cells` を読むため）。24 は 2 次四面体（Tet10）
+_VTK_CELL_SIZES = {10: 4, 12: 8, 13: 6, 24: 10}
 
 
 @dataclass(frozen=True)
@@ -235,7 +235,10 @@ class Session:
 
     def __init__(self) -> None:
         self.study: Study | None = None
+        #: 表示・解析に使うメッシュ。要素の次数が 2 なら、読み込んだものを 2 次に上げたもの
         self.mesh: Mesh | None = None
+        #: ファイルから読み込んだままのメッシュ。要素の次数を切り替えるときの元（SPEC §2.3）
+        self._mesh_as_read: Mesh | None = None
         self.solution: Solution | None = None
         #: `solution` を解いたときの解析条件の写し。実行サマリ（SPEC §5.5）に残すのは
         #: これで、いま編集中の `study` ではない（解いた後に編集されうるため）
@@ -254,6 +257,8 @@ class Session:
         self._electrode_view: dict[str, str] = {}
         #: 全領域の境界面（`region_boundaries_polydata`）。メッシュを開き直すまで使い回す
         self._boundaries: pv.PolyData | None = None
+        #: 節点が要素の頂点か（2 次要素の稜線を描くとき。`element_edges`）
+        self._corner_mask: np.ndarray | None = None
         #: 領域の組 → その要素が使う節点（色の範囲を表示中の領域に合わせるとき）
         self._region_nodes: dict[tuple[int, ...], np.ndarray] = {}
         # Undo / Redo（SPEC §8 M7）。
@@ -347,12 +352,15 @@ class Session:
                 )
             )
         self.mesh = mesh
+        self._mesh_as_read = mesh
         self.mesh_serial += 1
         self._forget_results()
         self.study = Study(
             mesh_file=path,
             length_unit=length_unit,
             materials=[Material(pid=pid, sigma=0.0) for pid in self.mesh.solid_pids()],
+            # もともと 2 次のメッシュ（10 節点の CTETRA）なら 2 次として扱う
+            element_order=mesh.element_order,
         )
         # σ 未設定を 0 で表しておくと validate() が拾ってくれる
         self._mark_saved()
@@ -363,7 +371,10 @@ class Session:
         self.clear_history()
         study = Study.load(path)
         self.study = study
-        self.mesh = study.read_mesh()
+        self._mesh_as_read = read_nastran(
+            study.resolved_mesh_file(), length_unit=study.length_unit
+        )
+        self.mesh = study.apply_element_order(self._mesh_as_read)
         self.mesh_serial += 1
         self._forget_results()
         # メッシュにあるのに YAML に無い PID を補う
@@ -374,6 +385,38 @@ class Session:
         study.materials.sort(key=lambda m: m.pid)
         self._mark_saved()
         return study
+
+    def file_element_order(self) -> int:
+        """読み込んだファイルの要素の次数（10 節点の CTETRA なら 2）。"""
+        if self._mesh_as_read is None:
+            return 1
+        return self._mesh_as_read.element_order
+
+    def element_order_out_of_sync(self) -> bool:
+        """表示・解析に使うメッシュの次数が、解析条件の要素の次数と食い違っているか。"""
+        if self.study is None or self._mesh_as_read is None or self.mesh is None:
+            return False
+        wanted = max(self.study.element_order, self._mesh_as_read.element_order)
+        return wanted != self.mesh.element_order
+
+    def sync_element_order(self) -> bool:
+        """表示・解析に使うメッシュを、解析条件の要素の次数に合わせる（SPEC §2.3）。
+
+        次数が 2 なら読み込んだ 1 次のメッシュを 2 次に上げたもの、1 なら読み込んだままの
+        メッシュにする。入れ替えたら True。節点の数が変わるので結果は捨てるが、
+        **形は同じなので視点は保つ**（`mesh_serial` は変えない）。領域・電極の見せ方も残す。
+        Undo / Redo で次数が戻ったときもこれで追いつく。
+        """
+        if self.study is None or self._mesh_as_read is None or self.mesh is None:
+            return False
+        wanted = self.study.apply_element_order(self._mesh_as_read)
+        if wanted.element_order == self.mesh.element_order:
+            return False
+        views = (self._region_view, self._electrode_view)
+        self.mesh = wanted
+        self._forget_results()
+        self._region_view, self._electrode_view = views
+        return True
 
     def save_case(self, path: str | Path) -> None:
         self._require_study().save(path)
@@ -613,6 +656,7 @@ class Session:
         self._electrode_view = {}
         self._boundaries = None
         self._region_nodes = {}
+        self._corner_mask = None
 
     # --- 表示用データ -------------------------------------------------------
 
@@ -1232,6 +1276,40 @@ class Session:
         poly = self.surface_polydata()
         return poly.extract_cells(np.flatnonzero(poly.cell_data["PID"] == pid))
 
+    def element_edges(self, layer: pv.DataSet) -> pv.PolyData | None:
+        """2 次要素のメッシュで、表示する面の**元の要素の辺**だけを線にしたもの（SPEC §6.3）。
+
+        2 次要素の面は辺の中点で 4 枚の三角形に割って描くので、VTK の `show_edges` に
+        任せると、要素の中を通る分割の線まで描かれて要素が 4 倍に見える。元の要素の辺は
+        「頂点と辺の中点を結ぶ線」で、分割の線は「中点どうしを結ぶ線」なので、前者だけを残す。
+
+        1 次要素のメッシュ、または面の点がメッシュの節点でないもの（断面・クリップの切り口）
+        では `None` を返す（呼び出し側はそのまま `show_edges` を使う）。
+        """
+        mesh = self._require_mesh()
+        if mesh.element_order == 1 or layer.n_cells == 0:
+            return None
+        if "vtkOriginalPointIds" in layer.point_data:
+            nodes = np.asarray(layer.point_data["vtkOriginalPointIds"])
+        elif layer.n_points == mesh.n_nodes:
+            nodes = np.arange(layer.n_points)
+        else:
+            return None
+        if self._corner_mask is None:
+            self._corner_mask = mesh.corner_node_mask()
+        surface = layer if isinstance(layer, pv.PolyData) else layer.extract_surface()
+        if not surface.is_all_triangles:
+            return None
+        tris = surface.faces.reshape(-1, 4)[:, 1:]
+        edges = np.sort(
+            np.concatenate([tris[:, [0, 1]], tris[:, [1, 2]], tris[:, [2, 0]]]), axis=1
+        )
+        edges = np.unique(edges, axis=0)
+        corner = self._corner_mask[nodes]
+        kept = edges[corner[edges[:, 0]] != corner[edges[:, 1]]]
+        lines = np.hstack([np.full((len(kept), 1), 2, dtype=np.int64), kept]).ravel()
+        return pv.PolyData(np.asarray(surface.points), lines=lines)
+
     @staticmethod
     def _polydata(points, triangles, cell_arrays: dict) -> pv.PolyData:
         if len(triangles) == 0:
@@ -1365,6 +1443,12 @@ class Session:
 
         mesh = self._require_mesh()
         shells = ", ".join(str(p) for p in mesh.shell_pids()) or tr("(none)")
+        if mesh.element_order == 1:
+            order = tr("1 (first-order elements)")
+        elif self.file_element_order() == 2:
+            order = tr("2 (second-order elements in the file)")
+        else:
+            order = tr("2 (raised from the first-order mesh in the file)")
         lines = [
             tr("File: {path}", path=mesh.source),
             tr("Length unit: {unit}", unit=mesh.length_unit),
@@ -1375,6 +1459,7 @@ class Session:
                 n=mesh.n_elements,
                 counts=", ".join(f"{k} {n:,}" for k, n in mesh.element_counts()),
             ),
+            tr("Element order: {order}", order=order),
             tr("Regions (PSOLID): {pids}", pids=", ".join(str(p) for p in mesh.solid_pids())),
             tr("Electrode candidate faces (PSHELL): {pids}", pids=shells),
         ]

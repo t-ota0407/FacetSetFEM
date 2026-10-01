@@ -1002,6 +1002,12 @@ class SolverPage(ScrollPage):
         self.backend.addItems(backend_choices())
         self.reference = QComboBox()
         self.reference.addItems(["zero_mean", "cathode_mean"])
+        # 要素の次数（SPEC §2.3）。2 は 1 次の四面体メッシュを 2 次に上げて解く
+        self.element_order = QComboBox()
+        self.element_order.addItems(
+            [tr("1 (first-order elements)"), tr("2 (second-order elements)")]
+        )
+        form.addRow(tr("Element order"), self.element_order)
         form.addRow(tr("Relative residual tolerance"), self.tolerance)
         form.addRow(tr("Maximum iterations"), self.max_iterations)
         form.addRow(tr("Preconditioner"), self.preconditioner)
@@ -1014,6 +1020,16 @@ class SolverPage(ScrollPage):
         self.tolerance_error.setStyleSheet(f"color: {STALE_COLOR};")
         self.tolerance_error.setVisible(False)
         layout.addWidget(self.tolerance_error)
+        self.element_order_note = QLabel(
+            tr(
+                "Second order adds a node at the middle of every edge of the tetrahedral mesh "
+                "(about 7-8 times as many nodes). The potential becomes quadratic inside each "
+                "element, so the field is more accurate on the same mesh. Electrodes and regions "
+                "stay as they are (SPEC §2.3)."
+            )
+        )
+        self.element_order_note.setWordWrap(True)
+        layout.addWidget(self.element_order_note)
         layout.addWidget(
             QLabel(
                 tr(
@@ -1045,6 +1061,7 @@ class SolverPage(ScrollPage):
         self.preconditioner.currentTextChanged.connect(self._commit)
         self.backend.currentTextChanged.connect(self._commit)
         self.reference.currentTextChanged.connect(self._commit)
+        self.element_order.currentIndexChanged.connect(self._commit_element_order)
 
     def reload(self) -> None:
         study = self.window.session.study
@@ -1064,6 +1081,10 @@ class SolverPage(ScrollPage):
             if combo.findText(value) < 0:
                 combo.addItem(value)
             combo.setCurrentText(value)
+        # もともと 2 次のメッシュ（10 節点の CTETRA）は 1 次に下げられないので選ばせない
+        from_file = self.window.session.file_element_order()
+        self.element_order.setCurrentIndex(max(study.element_order, from_file) - 1)
+        self.element_order.setEnabled(from_file == 1)
         self._loading = False
 
     def _commit(self) -> None:
@@ -1086,6 +1107,18 @@ class SolverPage(ScrollPage):
         study.output.reference_potential = self.reference.currentText()
         # ツリーは作り直さないので、結果が古くなったかをここで見直す
         self.window.refresh_result_status()
+
+    def _commit_element_order(self) -> None:
+        """要素の次数を変える。メッシュを入れ替えるので、結果は捨てて描き直す。"""
+        study = self.window.session.study
+        if study is None or self._loading:
+            return
+        order = self.element_order.currentIndex() + 1
+        if order == study.element_order:
+            return
+        self.window.checkpoint(tr("Change the element order"))
+        study.element_order = order
+        self.window.apply_element_order()
 
 
 class ResultPage(ScrollPage):

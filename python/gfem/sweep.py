@@ -203,8 +203,9 @@ def _summarise(solution: Any) -> dict[str, Any]:
         "impedance_ohm": solution.impedance,
         "voltage_V": solution.voltage,
         "power_W": conservation["power_from_field"],
-        "j_max_A_per_m2": float(solution.j_magnitude.max()),
-        "e_max_V_per_m": float(solution.e_magnitude.max()),
+        # 要素内の最大（2 次要素では頂点の値。1 次要素では要素値と同じ。SPEC §5.1）
+        "j_max_A_per_m2": float(solution.j_peak.max()),
+        "e_max_V_per_m": float(solution.e_peak.max()),
         "phi_min_V": float(potential.min()),
         "phi_max_V": float(potential.max()),
         # 皮膚を通って流れ込む電流密度の最大（縁の集中の指標。SPEC §2.5）

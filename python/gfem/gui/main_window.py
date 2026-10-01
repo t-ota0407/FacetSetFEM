@@ -930,12 +930,52 @@ class MainWindow(QMainWindow):
         self._refresh_after_history()
         self.log(tr("Redone: {what}", what=label))
 
+    def apply_element_order(self) -> None:
+        """解析条件の要素の次数に合わせてメッシュを入れ替え、描き直す（SPEC §2.3）。
+
+        2 次に上げるのは大きなモデルで時間がかかるので、ローディングを出して別スレッドで行う。
+        """
+        try:
+            changed = self.run_busy(
+                tr("Changing the element order"), self.session.sync_element_order
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.show_error(exc)
+            return
+        if changed:
+            mesh = self.session.mesh
+            self.log(
+                tr(
+                    "Element order {order}: {n:,} nodes",
+                    order=mesh.element_order,
+                    n=mesh.n_nodes,
+                )
+            )
+            self.convergence.clear()
+            self.checks_view.clear()
+            self.refresh_all()
+            self.page_solver.reload()
+        self._refresh_history_actions()
+
     def _refresh_after_history(self) -> None:
         """Undo / Redo の後。ツリーと、開いているページを戻した条件で読み直す。
 
         以前は `refresh_all` だけで、開いているページは戻す前の値を出したまま
         （電流を戻しても欄は古い値）、戻した操作で消えた電極のページも出たままだった。
+        要素の次数が戻ったときは、メッシュも戻した次数に入れ替える。
         """
+        changed = False
+        if self.session.element_order_out_of_sync():
+            try:
+                changed = self.run_busy(
+                    tr("Changing the element order"), self.session.sync_element_order
+                )
+            except Exception as exc:  # noqa: BLE001
+                self.show_error(exc)
+        if changed:
+            self.convergence.clear()
+            self.checks_view.clear()
+            self.page_mesh.reload()
         with self.busy(tr("Building the view")):
             self.refresh_tree()
             self.page_result.reload()
@@ -1795,12 +1835,24 @@ class MainWindow(QMainWindow):
         # 合わせ直すことがあるので、どれも reset_camera=False で足し、モデル全体に
         # 合わせ直すのは新しいメッシュを開いたときだけにする（下の `_frame_new_mesh`）
         for layer, layer_opacity in layers:
+            # 2 次要素の面は 4 枚の三角形に割って描くので、稜線は元の要素の辺だけを線で足す
+            # （show_edges に任せると分割の線まで出る。`Session.element_edges`）
+            element_edges = self.session.element_edges(layer) if edges else None
+            if element_edges is not None:
+                self.plotter.add_mesh(
+                    element_edges,
+                    color=EDGE_COLOR,
+                    line_width=1,
+                    opacity=layer_opacity,
+                    reset_camera=False,
+                )
+            layer_edges = edges and element_edges is None
             if scalars is None:
                 # 色分けなし。形は**陰影と稜線**で見せる（SPEC §6.3）
                 self.plotter.add_mesh(
                     layer,
                     color=SURFACE_COLOR,
-                    show_edges=edges,
+                    show_edges=layer_edges,
                     edge_color=EDGE_COLOR,
                     line_width=1,
                     specular=0.25,
@@ -1814,7 +1866,7 @@ class MainWindow(QMainWindow):
                     layer,
                     scalars=scalars,
                     cmap=options["cmap"],
-                    show_edges=edges,
+                    show_edges=layer_edges,
                     edge_color=EDGE_COLOR,
                     clim=clim,
                     scalar_bar_args=SCALAR_BAR,
