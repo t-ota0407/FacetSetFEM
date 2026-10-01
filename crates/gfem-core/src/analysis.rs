@@ -505,10 +505,11 @@ pub fn solve_with_backend<B: LinearBackend>(
     )
 }
 
-/// 2 次要素（Tet10）での求解は、電極荷重と後処理が対応するまで止める（M12 の途中）。
+/// 2 次要素（Tet10）での求解は、組み立てと後処理が対応するまで止める（M12 の途中）。
 ///
-/// 要素・読み込み・2 次への変換は入ったが、電極の荷重はまだ頂点だけの三角形で配っていて、
-/// そのまま解くと電流の総量は合うのに分布が違う答えになる。気づけない誤りなので、
+/// 要素・読み込み・2 次への変換・電極荷重（6 節点の面）は入ったが、剛性の組み立てと
+/// 後処理（電界の代表値・保存則の検査・等値面など）がまだ 2 次要素に対応していない。
+/// 保存則の検査は要素中心の 1 点で電力を数えているので、2 次要素では必ず誤った警告になる。
 /// 対応が揃うまでは入口で止める。
 fn reject_unfinished_quadratic(mesh: &Mesh) -> Result<()> {
     if mesh.solids.iter().any(|b| b.kind().is_quadratic()) {
@@ -517,9 +518,9 @@ fn reject_unfinished_quadratic(mesh: &Mesh) -> Result<()> {
             "2 次要素（10 節点の CTETRA）での求解はまだ使えません"
         ))
         .with_hint(crate::tr!(
-            "Electrode loads and post-processing for second-order elements are still being \
+            "Assembly and post-processing for second-order elements are still being \
              implemented. Solve with first-order elements for now",
-            "2 次要素に対応した電極の荷重と後処理を実装中です。今は 1 次要素で解いてください"
+            "2 次要素に対応した組み立てと後処理を実装中です。今は 1 次要素で解いてください"
         )));
     }
     Ok(())

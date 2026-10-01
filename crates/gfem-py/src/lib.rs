@@ -628,11 +628,8 @@ impl PyMesh {
         let d = self.describe_faces(py, &surface_faces)?;
         // 面数と面積はシェルを含めた全体で出す（ソルバが使う値と一致させる）
         let mut area = 0.0;
-        let mut points = [[0.0f64; 3]; 4];
         for &face in &faces {
-            let (kind, conn) = lookup.face_nodes(face);
-            self.inner.gather_coords(conn, &mut points[..conn.len()]);
-            area += gfem_core::element::shell::face_integral(kind, &points[..conn.len()]).area;
+            area += lookup.face_trace(face).integral(&self.inner).area;
         }
         d.set_item("n_faces", faces.len())?;
         d.set_item("area", area)?;

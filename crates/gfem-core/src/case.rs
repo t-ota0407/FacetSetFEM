@@ -11,7 +11,7 @@ use crate::error::{ErrorKind, GfemError, Result, format_sample_list};
 use crate::material::Conductivity;
 pub use crate::mesh::pick::RectShape;
 use crate::mesh::pick::{PatchFrame, SurfacePicker};
-use crate::mesh::topology::{FaceKey, Surface, face_key};
+use crate::mesh::topology::{FaceKey, FaceTrace, Surface, SurfaceFace, face_key};
 use crate::mesh::{ElemId, Mesh, NodeId, NodeIndex, PropId};
 use crate::solver::amg::AmgOptions;
 use std::collections::{BTreeMap, BTreeSet};
@@ -951,11 +951,17 @@ impl Case {
                 }
             };
             let mut off_surface: Vec<String> = Vec::new();
+            let mut mismatched: Vec<String> = Vec::new();
             for &face in &faces {
-                let (_, nodes) = lookup.face_nodes(face);
-                if !surface.contains(nodes) {
+                let nodes = lookup.face_corners(face);
+                match surface.find(nodes) {
                     // パッチは外表面から選ぶので、ここに来るのはシェル要素だけ
-                    off_surface.push(lookup.label(face));
+                    None => off_surface.push(lookup.label(face)),
+                    Some(f) => {
+                        if !mid_nodes_match(lookup, face, f) {
+                            mismatched.push(lookup.label(face));
+                        }
+                    }
                 }
                 if let Some(other) = used_faces.insert(face_key(nodes), index)
                     && other != index
@@ -1002,8 +1008,62 @@ impl Case {
                     )),
                 );
             }
+            if !mismatched.is_empty() {
+                problems.push(
+                    GfemError::new(
+                        ErrorKind::Case,
+                        crate::tr!(
+                            "The mid-side nodes of {1} CTRIA6 face(s) of electrode {0} do not match \
+                             the solid element below: {2}",
+                            "電極 {} の CTRIA6 のうち {} 枚で、辺の中点の節点が下のソリッド要素と\
+                             一致しません: {}",
+                            e.name,
+                            mismatched.len(),
+                            format_sample_list(&mismatched, SAMPLE_LIMIT)
+                        ),
+                    )
+                    .with_hint(crate::tr!(
+                        "A CTRIA6 can only be placed on a face of a 10-node CTETRA, and its mid-side \
+                         nodes G4–G6 must be the same GRIDs as those of the solid. On a first-order \
+                         mesh, use CTRIA3",
+                        "CTRIA6 は 10 節点の CTETRA の面にだけ置けて、辺の中点 G4〜G6 は\
+                         ソリッドと同じ GRID でなければなりません。1 次要素のメッシュでは CTRIA3 を使ってください"
+                    )),
+                );
+            }
         }
     }
+}
+
+/// シェル要素の辺の中点が、下のソリッド要素の面の中点と一致するか。
+///
+/// 1 次のシェル要素（CTRIA3 / CQUAD4）と体表面の面はいつも通す（頂点の照合で足りる。
+/// 2 次要素の面に載った CTRIA3 は、ソリッドの面で積分する。[`FaceLookup::face_trace`]）。
+/// CTRIA6 は、下が 2 次要素で、辺ごとの中点の節点がソリッドと同じときだけ通す。
+fn mid_nodes_match(lookup: &FaceLookup, face: ElectrodeFace, below: &SurfaceFace) -> bool {
+    let ElectrodeFace::Shell(i) = face else {
+        return true;
+    };
+    let shell = lookup.mesh().shell(i as usize);
+    if !shell.kind.is_quadratic() {
+        return true;
+    }
+    let solid = below.trace(lookup.mesh());
+    if !solid.kind().is_quadratic() {
+        return false;
+    }
+    // 辺（両端の頂点の組）→ 中点。向きが逆でも同じ辺として比べる
+    let edges = |nodes: &[NodeIndex]| {
+        let mut out: Vec<([NodeIndex; 2], NodeIndex)> = (0..3)
+            .map(|k| {
+                let (a, b) = (nodes[k], nodes[(k + 1) % 3]);
+                ([a.min(b), a.max(b)], nodes[3 + k])
+            })
+            .collect();
+        out.sort_unstable();
+        out
+    };
+    edges(shell.conn) == edges(solid.nodes())
 }
 
 /// 電極に属する面（昇順・重複なし）を求める。
@@ -1098,11 +1158,11 @@ pub fn resolve_faces(lookup: &FaceLookup, electrode: &Electrode) -> Result<Vec<E
         let shells: BTreeSet<FaceKey> = faces
             .iter()
             .filter(|f| matches!(f, ElectrodeFace::Shell(_)))
-            .map(|f| face_key(lookup.face_nodes(*f).1))
+            .map(|f| face_key(lookup.face_corners(*f)))
             .collect();
         faces.retain(|f| match f {
             ElectrodeFace::Shell(_) => true,
-            ElectrodeFace::Surface(_) => !shells.contains(&face_key(lookup.face_nodes(*f).1)),
+            ElectrodeFace::Surface(_) => !shells.contains(&face_key(lookup.face_corners(*f))),
         });
     }
 
@@ -1140,8 +1200,8 @@ pub fn resolve_faces(lookup: &FaceLookup, electrode: &Electrode) -> Result<Vec<E
             ),
         )
         .with_hint(crate::tr!(
-            "Specify IDs of existing CTRIA3 / CQUAD4 elements",
-            "CTRIA3 / CQUAD4 として存在する要素 ID を指定してください"
+            "Specify IDs of existing CTRIA3 / CQUAD4 / CTRIA6 elements",
+            "CTRIA3 / CQUAD4 / CTRIA6 として存在する要素 ID を指定してください"
         )));
     }
     if faces.is_empty() {
@@ -1165,7 +1225,7 @@ pub fn resolve_faces(lookup: &FaceLookup, electrode: &Electrode) -> Result<Vec<E
 
 /// 電極を構成する面 1 枚。
 ///
-/// シェル要素（CTRIA3 / CQUAD4）と、ソリッドの外表面から選んだ面の両方がありうる。
+/// シェル要素（CTRIA3 / CQUAD4 / CTRIA6）と、ソリッドの外表面から選んだ面の両方がありうる。
 /// **後者はシェル要素を持たないモデルのための経路**で、荷重の作り方（面積按分。
 /// SPEC §2.4）はどちらも同じ。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -1300,20 +1360,41 @@ impl<'a> FaceLookup<'a> {
         self.index().picker(self.mesh, self.surface)
     }
 
-    /// 面の種類と節点（面積分に渡す形）。
-    pub fn face_nodes(
-        &self,
-        face: ElectrodeFace,
-    ) -> (crate::element::ElementKind, &'a [NodeIndex]) {
+    /// 面の頂点（体表面との照合・面の重なりの判定に使う）。
+    ///
+    /// 2 次の面（CTRIA6・Tet10 の面）でも頂点 3 つだけを返す。面は頂点で決まるので、
+    /// CTRIA3 で指した面と Tet10 の体表面の面が同じ 1 枚として照合できる。
+    pub fn face_corners(&self, face: ElectrodeFace) -> &'a [NodeIndex] {
         match face {
             ElectrodeFace::Shell(i) => {
                 let s = self.mesh.shell(i as usize);
-                (s.kind, s.conn)
+                &s.conn[..s.kind.corner_count()]
             }
-            ElectrodeFace::Surface(i) => {
-                let f = &self.surface.faces()[i as usize];
-                (f.kind(), f.nodes())
+            ElectrodeFace::Surface(i) => self.surface.faces()[i as usize].nodes(),
+        }
+    }
+
+    /// 面積分に使う節点と面の種類（SPEC §2.4）。
+    ///
+    /// **2 次要素の面に載ったシェル要素は、ソリッドの面（辺の中点つきの Tria6）で積分する。**
+    /// シェル要素は面を選ぶためだけに使う。1 次のメッシュから 2 次に上げたものでは
+    /// 電極が CTRIA3 のまま残るが、それを頂点だけで積分すると、電流の総量は合うのに
+    /// 配り方が 2 次の形状関数と食い違う（頂点に A/3 ずつ配り、中点に 0）。
+    /// 1 次要素の面に載ったシェル要素は、これまでどおりシェル要素そのもので積分する。
+    pub fn face_trace(&self, face: ElectrodeFace) -> FaceTrace {
+        match face {
+            ElectrodeFace::Shell(i) => {
+                let s = self.mesh.shell(i as usize);
+                let on_quadratic = self
+                    .surface
+                    .find(&s.conn[..s.kind.corner_count()])
+                    .filter(|f| self.mesh.solid(f.element as usize).kind.is_quadratic());
+                match on_quadratic {
+                    Some(f) => f.trace(self.mesh),
+                    None => FaceTrace::new(s.kind, s.conn),
+                }
             }
+            ElectrodeFace::Surface(i) => self.surface.faces()[i as usize].trace(self.mesh),
         }
     }
 

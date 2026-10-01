@@ -262,6 +262,7 @@ impl Builder {
             "CHEXA" => self.count_and(name, |s| s.solid(card, ElementKind::Hex8, 20)),
             "CTRIA3" => self.count_and(name, |s| s.shell(card, ElementKind::Tria3)),
             "CQUAD4" => self.count_and(name, |s| s.shell(card, ElementKind::Quad4)),
+            "CTRIA6" => self.count_and(name, |s| s.tria6(card)),
             "PSOLID" => self.count_and(name, |s| s.property(card, "PSOLID")),
             "PSHELL" => self.count_and(name, |s| s.property(card, "PSHELL")),
             "CORD2R" => self.count_and(name, |s| s.coord(card, CoordKind::Rectangular)),
@@ -469,6 +470,41 @@ impl Builder {
             block.conn_ids.push(field_id(card, 3 + k, *name)?);
         }
         Ok(())
+    }
+
+    /// `CTRIA6 EID PID G1 G2 G3 [G4 G5 G6] [THETA ZOFFS T1 T2 T3 TFLAG]`
+    ///
+    /// G4〜G6（辺の中点）が全て空欄なら 1 次の Tria3、全て書かれていれば 2 次の Tria6。
+    /// 一部だけのものは CTETRA と同じく扱わない。後ろに構造用の欄が続くので、
+    /// CTETRA のように「最後の空でない欄」では判定できず、G4〜G6 を 1 つずつ見る。
+    fn tria6(&mut self, card: &Card) -> Result<()> {
+        let blank: Vec<usize> = (3..6).filter(|&k| card.field(3 + k).is_empty()).collect();
+        match blank.len() {
+            0 => self.shell(card, ElementKind::Tria6),
+            3 => self.shell(card, ElementKind::Tria3),
+            _ => {
+                let eid = field_id(card, 1, ELEMENT_ID)?;
+                let names: Vec<&str> = blank
+                    .iter()
+                    .map(|&k| {
+                        let (en, ja) = NODE_FIELD_NAMES[k];
+                        if crate::i18n::is_ja() { ja } else { en }
+                    })
+                    .collect();
+                Err(GfemError::unsupported(crate::tr!(
+                    "A CTRIA6 with only some of its mid-side nodes is not supported (blank: {})",
+                    "辺の中点の一部だけを書いた CTRIA6 には対応していません（空欄: {}）",
+                    names.join(", ")
+                ))
+                .with_line(card.line())
+                .with_card("CTRIA6")
+                .with_entity(crate::tr!("element EID={eid}", "要素 EID={eid}"))
+                .with_hint(crate::tr!(
+                    "Write all three mid-side nodes G4–G6, or leave all of them blank",
+                    "辺の中点 G4〜G6 を 3 つとも書くか、すべて空欄にしてください"
+                )))
+            }
+        }
     }
 
     /// `CTRIA3 / CQUAD4 EID PID G1 ... [THETA/MCID ZOFFS]`
@@ -1288,6 +1324,29 @@ CPENTA,10,1,1,2,3,4,5,6
             + "CTETRA,10,1,1,2,3,4,5,6\n,7,8,9,10\n";
         let e = read(&text, LengthUnit::Meter).unwrap_err();
         assert!(e.to_string().contains("ヤコビアンの符号"), "{e}");
+    }
+
+    #[test]
+    fn ctria6_is_read_with_or_without_its_mid_side_nodes() {
+        // G4〜G6 があれば 2 次の Tria6、全て空欄なら 1 次の Tria3。後ろの THETA などは読み飛ばす
+        let text = format!(
+            "{TET10_GRIDS}PSHELL,101,1,0.1\nCTRIA6,100,101,1,3,2,7,6,5\n,0.0\n\
+             CTRIA6,101,101,1,2,4,,,\n"
+        );
+        let (mesh, _) = read(&text, LengthUnit::Meter).unwrap();
+        let kinds: Vec<ElementKind> = mesh.shells.iter().map(|b| b.kind()).collect();
+        assert_eq!(kinds, [ElementKind::Tria3, ElementKind::Tria6]);
+        let tria6 = mesh.block(ElementKind::Tria6).unwrap();
+        let ids: Vec<u32> = tria6.conn_of(0).iter().map(|&i| mesh.nodes.id(i)).collect();
+        assert_eq!(ids, [1, 3, 2, 7, 6, 5]);
+    }
+
+    #[test]
+    fn ctria6_with_some_mid_side_nodes_gives_a_helpful_error() {
+        let text = format!("{TET10_GRIDS}CTRIA6,100,101,1,3,2,7,,5\n");
+        let e = read(&text, LengthUnit::Meter).unwrap_err();
+        let s = e.to_string();
+        assert!(s.contains("一部だけ") && s.contains("G5"), "{s}");
     }
 
     #[test]

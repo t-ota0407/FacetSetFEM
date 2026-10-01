@@ -65,12 +65,18 @@ impl SurfacePicker {
             let inv = 1.0 / nodes.len() as f64;
             centroids.extend(c.iter().map(|v| v * inv));
             pids.push(mesh.solid(f.element as usize).pid);
-            areas.push(crate::element::shell::face_integral(f.kind(), &points[..nodes.len()]).area);
+            // 面積と法線は面積分と同じ節点で求める（2 次要素の面は辺の中点つきの Tria6）。
+            // 中心は頂点の平均のまま（辺が真っ直ぐなら中点を入れても同じ点になる）
+            let trace = f.trace(mesh);
+            let (kind, n) = (trace.kind(), trace.nodes().len());
+            let at = trace.points(mesh);
+            areas.push(crate::element::shell::face_integral(kind, &at[..n]).area);
             // 外表面の面は外向き法線になる順に並んでいる（topology の SurfaceFace）
-            normals.extend(face_normal(f.kind(), &points[..nodes.len()]));
+            normals.extend(face_normal(kind, &at[..n]));
         }
 
-        // 稜線 → その稜線を持つ面。外表面は多様体なので、ふつう 1 稜線に 2 面
+        // 稜線 → その稜線を持つ面。外表面は多様体なので、ふつう 1 稜線に 2 面。
+        // 面の節点は頂点だけなので、2 次要素の面でも頂点どうしの辺になる
         let mut edges: BTreeMap<[NodeIndex; 2], Vec<u32>> = BTreeMap::new();
         for (i, f) in faces.iter().enumerate() {
             let nodes = f.nodes();

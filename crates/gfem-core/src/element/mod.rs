@@ -34,6 +34,9 @@ pub enum ElementKind {
     Tria3,
     /// 1 次四辺形シェル（Nastran: CQUAD4）。電極面の指定に使う
     Quad4,
+    /// 2 次三角形シェル（Nastran: CTRIA6）。2 次四面体のメッシュで電極面の指定に使う。
+    /// 2 次四面体の面（体表面の面を積分するとき）もこの種類として扱う
+    Tria6,
 }
 
 impl ElementKind {
@@ -46,6 +49,7 @@ impl ElementKind {
             ElementKind::Tet10 => 10,
             ElementKind::Tria3 => 3,
             ElementKind::Quad4 => 4,
+            ElementKind::Tria6 => 6,
         }
     }
 
@@ -59,13 +63,14 @@ impl ElementKind {
 
     /// 2 次要素か（辺の中点にも節点を持つ）。
     pub const fn is_quadratic(self) -> bool {
-        matches!(self, ElementKind::Tet10)
+        matches!(self, ElementKind::Tet10 | ElementKind::Tria6)
     }
 
     /// 頂点の節点数。2 次要素では先頭のこの数だけが頂点で、残りは辺の中点。
     pub const fn corner_count(self) -> usize {
         match self {
             ElementKind::Tet10 => 4,
+            ElementKind::Tria6 => 3,
             other => other.node_count(),
         }
     }
@@ -78,6 +83,7 @@ impl ElementKind {
             ElementKind::Hex8 => "CHEXA",
             ElementKind::Tria3 => "CTRIA3",
             ElementKind::Quad4 => "CQUAD4",
+            ElementKind::Tria6 => "CTRIA6",
         }
     }
 
@@ -93,7 +99,7 @@ impl ElementKind {
     ///
     /// CTETRA → VTK_TETRA(10), CPENTA → VTK_WEDGE(13), CHEXA → VTK_HEXAHEDRON(12),
     /// 10 節点の CTETRA → VTK_QUADRATIC_TETRA(24),
-    /// CTRIA3 → VTK_TRIANGLE(5), CQUAD4 → VTK_QUAD(9)。
+    /// CTRIA3 → VTK_TRIANGLE(5), CQUAD4 → VTK_QUAD(9), CTRIA6 → VTK_QUADRATIC_TRIANGLE(22)。
     /// 節点の並びは CPENTA だけ VTK と逆向きなので、書き出すときは
     /// [`vtk_node_order`](Self::vtk_node_order) で並べ替えること。
     pub const fn vtk_cell_type(self) -> u8 {
@@ -104,6 +110,7 @@ impl ElementKind {
             ElementKind::Tet10 => 24,
             ElementKind::Tria3 => 5,
             ElementKind::Quad4 => 9,
+            ElementKind::Tria6 => 22,
         }
     }
 
@@ -122,6 +129,7 @@ impl ElementKind {
             ElementKind::Tet10 => &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
             ElementKind::Tria3 => &[0, 1, 2],
             ElementKind::Quad4 => &[0, 1, 2, 3],
+            ElementKind::Tria6 => &[0, 1, 2, 3, 4, 5],
         }
     }
 
@@ -137,7 +145,19 @@ impl ElementKind {
             ElementKind::Tet4 | ElementKind::Tet10 => &TET4_FACES,
             ElementKind::Penta6 => &PENTA6_FACES,
             ElementKind::Hex8 => &HEX8_FACES,
-            ElementKind::Tria3 | ElementKind::Quad4 => &[],
+            ElementKind::Tria3 | ElementKind::Quad4 | ElementKind::Tria6 => &[],
+        }
+    }
+
+    /// 2 次要素の面の、辺の中点の節点（局所番号）。[`faces`](Self::faces) と同じ並びで、
+    /// 面の頂点 `[c0, c1, c2]` に対して辺 c0-c1, c1-c2, c2-c0 の中点を並べる
+    /// （CTRIA6 の G4..G6 と同じ順）。1 次要素では空。
+    ///
+    /// 頂点のあとにこれを続けたものが、面積分に使う 6 節点の三角形（Tria6）になる。
+    pub const fn face_mid_nodes(self) -> &'static [&'static [usize]] {
+        match self {
+            ElementKind::Tet10 => &TET10_FACE_MIDS,
+            _ => &[],
         }
     }
 
@@ -153,6 +173,11 @@ impl ElementKind {
 
 /// Tet4 の 4 面。節点順序は外向き法線になるように選んである。
 const TET4_FACES: [&[usize]; 4] = [&[1, 2, 3], &[0, 3, 2], &[0, 1, 3], &[0, 2, 1]];
+
+/// Tet10 の 4 面の辺の中点（[`TET4_FACES`] の各面の辺 c0-c1, c1-c2, c2-c0 の順）。
+///
+/// 中点の局所番号は 4 = 辺 0-1、5 = 1-2、6 = 2-0、7 = 0-3、8 = 1-3、9 = 2-3（[`tet10::EDGES`]）。
+const TET10_FACE_MIDS: [&[usize]; 4] = [&[5, 9, 8], &[7, 9, 6], &[4, 8, 7], &[6, 5, 4]];
 
 /// Penta6 の 5 面（三角 2 + 四辺形 3）。
 const PENTA6_FACES: [&[usize]; 5] = [
@@ -293,6 +318,26 @@ mod tests {
     }
 
     #[test]
+    fn tet10_face_mid_nodes_lie_on_the_face_edges() {
+        // 面の頂点 [c0, c1, c2] の辺 c0-c1, c1-c2, c2-c0 の中点が、その順に並んでいること
+        let corners = ElementKind::Tet10.faces();
+        let mids = ElementKind::Tet10.face_mid_nodes();
+        assert_eq!(corners.len(), mids.len());
+        for (c, m) in corners.iter().zip(mids) {
+            for k in 0..3 {
+                let (a, b) = (c[k], c[(k + 1) % 3]);
+                let [p, q] = tet10::EDGES[m[k] - 4];
+                assert!(
+                    (p, q) == (a, b) || (p, q) == (b, a),
+                    "面 {c:?} の辺 {a}-{b} に中点 {} が乗っていない",
+                    m[k]
+                );
+            }
+        }
+        assert!(ElementKind::Tet4.face_mid_nodes().is_empty());
+    }
+
+    #[test]
     fn max_edge_of_unit_cube_diagonal() {
         let p = [[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]];
         assert!((max_edge_length(&p) - 3.0f64.sqrt()).abs() < 1e-15);
@@ -307,6 +352,7 @@ mod tests {
             ElementKind::Tet10,
             ElementKind::Tria3,
             ElementKind::Quad4,
+            ElementKind::Tria6,
         ] {
             let order = kind.vtk_node_order();
             assert_eq!(order.len(), kind.node_count(), "{kind:?}");

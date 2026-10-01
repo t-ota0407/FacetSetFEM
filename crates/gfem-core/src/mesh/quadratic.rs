@@ -618,6 +618,50 @@ mod tests {
     }
 
     #[test]
+    fn surface_areas_and_normals_match_the_first_order_ones() {
+        // 辺が真っ直ぐなので、6 節点の面で積分しても面積と法線は頂点の三角形と同じ
+        use crate::mesh::SurfacePicker;
+        use crate::mesh::topology::extract_surface;
+        let mesh = kuhn_box([2, 2, 1], [2.0, 1.0, 0.5]);
+        let q = elevate(&mesh).unwrap();
+        let (a, b) = (
+            extract_surface(&mesh).unwrap(),
+            extract_surface(&q).unwrap(),
+        );
+        let total = 2.0 * (2.0 * 1.0 + 2.0 * 0.5 + 1.0 * 0.5);
+        assert!((a.total_area(&mesh) - total).abs() < 1e-13);
+        assert!((b.total_area(&q) - total).abs() < 1e-13);
+        let (pa, pb) = (
+            SurfacePicker::build(&mesh, &a),
+            SurfacePicker::build(&q, &b),
+        );
+        assert_eq!(pa.len(), pb.len());
+        for f in 0..pa.len() as u32 {
+            assert!((pa.area(f) - pb.area(f)).abs() < 1e-15, "面 {f}");
+            let (na, nb) = (pa.normal(f), pb.normal(f));
+            for d in 0..3 {
+                assert!((na[d] - nb[d]).abs() < 1e-14, "面 {f}: {na:?} vs {nb:?}");
+            }
+        }
+        // 面のトレースは頂点のあとに、その面の辺の中点
+        for f in b.faces() {
+            let t = f.trace(&q);
+            assert_eq!(t.kind(), ElementKind::Tria6);
+            assert_eq!(t.corners(), f.nodes());
+            for k in 0..3 {
+                let (pa, pb) = (
+                    q.nodes.coord(t.nodes()[k]),
+                    q.nodes.coord(t.nodes()[(k + 1) % 3]),
+                );
+                let pm = q.nodes.coord(t.nodes()[3 + k]);
+                for d in 0..3 {
+                    assert_eq!(pm[d], 0.5 * (pa[d] + pb[d]));
+                }
+            }
+        }
+    }
+
+    #[test]
     fn solving_with_second_order_elements_is_stopped_for_now() {
         // 電極荷重と後処理が 2 次に対応するまでは、黙って違う答えを出さないよう入口で止める
         use crate::case::Case;

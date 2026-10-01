@@ -17,7 +17,7 @@
 //! 行列への組み込みと解き方は [`crate::contact`]。
 
 use crate::case::{Case, ElectrodeFace, ElectrodeModel, ElectrodeRole, FaceLookup, resolve_faces};
-use crate::element::shell::{face_integral, face_mass};
+use crate::element::shell::{MAX_FACE_NODES, face_integral, face_mass};
 use crate::error::{ErrorKind, GfemError, Result};
 use crate::mesh::{Mesh, NodeIndex};
 use std::collections::BTreeMap;
@@ -63,11 +63,11 @@ pub struct ElectrodeGeometry {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ContactFace {
     /// 面の節点索引。先頭 `n_nodes` 個が有効
-    pub nodes: [NodeIndex; 4],
-    /// 面の節点数（3 または 4）
+    pub nodes: [NodeIndex; MAX_FACE_NODES],
+    /// 面の節点数（3・4・6）
     pub n_nodes: u8,
     /// `∫_F N_i N_j dS` [m²]（[`face_mass`]）
-    pub mass: [[f64; 4]; 4],
+    pub mass: [[f64; MAX_FACE_NODES]; MAX_FACE_NODES],
 }
 
 impl ContactFace {
@@ -130,9 +130,11 @@ pub fn assemble_load(
         let mut area = 0.0;
         let mut contact_faces = Vec::new();
         let (mut sigma_area, mut sigma_weight) = (0.0, 0.0);
-        let mut points = [[0.0f64; 3]; 4];
+        let mut points = [[0.0f64; 3]; MAX_FACE_NODES];
         for &face in &faces {
-            let (kind, conn) = lookup.face_nodes(face);
+            // 2 次要素の面は辺の中点つきの 6 節点で積分する（頂点に 0、中点に A/3。SPEC §2.4）
+            let trace = lookup.face_trace(face);
+            let (kind, conn) = (trace.kind(), trace.nodes());
             let n = conn.len();
             mesh.gather_coords(conn, &mut points[..n]);
             let integral = face_integral(kind, &points[..n]);
@@ -154,14 +156,14 @@ pub fn assemble_load(
                 *weights.entry(node).or_insert(0.0) += integral.shape_integral[k];
             }
             if complete {
-                let mut nodes = [0; 4];
+                let mut nodes = [0; MAX_FACE_NODES];
                 nodes[..n].copy_from_slice(conn);
                 contact_faces.push(ContactFace {
                     nodes,
                     n_nodes: n as u8,
                     mass: face_mass(kind, &points[..n]),
                 });
-                if let Some(sigma) = sigma_under(lookup, case, face, conn) {
+                if let Some(sigma) = sigma_under(lookup, case, face, trace.corners()) {
                     sigma_area += sigma * integral.area;
                     sigma_weight += integral.area;
                 }
@@ -312,6 +314,149 @@ CTRIA3,200,201,1,2,4
         // 陽極面 (節点 0,2,1) の 3 節点に I/3 ずつ入るはずだが、
         // 節点 0 と 1 は陰極面にも属するので、単独で確認できるのは節点 2
         assert!((f[2] - 2.0e-3 / 3.0).abs() < 1e-18, "{}", f[2]);
+    }
+
+    /// 2 次に上げた単位四面体（電極は CTRIA3 のまま）。
+    fn raised() -> (Mesh, Case) {
+        let (mesh, case) = setup();
+        (crate::mesh::elevate(&mesh).unwrap(), case)
+    }
+
+    /// 電極の `∫N_i dS` を、頂点と辺の中点に分けて返す（節点索引 < 4 が頂点）。
+    fn split_weights(geo: &ElectrodeGeometry) -> (Vec<f64>, Vec<f64>) {
+        let corners = geo.node_weights.iter().filter(|w| w.0 < 4).map(|w| w.1);
+        let mids = geo.node_weights.iter().filter(|w| w.0 >= 4).map(|w| w.1);
+        (corners.collect(), mids.collect())
+    }
+
+    #[test]
+    fn a_ctria3_on_a_quadratic_mesh_is_integrated_as_the_quadratic_face() {
+        // 1 次から上げたメッシュでは電極が CTRIA3 のまま残る。荷重はソリッドの面
+        // （辺の中点つきの Tria6）で配る: 頂点に 0、辺の中点に A/3（SPEC §2.4）
+        let (mesh, case) = raised();
+        let surface = extract_surface(&mesh).unwrap();
+        let lookup = lookup_of(&mesh, &surface);
+        case.validate_with(&lookup).unwrap();
+        let (f, geo) = assemble_load(&mesh, &case, &lookup).unwrap();
+        let (corners, mids) = split_weights(&geo[0]);
+        assert_eq!((corners.len(), mids.len()), (3, 3));
+        assert!(corners.iter().all(|w| w.abs() < 1e-16), "{corners:?}");
+        assert!(
+            mids.iter().all(|w| (w - 0.5 / 3.0).abs() < 1e-15),
+            "{mids:?}"
+        );
+        assert!((geo[0].area - 0.5).abs() < 1e-15);
+        // 総電流は指定どおり、1ᵀf = 0
+        let injected: f64 =
+            geo[0].node_weights.iter().map(|w| w.1).sum::<f64>() * geo[0].current_density;
+        assert!((injected - 2.0e-3).abs() < 1e-17, "{injected}");
+        let sum: f64 = f.iter().sum();
+        assert!(sum.abs() < 1e-18, "1ᵀf = {sum}");
+    }
+
+    #[test]
+    fn a_complete_electrode_on_a_quadratic_mesh_uses_the_six_node_mass() {
+        let (mesh, mut case) = raised();
+        case.electrodes[0] = Electrode::anode("E1", 2.0e-3)
+            .with_shell_pids([101])
+            .with_contact_impedance(1.0e-4);
+        let surface = extract_surface(&mesh).unwrap();
+        let (_, geo) = assemble_load(&mesh, &case, &lookup_of(&mesh, &surface)).unwrap();
+        let face = &geo[0].contact_faces[0];
+        assert_eq!(face.n_nodes, 6);
+        // 質量行列の行和は ∫N_i dS、総和は面積
+        let weights: BTreeMap<NodeIndex, f64> = geo[0].node_weights.iter().copied().collect();
+        let mut total = 0.0;
+        for (a, &node) in face.nodes().iter().enumerate() {
+            let row: f64 = face.mass[a].iter().sum();
+            assert!((row - weights[&node]).abs() < 1e-16, "節点 {node}");
+            total += row;
+        }
+        assert!((total - 0.5).abs() < 1e-15);
+        // 下の組織の σ も引ける（頂点で外表面の面を探す）
+        assert_eq!(geo[0].underlying_sigma, 0.35);
+    }
+
+    /// 2 次の単位四面体（辺の中点 GRID 5〜10）に、CTRIA6 の電極を 2 枚貼ったもの。
+    fn tria6_deck(anode: &str) -> String {
+        format!(
+            "GRID,1,,0.0,0.0,0.0
+GRID,2,,1.0,0.0,0.0
+GRID,3,,0.0,1.0,0.0
+GRID,4,,0.0,0.0,1.0
+GRID,5,,0.5,0.0,0.0
+GRID,6,,0.5,0.5,0.0
+GRID,7,,0.0,0.5,0.0
+GRID,8,,0.0,0.0,0.5
+GRID,9,,0.5,0.0,0.5
+GRID,10,,0.0,0.5,0.5
+PSOLID,1,1
+PSHELL,101,1,0.1
+PSHELL,201,1,0.1
+CTETRA,10,1,1,2,3,4,5,6
+,7,8,9,10
+{anode}
+CTRIA6,200,201,1,2,4,5,9,8
+"
+        )
+    }
+
+    fn read_deck(deck: &str) -> Mesh {
+        read_nastran_from(deck.as_bytes(), Path::new("<test>"), LengthUnit::Meter)
+            .unwrap()
+            .0
+    }
+
+    #[test]
+    fn ctria6_electrodes_give_the_same_load_as_the_raised_ctria3() {
+        // CTRIA6 で書いた電極と、CTRIA3 を 2 次に上げたものは同じ面・同じ荷重になる
+        // （辺 1-3, 3-2, 2-1 の中点は GRID 7, 6, 5）
+        let mesh = read_deck(&tria6_deck("CTRIA6,100,101,1,3,2,7,6,5"));
+        let (_, case) = setup();
+        let surface = extract_surface(&mesh).unwrap();
+        let lookup = lookup_of(&mesh, &surface);
+        case.validate_with(&lookup).unwrap();
+        let (f6, geo6) = assemble_load(&mesh, &case, &lookup).unwrap();
+
+        let (raised, case) = raised();
+        let surface = extract_surface(&raised).unwrap();
+        let (f3, _) = assemble_load(&raised, &case, &lookup_of(&raised, &surface)).unwrap();
+        assert_eq!(geo6[0].node_weights.len(), 6);
+        // 節点の番号の付け方が違うので、座標で突き合わせる
+        for (i, &value) in f6.iter().enumerate() {
+            let p = mesh.nodes.coord(i as NodeIndex);
+            let j = (0..raised.nodes.len())
+                .find(|&j| raised.nodes.coord(j as NodeIndex) == p)
+                .unwrap();
+            assert!(
+                (value - f3[j]).abs() < 1e-18,
+                "節点 {p:?}: {value} vs {}",
+                f3[j]
+            );
+        }
+    }
+
+    #[test]
+    fn a_ctria6_whose_mid_side_nodes_differ_from_the_solid_is_an_error() {
+        // 中点の並びを 1 つずらす（辺 1-3 の中点に辺 3-2 の中点を書く）
+        let mesh = read_deck(&tria6_deck("CTRIA6,100,101,1,3,2,6,7,5"));
+        let (_, case) = setup();
+        let surface = extract_surface(&mesh).unwrap();
+        let e = case.validate_with(&lookup_of(&mesh, &surface)).unwrap_err();
+        assert!(e.to_string().contains("一致しません"), "{e}");
+    }
+
+    #[test]
+    fn a_ctria6_on_a_first_order_mesh_is_an_error() {
+        let deck = DECK.replace(
+            "CTRIA3,100,101,1,3,2",
+            "GRID,5,,0.5,0.0,0.0\nGRID,6,,0.5,0.5,0.0\nGRID,7,,0.0,0.5,0.0\nCTRIA6,100,101,1,3,2,7,6,5",
+        );
+        let mesh = read_deck(&deck);
+        let (_, case) = setup();
+        let surface = extract_surface(&mesh).unwrap();
+        let e = case.validate_with(&lookup_of(&mesh, &surface)).unwrap_err();
+        assert!(e.to_string().contains("CTRIA6"), "{e}");
     }
 
     #[test]

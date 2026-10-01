@@ -13,6 +13,7 @@
 //! （CLAUDE.md 設計原則 1）。
 
 use crate::element::ElementKind;
+use crate::element::shell::MAX_FACE_NODES;
 use crate::error::{GfemError, Result, format_sample_list};
 use crate::mesh::tetview::TetView;
 use crate::mesh::{Mesh, NodeIndex, PropId};
@@ -35,11 +36,14 @@ pub fn face_key(nodes: &[NodeIndex]) -> FaceKey {
 }
 
 /// 外表面の面 1 枚。
+///
+/// 節点は**頂点だけ**を持つ。2 次要素（Tet10）の面でも 3 頂点で、照合・表示・ピックは
+/// 1 次の面と同じに扱える。面積分に使う辺の中点つきの節点は [`trace`](Self::trace) で引く。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SurfaceFace {
-    /// 面の節点索引。**外向き法線**になる順序。先頭 `n_nodes` 個が有効
+    /// 面の頂点の節点索引。**外向き法線**になる順序。先頭 `n_nodes` 個が有効
     pub nodes: [NodeIndex; 4],
-    /// 面の節点数（3 または 4）
+    /// 面の頂点の数（3 または 4）
     pub n_nodes: u8,
     /// 元のソリッド要素の通し番号（`Mesh::iter_solids` の `index`）
     pub element: u32,
@@ -48,17 +52,82 @@ pub struct SurfaceFace {
 }
 
 impl SurfaceFace {
-    /// 有効な節点索引。
+    /// 頂点の節点索引。
     pub fn nodes(&self) -> &[NodeIndex] {
         &self.nodes[..self.n_nodes as usize]
     }
 
-    /// 面要素としての種類。
+    /// 頂点だけで見た面の種類（Tria3 / Quad4）。面積分には [`trace`](Self::trace) を使う。
     pub fn kind(&self) -> ElementKind {
         match self.n_nodes {
             3 => ElementKind::Tria3,
             _ => ElementKind::Quad4,
         }
+    }
+
+    /// 面積分に使う節点と面の種類（SPEC §2.4）。
+    ///
+    /// 1 次要素の面は頂点そのもの（Tria3 / Quad4）。2 次要素の面は、頂点のあとに
+    /// 元の要素の辺の中点を続けた 6 節点の三角形（Tria6）になる。
+    pub fn trace(&self, mesh: &Mesh) -> FaceTrace {
+        let solid = mesh.solid(self.element as usize);
+        let mids = solid.kind.face_mid_nodes();
+        if mids.is_empty() {
+            return FaceTrace::new(self.kind(), self.nodes());
+        }
+        let mut nodes = [NO_NODE; MAX_FACE_NODES];
+        nodes[..3].copy_from_slice(self.nodes());
+        for (k, &l) in mids[self.local_face as usize].iter().enumerate() {
+            nodes[3 + k] = solid.conn[l];
+        }
+        FaceTrace::new(ElementKind::Tria6, &nodes)
+    }
+}
+
+/// 面積分に使う面の節点と種類（Tria3 / Quad4 / Tria6）。
+///
+/// 体表面の面（頂点だけ）とシェル要素（CTRIA3 / CQUAD4 / CTRIA6）を、同じ形で
+/// 面積分（`element::shell`）に渡すための入れ物。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FaceTrace {
+    kind: ElementKind,
+    nodes: [NodeIndex; MAX_FACE_NODES],
+}
+
+impl FaceTrace {
+    /// 面の種類と節点から作る。節点の数は `kind.node_count()` でなければならない。
+    pub fn new(kind: ElementKind, nodes: &[NodeIndex]) -> Self {
+        debug_assert_eq!(nodes.len(), kind.node_count());
+        let mut all = [NO_NODE; MAX_FACE_NODES];
+        all[..nodes.len()].copy_from_slice(nodes);
+        Self { kind, nodes: all }
+    }
+
+    /// 面の種類。
+    pub fn kind(&self) -> ElementKind {
+        self.kind
+    }
+
+    /// 節点索引（Tria6 は頂点 3 つのあとに辺の中点 3 つ）。
+    pub fn nodes(&self) -> &[NodeIndex] {
+        &self.nodes[..self.kind.node_count()]
+    }
+
+    /// 頂点の節点索引（面の照合に使う）。
+    pub fn corners(&self) -> &[NodeIndex] {
+        &self.nodes[..self.kind.corner_count()]
+    }
+
+    /// 面積・`∫N_i dS` を求める（[`crate::element::shell::face_integral`]）。
+    pub fn integral(&self, mesh: &Mesh) -> crate::element::shell::FaceIntegral {
+        crate::element::shell::face_integral(self.kind, &self.points(mesh)[..self.nodes().len()])
+    }
+
+    /// 節点の座標。先頭 `nodes().len()` 個が有効。
+    pub fn points(&self, mesh: &Mesh) -> [[f64; 3]; MAX_FACE_NODES] {
+        let mut points = [[0.0f64; 3]; MAX_FACE_NODES];
+        mesh.gather_coords(self.nodes(), &mut points);
+        points
     }
 }
 
@@ -105,14 +174,9 @@ impl Surface {
 
     /// 外表面の総面積 [m²]。
     pub fn total_area(&self, mesh: &Mesh) -> f64 {
-        let mut points = [[0.0f64; 3]; 4];
         self.faces
             .iter()
-            .map(|f| {
-                let n = f.n_nodes as usize;
-                mesh.gather_coords(f.nodes(), &mut points[..n]);
-                crate::element::shell::face_integral(f.kind(), &points[..n]).area
-            })
+            .map(|f| f.trace(mesh).integral(mesh).area)
             .sum()
     }
 
