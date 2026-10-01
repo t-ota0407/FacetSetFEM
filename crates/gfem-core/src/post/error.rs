@@ -16,6 +16,17 @@
 //! となる。実際に細分化列で誤差を測り、[`convergence_order`] で次数を出して
 //! 理論値からの逸脱を CI で検出する。
 //!
+//! 2 次四面体（Tet10）では理論上 1 つずつ上がって
+//!
+//! ```text
+//! ‖φ_h − φ‖_L2 = O(h³)      ‖E_h − E‖_L2 = O(h²)
+//! ```
+//!
+//! になる。2 次要素は 8 個の四面体に分けて 1 次補間すると 2 次の電位の情報が落ちるので、
+//! 分割せずに 2 次の形状関数のまま、細かい積分点（[`tet10::fine_quadrature`]）で積分する。
+//! 電界も要素の代表値（中心の値）ではなく、要素内で変わる E をそのまま評価する
+//! （[`l2_error_electric_field`]）。
+//!
 //! # 電位のゲージについて
 //!
 //! 全 Neumann 境界の問題では φ は定数分だけ不定なので（SPEC §2.2）、
@@ -24,7 +35,8 @@
 //! `∫(φ_h − φ − c)² dΩ` を最小にする c であり、ゲージの選び方に依らない
 //! 「形の誤差」だけを測ることになる。
 
-use crate::element::tet4;
+use crate::element::shape::{self, ShapeFunctions};
+use crate::element::{Tet10, tet4, tet10};
 use crate::error::{GfemError, Result};
 use crate::mesh::Mesh;
 use crate::mesh::tetview::TetView;
@@ -82,10 +94,49 @@ pub fn l2_error_potential<F>(mesh: &Mesh, phi: &[f64], exact: F) -> Result<Error
 where
     F: Fn([f64; 3]) -> f64,
 {
+    // 1 巡目: 差の体積重み平均（＝最適な定数シフト）を求める
+    let (diff_integral, volumes, samples) = if is_quadratic(mesh) {
+        quadratic_potential_samples(mesh, phi, &exact)?
+    } else {
+        linear_potential_samples(mesh, phi, &exact)?
+    };
+    let total_volume = reduce::sum(&volumes);
+    let gauge_shift = if total_volume > 0.0 {
+        reduce::sum(&diff_integral) / total_volume
+    } else {
+        0.0
+    };
+
+    // 2 巡目: シフトを除いてノルムを取る
+    let mut squared_error = Vec::with_capacity(samples.len());
+    let mut squared_reference = Vec::with_capacity(samples.len());
+    for &(w, diff, truth) in &samples {
+        let d = diff - gauge_shift;
+        squared_error.push(w * d * d);
+        squared_reference.push(w * truth * truth);
+    }
+    Ok(finish(
+        reduce::sum(&squared_error),
+        reduce::sum(&squared_reference),
+        gauge_shift,
+    ))
+}
+
+/// 求積点ごとの `(w·(φ_h − φ), w, (w, φ_h − φ, φ))`。
+type PotentialSamples = (Vec<f64>, Vec<f64>, Vec<(f64, f64, f64)>);
+
+/// 2 次要素（Tet10）が含まれるか。1 次要素と混ぜることは無い（`mesh::check_orders`）。
+fn is_quadratic(mesh: &Mesh) -> bool {
+    mesh.solids.iter().any(|b| b.kind().is_quadratic())
+}
+
+/// 1 次要素: 面共役な四面体分割の上で、4 点ガウスで積分する。
+fn linear_potential_samples<F>(mesh: &Mesh, phi: &[f64], exact: &F) -> Result<PotentialSamples>
+where
+    F: Fn([f64; 3]) -> f64,
+{
     let tets = TetView::build(mesh)?;
     let n = tets.len();
-
-    // 1 巡目: 差の体積重み平均（＝最適な定数シフト）を求める
     let mut diff_integral = Vec::with_capacity(n * 4);
     let mut volumes = Vec::with_capacity(n * 4);
     let mut samples = Vec::with_capacity(n * 4);
@@ -109,25 +160,105 @@ where
             samples.push((w, approx - truth, truth));
         }
     }
-    let total_volume = reduce::sum(&volumes);
-    let gauge_shift = if total_volume > 0.0 {
-        reduce::sum(&diff_integral) / total_volume
-    } else {
-        0.0
-    };
+    Ok((diff_integral, volumes, samples))
+}
 
-    // 2 巡目: シフトを除いてノルムを取る
-    let mut squared_error = Vec::with_capacity(samples.len());
-    let mut squared_reference = Vec::with_capacity(samples.len());
-    for &(w, diff, truth) in &samples {
-        let d = diff - gauge_shift;
-        squared_error.push(w * d * d);
-        squared_reference.push(w * truth * truth);
+/// 2 次要素: 分割せずに 2 次の形状関数のまま、32 点則で積分する。
+fn quadratic_potential_samples<F>(mesh: &Mesh, phi: &[f64], exact: &F) -> Result<PotentialSamples>
+where
+    F: Fn([f64; 3]) -> f64,
+{
+    let rule = tet10::fine_quadrature();
+    let n = mesh.n_solid_elements() * rule.len();
+    let mut diff_integral = Vec::with_capacity(n);
+    let mut volumes = Vec::with_capacity(n);
+    let mut samples = Vec::with_capacity(n);
+    for e in mesh.iter_solids() {
+        let (p, nodal) = tet10_nodes(mesh, phi, e.conn);
+        for q in &rule {
+            let (x, w) = tet10_point(&p, q)?;
+            let shape = Tet10::values(q.local);
+            let approx: f64 = (0..10).map(|i| shape[i] * nodal[i]).sum();
+            let truth = exact(x);
+            diff_integral.push(w * (approx - truth));
+            volumes.push(w);
+            samples.push((w, approx - truth, truth));
+        }
+    }
+    Ok((diff_integral, volumes, samples))
+}
+
+/// 2 次要素の節点座標と節点電位。
+fn tet10_nodes(mesh: &Mesh, phi: &[f64], conn: &[u32]) -> ([[f64; 3]; 10], [f64; 10]) {
+    let mut p = [[0.0f64; 3]; 10];
+    mesh.gather_coords(conn, &mut p);
+    let mut nodal = [0.0f64; 10];
+    for (v, &node) in nodal.iter_mut().zip(conn) {
+        *v = phi[node as usize];
+    }
+    (p, nodal)
+}
+
+/// 2 次要素の求積点の位置と重み（`重み × |det J|`）。
+fn tet10_point(p: &[[f64; 3]; 10], q: &shape::QuadraturePoint) -> Result<([f64; 3], f64)> {
+    let shape = Tet10::values(q.local);
+    let mut x = [0.0f64; 3];
+    for (i, point) in p.iter().enumerate() {
+        for d in 0..3 {
+            x[d] += shape[i] * point[d];
+        }
+    }
+    let det = shape::point_geometry::<Tet10>(p, q.local).det_jacobian;
+    if det == 0.0 || det.is_nan() {
+        return Err(GfemError::model(crate::tr!(
+            "The Jacobian of a 10-node CTETRA vanishes",
+            "10 節点の CTETRA のヤコビアンがゼロになっています"
+        )));
+    }
+    Ok((x, q.weight * det.abs()))
+}
+
+/// 節点電位から求めた電界 E = −∇φ_h と解析解の L2 誤差（SPEC §8 M2）。
+///
+/// 2 次要素では E が要素内で 1 次式で変わるので、`fields` の代表値（中心の値）ではなく、
+/// 求積点ごとに φ_h の勾配を評価する。代表値で測ると、要素内の変化を捨てたぶん
+/// 誤差が O(h) に落ちて見える。1 次要素では [`l2_error_field`] と同じ（`fields` の
+/// 電界をそのまま使う）。
+pub fn l2_error_electric_field<F>(
+    mesh: &Mesh,
+    phi: &[f64],
+    fields: &crate::post::FieldResult,
+    exact: F,
+) -> Result<ErrorNorms>
+where
+    F: Fn([f64; 3]) -> [f64; 3],
+{
+    if !is_quadratic(mesh) {
+        return l2_error_field(mesh, &fields.electric_field, exact);
+    }
+    let rule = tet10::fine_quadrature();
+    let mut squared_error = Vec::with_capacity(mesh.n_solid_elements() * rule.len());
+    let mut squared_reference = Vec::with_capacity(squared_error.capacity());
+    for e in mesh.iter_solids() {
+        let (p, nodal) = tet10_nodes(mesh, phi, e.conn);
+        for q in &rule {
+            let (x, w) = tet10_point(&p, q)?;
+            let approx = shape::electric_field::<Tet10>(&p, &nodal, q.local);
+            let truth = exact(x);
+            let d = [
+                approx[0] - truth[0],
+                approx[1] - truth[1],
+                approx[2] - truth[2],
+            ];
+            squared_error.push(w * (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]));
+            squared_reference
+                .push(w * (truth[0] * truth[0] + truth[1] * truth[1] + truth[2] * truth[2]));
+        }
     }
     Ok(finish(
         reduce::sum(&squared_error),
         reduce::sum(&squared_reference),
-        gauge_shift,
+        0.0,
     ))
 }
 

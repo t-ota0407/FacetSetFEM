@@ -142,7 +142,7 @@ pub fn clip(mesh: &Mesh, tets: &TetView, surface: &Surface, plane: &Plane) -> Tr
     let mut builder = Builder::new(mesh, &[]);
 
     // --- 外表面の残す側 ---------------------------------------------------------
-    let (triangles, owners) = surface.triangulate();
+    let (triangles, owners) = surface.triangulate(mesh);
     for (tri, owner) in triangles.into_iter().zip(owners) {
         let n_kept = tri.iter().filter(|&&n| kept(n)).count();
         match n_kept {

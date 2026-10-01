@@ -506,27 +506,6 @@ pub fn solve_with_backend<B: LinearBackend>(
     )
 }
 
-/// 2 次要素（Tet10）での求解は、組み立てと後処理が対応するまで止める（M12 の途中）。
-///
-/// 要素・読み込み・2 次への変換・電極荷重（6 節点の面）は入ったが、剛性の組み立てと
-/// 後処理（電界の代表値・保存則の検査・等値面など）がまだ 2 次要素に対応していない。
-/// 保存則の検査は要素中心の 1 点で電力を数えているので、2 次要素では必ず誤った警告になる。
-/// 対応が揃うまでは入口で止める。
-fn reject_unfinished_quadratic(mesh: &Mesh) -> Result<()> {
-    if mesh.solids.iter().any(|b| b.kind().is_quadratic()) {
-        return Err(GfemError::unsupported(crate::tr!(
-            "Solving with second-order elements (10-node CTETRA) is not available yet",
-            "2 次要素（10 節点の CTETRA）での求解はまだ使えません"
-        ))
-        .with_hint(crate::tr!(
-            "Assembly and post-processing for second-order elements are still being \
-             implemented. Solve with first-order elements for now",
-            "2 次要素に対応した組み立てと後処理を実装中です。今は 1 次要素で解いてください"
-        )));
-    }
-    Ok(())
-}
-
 fn run_with(
     solver: &dyn LinearSolver,
     lookup: &FaceLookup,
@@ -542,7 +521,6 @@ fn run_with(
     // 1 次と 2 次の混在・中点の食い違いは、解けてしまうが答えが黙って狂う（SPEC §2.3）。
     // 1 次要素だけのメッシュでは何もせずに返る
     crate::mesh::check_orders(mesh)?;
-    reject_unfinished_quadratic(mesh)?;
     // 検証と荷重の組み立てで同じ下ごしらえ（パッチ選択の索引など）を使う
     let mut warnings = case.validate_with(lookup)?;
     let prepare = extract + started.elapsed().as_secs_f64();
@@ -773,7 +751,7 @@ pub fn write_analysis_vtu(
         .flat_map(|b| b.pids().iter().map(|&p| p as i64))
         .collect();
 
-    let data = VtuData {
+    let mut data = VtuData {
         point_data: vec![
             DataArray::scalars_f64("phi [V]", &analysis.potential),
             DataArray::scalars_f64("|E| (nodal) [V/m]", &nodal_e),
@@ -790,5 +768,15 @@ pub fn write_analysis_vtu(
             DataArray::scalars_i64("PID", &pid),
         ],
     };
+    // 2 次要素では要素内の最大も出す（中心の値は最大を過小評価する。SPEC §5.1）
+    let (cell_e_peak, cell_j_peak);
+    if !fields.j_peak.is_empty() {
+        cell_e_peak = pad_for_shells(mesh, &fields.e_peak, 1, 0.0);
+        cell_j_peak = pad_for_shells(mesh, &fields.j_peak, 1, 0.0);
+        data.cell_data.extend([
+            DataArray::scalars_f64("|E| peak [V/m]", &cell_e_peak),
+            DataArray::scalars_f64("|J| peak [A/m2]", &cell_j_peak),
+        ]);
+    }
     write_vtu(path, mesh, &data, opts)
 }

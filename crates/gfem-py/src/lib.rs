@@ -418,7 +418,7 @@ impl PyMesh {
     ///
     /// 1000 万節点でも表面節点は数十万なので、GUI にはこれだけを渡す（SPEC §6.3）。
     fn surface_triangles<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<u32>>> {
-        let (tris, _) = self.surface()?.triangulate();
+        let (tris, _) = self.surface()?.triangulate(&self.inner);
         let flat: Vec<u32> = tris.into_iter().flatten().collect();
         let rows = flat.len() / 3;
         flat.into_pyarray(py).reshape([rows, 3])
@@ -433,7 +433,7 @@ impl PyMesh {
         let surface = py
             .detach(|| gfem_core::mesh::extract_region_boundaries(&self.inner))
             .map_err(to_py)?;
-        let (tris, owners) = surface.triangulate();
+        let (tris, owners) = surface.triangulate(&self.inner);
         let flat: Vec<u32> = tris.into_iter().flatten().collect();
         let rows = flat.len() / 3;
         Ok((
@@ -450,7 +450,7 @@ impl PyMesh {
         let surface = py
             .detach(|| gfem_core::mesh::extract_region_surface(&self.inner, pid))
             .map_err(to_py)?;
-        let (tris, owners) = surface.triangulate();
+        let (tris, owners) = surface.triangulate(&self.inner);
         let flat: Vec<u32> = tris.into_iter().flatten().collect();
         let rows = flat.len() / 3;
         Ok((
@@ -466,7 +466,7 @@ impl PyMesh {
         &self,
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyArray1<u32>>> {
-        let (_, owners) = self.surface()?.triangulate();
+        let (_, owners) = self.surface()?.triangulate(&self.inner);
         Ok(owners.into_pyarray(py))
     }
 

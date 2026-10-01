@@ -5,7 +5,8 @@ pub mod error;
 pub mod stats;
 
 pub use error::{
-    ErrorNorms, convergence_order, l2_error_field, l2_error_potential, mean_element_size,
+    ErrorNorms, convergence_order, l2_error_electric_field, l2_error_field, l2_error_potential,
+    mean_element_size,
 };
 pub use stats::{
     Hotspot, QuantityStats, RegionStats, region_stats, total_stats, write_convergence_csv,
@@ -16,7 +17,7 @@ use crate::assemble::csr::CsrMatrix;
 use crate::assemble::load::ElectrodeGeometry;
 use crate::case::ElectrodeRole;
 use crate::element::shape::{self, MAX_ELEMENT_NODES, ShapeFunctions};
-use crate::element::{ElementKind, Hex8, Penta6, tet4};
+use crate::element::{ElementKind, Hex8, Penta6, tet4, tet10};
 use crate::error::{GfemError, Result};
 use crate::geom::{dot, norm};
 use crate::material::Conductivity;
@@ -56,10 +57,17 @@ pub struct FieldResult {
     pub e_magnitude: Vec<f64>,
     /// |J| [A/m²]
     pub j_magnitude: Vec<f64>,
-    /// 電力密度 σ|E|² [W/m³]。熱連成（SPEC §9）の熱源項にそのまま使える
+    /// 電力密度 σ|E|² [W/m³]。熱連成（SPEC §9）の熱源項にそのまま使える。
+    /// 2 次要素では**要素内の平均**（`∫σ|E|² dΩ / V`。積分点で積分する）。
+    /// どちらでも `電力密度 × 体積` を足せば消費電力になる
     pub power_density: Vec<f64>,
     /// 要素体積 [m³]
     pub volume: Vec<f64>,
+    /// 要素内の |E| の最大 [V/m]。2 次要素のメッシュだけ（1 次要素では空。要素内で一定か、
+    /// 代表値で足りるため）。最大値・ホットスポットの評価に使う（SPEC §5.1 / §5.2）
+    pub e_peak: Vec<f64>,
+    /// 要素内の |J| の最大 [A/m²]。[`e_peak`](Self::e_peak) と同じく 2 次要素のメッシュだけ
+    pub j_peak: Vec<f64>,
 }
 
 impl FieldResult {
@@ -78,6 +86,16 @@ impl FieldResult {
     pub fn total_volume(&self) -> f64 {
         reduce::sum(&self.volume)
     }
+
+    /// 要素 `e` の中での |J| の最大。2 次要素は頂点での最大、1 次要素は要素値そのもの。
+    pub fn j_peak_of(&self, e: usize) -> f64 {
+        self.j_peak.get(e).copied().unwrap_or(self.j_magnitude[e])
+    }
+
+    /// 要素 `e` の中での |E| の最大（[`j_peak_of`](Self::j_peak_of) と同じ扱い）。
+    pub fn e_peak_of(&self, e: usize) -> f64 {
+        self.e_peak.get(e).copied().unwrap_or(self.e_magnitude[e])
+    }
 }
 
 /// 節点電位から要素ごとの E・J などを求める（SPEC §5.1）。
@@ -88,6 +106,12 @@ pub fn compute_fields(
 ) -> Result<FieldResult> {
     use rayon::prelude::*;
     let n = mesh.n_solid_elements();
+    // 要素内の最大は 2 次要素のメッシュだけで持つ（1 次要素では要素値で足りる）
+    let n_peaks = if mesh.solids.iter().any(|b| b.kind().is_quadratic()) {
+        n
+    } else {
+        0
+    };
     let mut out = FieldResult {
         n_elements: n,
         electric_field: vec![0.0; 3 * n],
@@ -96,11 +120,14 @@ pub fn compute_fields(
         j_magnitude: vec![0.0; n],
         power_density: vec![0.0; n],
         volume: vec![0.0; n],
+        e_peak: vec![0.0; n_peaks],
+        j_peak: vec![0.0; n_peaks],
     };
+    let peaks = n_peaks > 0;
 
     // 要素ごとに独立なので、出力を塊ごとに切り分けて並列に書く。
     // 各要素の値は逐次と同じ計算なので、結果はビット単位で変わらない
-    let results: Vec<Result<()>> = (
+    let results: Vec<Result<Vec<(f64, f64)>>> = (
         out.electric_field.par_chunks_mut(3 * FIELD_CHUNK),
         out.current_density.par_chunks_mut(3 * FIELD_CHUNK),
         out.e_magnitude.par_chunks_mut(FIELD_CHUNK),
@@ -112,6 +139,7 @@ pub fn compute_fields(
         .enumerate()
         .map(|(chunk, (field, current, e_mag, j_mag, power, volume))| {
             let start = chunk * FIELD_CHUNK;
+            let mut found = Vec::with_capacity(if peaks { volume.len() } else { 0 });
             for k in 0..volume.len() {
                 let f = element_field(mesh, conductivity, phi, &mesh.solid(start + k))?;
                 field[3 * k..3 * k + 3].copy_from_slice(&f.field);
@@ -120,14 +148,22 @@ pub fn compute_fields(
                 j_mag[k] = f.j_magnitude;
                 power[k] = f.power_density;
                 volume[k] = f.volume;
+                if peaks {
+                    found.push((f.e_peak, f.j_peak));
+                }
             }
-            Ok(())
+            Ok(found)
         })
         .collect();
     // 塊は通し番号の順に並んでいて、塊の中では最初の不正な要素で止まるので、
     // 逐次と同じく「通し番号がいちばん小さい要素のエラー」を返す
+    let mut at = 0;
     for r in results {
-        r?;
+        for (e_peak, j_peak) in r? {
+            out.e_peak[at] = e_peak;
+            out.j_peak[at] = j_peak;
+            at += 1;
+        }
     }
     Ok(out)
 }
@@ -143,6 +179,9 @@ struct ElementField {
     j_magnitude: f64,
     power_density: f64,
     volume: f64,
+    /// 要素内の |E|・|J| の最大（1 次要素では要素値と同じ）
+    e_peak: f64,
+    j_peak: f64,
 }
 
 fn element_field(
@@ -186,6 +225,22 @@ fn element_field(
             shape::electric_field::<Penta6>(&points[..n], &nodal[..n], Penta6::CENTRE),
             shape::volume::<Penta6>(&points[..n])?,
         ),
+        // 2 次要素は E が要素内で 1 次式で変わる。代表値は中心の値、電力は積分点で積分した
+        // 要素内の平均、最大は頂点で取る（element::tet10::field_summary）
+        ElementKind::Tet10 => {
+            let s = tet10::field_summary(&points[..n], &nodal[..n], sigma)?;
+            let current = sigma.apply(s.centre_field);
+            return Ok(ElementField {
+                field: s.centre_field,
+                current,
+                e_magnitude: norm(s.centre_field),
+                j_magnitude: norm(current),
+                power_density: s.power / s.volume,
+                volume: s.volume,
+                e_peak: s.e_peak,
+                j_peak: s.j_peak,
+            });
+        }
         other => {
             return Err(GfemError::unsupported(crate::tr!(
                 "{} cannot be treated as a solid element",
@@ -195,14 +250,17 @@ fn element_field(
         }
     };
     let current = sigma.apply(field);
+    let (e_magnitude, j_magnitude) = (norm(field), norm(current));
     Ok(ElementField {
         field,
         current,
-        e_magnitude: norm(field),
-        j_magnitude: norm(current),
+        e_magnitude,
+        j_magnitude,
         // σ|E|² = E·(σE) = E·J。異方性でも成り立つ形にしておく
         power_density: dot(field, current),
         volume,
+        e_peak: e_magnitude,
+        j_peak: j_magnitude,
     })
 }
 

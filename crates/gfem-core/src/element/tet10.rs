@@ -125,6 +125,43 @@ impl ShapeFunctions for Tet10 {
     }
 }
 
+/// 参照四面体を辺の中点で 8 つに分け、それぞれに 4 点則を当てた 32 点則（局所座標）。
+///
+/// 要素剛性には要らない（4 点則で足りる）。解析解との誤差（SPEC §8 M2）のように、
+/// 2 次の電位と滑らかな解析解の差の 2 乗を積分するときに使う。重みの総和は 1/6。
+pub fn fine_quadrature() -> Vec<QuadraturePoint> {
+    let v = LOCAL_NODES;
+    // 頂点に接する 4 つと、中の八面体を対角 (4, 9) で割った 4 つ
+    let children: [[usize; 4]; 8] = [
+        [0, 4, 6, 7],
+        [4, 1, 5, 8],
+        [6, 5, 2, 9],
+        [7, 8, 9, 3],
+        [4, 9, 5, 6],
+        [4, 9, 6, 7],
+        [4, 9, 7, 8],
+        [4, 9, 8, 5],
+    ];
+    let mut rule = Vec::with_capacity(32);
+    for c in children {
+        let (a, b, cc, d) = (v[c[0]], v[c[1]], v[c[2]], v[c[3]]);
+        let e1 = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+        let e2 = [cc[0] - a[0], cc[1] - a[1], cc[2] - a[2]];
+        let e3 = [d[0] - a[0], d[1] - a[1], d[2] - a[2]];
+        let det = e1[0] * (e2[1] * e3[2] - e2[2] * e3[1]) - e1[1] * (e2[0] * e3[2] - e2[2] * e3[0])
+            + e1[2] * (e2[0] * e3[1] - e2[1] * e3[0]);
+        for q in &QUADRATURE {
+            let [s, t, u] = q.local;
+            let local = [0, 1, 2].map(|i| a[i] + s * e1[i] + t * e2[i] + u * e3[i]);
+            rule.push(QuadraturePoint {
+                local,
+                weight: q.weight * det.abs(),
+            });
+        }
+    }
+    rule
+}
+
 /// 要素の向き（ヤコビアンの符号）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Orientation {
@@ -205,6 +242,60 @@ pub fn stiffness_row(
 pub fn volume(points: &[[f64; 3]]) -> Result<f64> {
     let sign = orientation(points).sign().ok_or_else(twisted)?;
     shape::volume_with_sign::<Tet10>(points, sign)
+}
+
+/// 1 要素の後処理に要る量（SPEC §5.1）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FieldSummary {
+    /// 要素中心での電界 E [V/m]（要素の代表値。Hex8 / Penta6 と同じ扱い）
+    pub centre_field: [f64; 3],
+    /// 要素の体積 [m³]
+    pub volume: f64,
+    /// 要素内の消費電力 `∫σ|E|² dΩ` [W]。4 点則（辺が真っ直ぐなら被積分関数は 2 次式で厳密）
+    pub power: f64,
+    /// 要素内の |E| の最大 [V/m]
+    pub e_peak: f64,
+    /// 要素内の |J| の最大 [A/m²]
+    pub j_peak: f64,
+}
+
+/// 節点電位から、要素の代表値・消費電力・要素内の最大値を求める（SPEC §5.1）。
+///
+/// 2 次要素では E が要素内で 1 次式で変わる。代表値（中心の値）×体積で電力を数えると
+/// 2 次式の |E|² を 1 点で積分することになり、保存則の検査（SPEC §5.4）が必ず合わない。
+/// そこで電力は積分点で積分する。
+///
+/// **要素内の最大は頂点で出る。** 辺が真っ直ぐなら E は要素内で 1 次式（アフィン）で、
+/// その大きさ |E| は凸関数なので、四面体の上の最大はどこかの頂点で取る（|J| = |σE| も同じ）。
+/// 中心の値は最大を過小評価するので、ホットスポットと最大値にはこちらを使う。
+/// 辺が曲がった要素では厳密な最大ではないが、頂点の値は中心より最大に近い。
+pub fn field_summary(
+    points: &[[f64; 3]],
+    phi: &[f64],
+    sigma: &Conductivity,
+) -> Result<FieldSummary> {
+    let sign = orientation(points).sign().ok_or_else(twisted)?;
+    let volume = shape::volume_with_sign::<Tet10>(points, sign)?;
+    let mut power = 0.0;
+    for q in Tet10::quadrature() {
+        let det = sign * shape::point_geometry::<Tet10>(points, q.local).det_jacobian;
+        let e = shape::electric_field::<Tet10>(points, phi, q.local);
+        let j = sigma.apply(e);
+        power += q.weight * det * (e[0] * j[0] + e[1] * j[1] + e[2] * j[2]);
+    }
+    let (mut e_peak, mut j_peak) = (0.0f64, 0.0f64);
+    for &corner in &LOCAL_NODES[..4] {
+        let e = shape::electric_field::<Tet10>(points, phi, corner);
+        e_peak = e_peak.max(crate::geom::norm(e));
+        j_peak = j_peak.max(crate::geom::norm(sigma.apply(e)));
+    }
+    Ok(FieldSummary {
+        centre_field: shape::electric_field::<Tet10>(points, phi, Tet10::CENTRE),
+        volume,
+        power,
+        e_peak,
+        j_peak,
+    })
 }
 
 fn twisted() -> GfemError {
@@ -355,7 +446,7 @@ mod tests {
         stiffness(&p, &sigma, &mut k).unwrap();
 
         let mut fine = [[0.0f64; 10]; 10];
-        for q in refined_rule() {
+        for q in fine_quadrature() {
             let g = point_geometry::<Tet10>(&p, q.local);
             let scale = q.weight * g.det_jacobian;
             for (row, a) in fine.iter_mut().zip(&g.grad) {
@@ -374,43 +465,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    /// 参照四面体を中点で 8 つに分け、それぞれに 4 点則を当てた 32 点則（検算用）。
-    fn refined_rule() -> Vec<QuadraturePoint> {
-        let v = LOCAL_NODES;
-        // 頂点に接する 4 つと、中の八面体を対角 (4, 9) で割った 4 つ
-        let children: [[usize; 4]; 8] = [
-            [0, 4, 6, 7],
-            [4, 1, 5, 8],
-            [6, 5, 2, 9],
-            [7, 8, 9, 3],
-            [4, 9, 5, 6],
-            [4, 9, 6, 7],
-            [4, 9, 7, 8],
-            [4, 9, 8, 5],
-        ];
-        let mut rule = Vec::new();
-        for c in children {
-            let (a, b, cc, d) = (v[c[0]], v[c[1]], v[c[2]], v[c[3]]);
-            let e1 = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
-            let e2 = [cc[0] - a[0], cc[1] - a[1], cc[2] - a[2]];
-            let e3 = [d[0] - a[0], d[1] - a[1], d[2] - a[2]];
-            let det = e1[0] * (e2[1] * e3[2] - e2[2] * e3[1])
-                - e1[1] * (e2[0] * e3[2] - e2[2] * e3[0])
-                + e1[2] * (e2[0] * e3[1] - e2[1] * e3[0]);
-            for q in &QUADRATURE {
-                let [s, t, u] = q.local;
-                let local = [0, 1, 2].map(|i| a[i] + s * e1[i] + t * e2[i] + u * e3[i]);
-                rule.push(QuadraturePoint {
-                    local,
-                    weight: q.weight * det.abs(),
-                });
-            }
-        }
-        let total: f64 = rule.iter().map(|q| q.weight).sum();
-        assert!((total - 1.0 / 6.0).abs() < 1e-15);
-        rule
     }
 
     #[test]
@@ -486,5 +540,43 @@ mod tests {
         let mut k = [[0.0; MAX_ELEMENT_NODES]; MAX_ELEMENT_NODES];
         let e = stiffness(&p, &Conductivity::isotropic(1.0).unwrap(), &mut k).unwrap_err();
         assert!(e.to_string().contains("ヤコビアン"), "{e}");
+    }
+
+    #[test]
+    fn the_fine_rule_fills_the_reference_tetrahedron() {
+        let total: f64 = fine_quadrature().iter().map(|q| q.weight).sum();
+        assert!((total - 1.0 / 6.0).abs() < 1e-15);
+    }
+
+    #[test]
+    fn the_field_summary_integrates_the_power_and_finds_the_peak() {
+        // 2 次の電位で E は要素内で 1 次式。電力は細かい積分と一致し、最大は頂点にある
+        let p = straight(CORNERS);
+        let sigma = Conductivity::isotropic(0.35).unwrap();
+        let phi_of = |x: [f64; 3]| 0.3 * x[0] * x[0] - 0.8 * x[1] * x[2] + 0.5 * x[0] + x[2];
+        let phi: Vec<f64> = p.iter().map(|&x| phi_of(x)).collect();
+        let s = field_summary(&p, &phi, &sigma).unwrap();
+        assert!((s.volume - volume(&p).unwrap()).abs() < 1e-15);
+        let mut power = 0.0;
+        let mut peak = 0.0f64;
+        for q in fine_quadrature() {
+            let det = point_geometry::<Tet10>(&p, q.local).det_jacobian;
+            let e = electric_field::<Tet10>(&p, &phi, q.local);
+            power += q.weight * det * 0.35 * (e[0] * e[0] + e[1] * e[1] + e[2] * e[2]);
+            peak = peak.max((e[0] * e[0] + e[1] * e[1] + e[2] * e[2]).sqrt());
+        }
+        assert!(
+            (s.power - power).abs() < 1e-13 * power,
+            "{} vs {power}",
+            s.power
+        );
+        // 頂点での最大は、要素の中のどの点の値より小さくない
+        assert!(s.e_peak >= peak, "{} < {peak}", s.e_peak);
+        assert!((s.j_peak - 0.35 * s.e_peak).abs() < 1e-14 * s.j_peak);
+        let centre = s.centre_field;
+        assert!(
+            s.e_peak
+                > (centre[0] * centre[0] + centre[1] * centre[1] + centre[2] * centre[2]).sqrt()
+        );
     }
 }

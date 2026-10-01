@@ -24,7 +24,8 @@
 //! v₀ は要素全体の最小なのでその面の最小でもあり、規則 1 と一致する。
 //! 結果として**すべての四角形面が両側から同じ対角線で割られる**。
 //!
-//! 分割数は Tet4 が 1、Penta6 が 3、Hex8 が 6。新しい節点は作らないので、
+//! 分割数は Tet4 が 1、Penta6 が 3、Hex8 が 6、2 次の Tet10 が 8（辺の中点で割る。
+//! [`split_tet10`]）。新しい節点は作らないので、
 //! 節点値はそのまま使える。
 //!
 //! # Tet4 だけのメッシュは素通しする
@@ -79,6 +80,9 @@ impl TetView {
                 }
                 ElementKind::Hex8 | ElementKind::Penta6 => {
                     split_solid(e.kind, e.conn, e.index as u32, &mut conn, &mut parent);
+                }
+                ElementKind::Tet10 => {
+                    split_tet10(mesh, e.conn, e.index as u32, &mut conn, &mut parent);
                 }
                 other => {
                     return Err(GfemError::unsupported(crate::tr!(
@@ -192,6 +196,64 @@ impl TetView {
                 .map(|t| tet4_signed_volume(&self.coords(mesh, t)))
                 .collect::<Vec<f64>>(),
         )
+    }
+}
+
+/// 2 次四面体の頂点に接する 4 つの小さな四面体（局所番号。向きは元の要素と同じ）。
+///
+/// 中点の局所番号は 4 = 辺 0-1、5 = 1-2、6 = 2-0、7 = 0-3、8 = 1-3、9 = 2-3。
+const TET10_CORNER_CHILDREN: [[usize; 4]; 4] =
+    [[0, 4, 6, 7], [4, 1, 5, 8], [6, 5, 2, 9], [7, 8, 9, 3]];
+
+/// 中の八面体の 3 本の対角線と、それぞれを囲む 4 頂点（巡回の順）。
+///
+/// 対角線 `[a, b]` と巡回の隣どうし `c_k, c_{k+1}` で四面体 `[a, b, c_k, c_{k+1}]` を作ると、
+/// 元の要素と同じ向きになるように並べてある（テストで参照要素の座標から確かめている）。
+const TET10_DIAGONALS: [([usize; 2], [usize; 4]); 3] = [
+    ([4, 9], [5, 6, 7, 8]),
+    ([5, 7], [4, 8, 9, 6]),
+    ([6, 8], [4, 5, 9, 7]),
+];
+
+/// 2 次四面体を、辺の中点で 8 個の四面体に分ける（新しい節点は作らない）。
+///
+/// 頂点に接する 4 個と、中に残る八面体を対角線 1 本で割った 4 個。どの面も中点で 4 枚の
+/// 三角形に割られ、その割り方は面の 6 節点だけで決まるので、隣の要素とも必ず一致する
+/// （面共役。外表面の [`Surface::triangulate`](crate::mesh::Surface::triangulate) とも同じ割り方）。
+/// 八面体の対角線は面に出ないので、どれを選んでも適合性には関わらない。いちばん短いものを
+/// 選ぶ（小さな四面体が潰れにくい。同じ長さなら表の先のもの）。
+///
+/// 節点値を 8 個の四面体で 1 次補間したものは、2 次の電位を区分 1 次で近似したものになる
+/// （等値面・断面の描画用。VTK が 2 次のセルを描くのと同じ考え方）。
+fn split_tet10(
+    mesh: &Mesh,
+    conn: &[NodeIndex],
+    element: u32,
+    out_conn: &mut Vec<NodeIndex>,
+    out_parent: &mut Vec<u32>,
+) {
+    for child in TET10_CORNER_CHILDREN {
+        out_conn.extend(child.iter().map(|&l| conn[l]));
+        out_parent.push(element);
+    }
+    let length2 = |[a, b]: [usize; 2]| {
+        let (p, q) = (mesh.nodes.coord(conn[a]), mesh.nodes.coord(conn[b]));
+        (0..3).map(|d| (p[d] - q[d]) * (p[d] - q[d])).sum::<f64>()
+    };
+    let (diagonal, ring) = TET10_DIAGONALS
+        .iter()
+        .copied()
+        .reduce(|best, next| {
+            if length2(next.0) < length2(best.0) {
+                next
+            } else {
+                best
+            }
+        })
+        .expect("対角線は 3 本ある");
+    for k in 0..4 {
+        out_conn.extend([diagonal[0], diagonal[1], ring[k], ring[(k + 1) % 4]].map(|l| conn[l]));
+        out_parent.push(element);
     }
 }
 
@@ -508,5 +570,75 @@ mod tests {
         let spread = view.spread_vectors(&field);
         assert_eq!(spread.len(), 6 * 3);
         assert!(spread.chunks(3).all(|c| c == [1.0, 2.0, 3.0]));
+    }
+
+    #[test]
+    fn the_tet10_children_keep_the_orientation_of_the_element() {
+        // 参照要素の座標で、8 個とも正の体積になり、合わせて参照四面体（1/6）を埋める
+        use crate::element::tet10::LOCAL_NODES;
+        let volume = |c: [usize; 4]| tet4_signed_volume(&c.map(|l| LOCAL_NODES[l]));
+        let corners: f64 = TET10_CORNER_CHILDREN.iter().map(|&c| volume(c)).sum();
+        for c in TET10_CORNER_CHILDREN {
+            assert!(volume(c) > 0.0, "{c:?}");
+        }
+        for (diagonal, ring) in TET10_DIAGONALS {
+            let mut inner = 0.0;
+            for k in 0..4 {
+                let c = [diagonal[0], diagonal[1], ring[k], ring[(k + 1) % 4]];
+                assert!(volume(c) > 0.0, "対角線 {diagonal:?}: {c:?}");
+                inner += volume(c);
+            }
+            assert!(
+                (corners + inner - 1.0 / 6.0).abs() < 1e-15,
+                "対角線 {diagonal:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_raised_mesh_is_split_into_eight_tetrahedra_per_element() {
+        let linear = crate::testing::kuhn_box([3, 2, 2], [1.5, 1.0, 0.8]);
+        let mesh = crate::mesh::elevate(&linear).unwrap();
+        let view = TetView::build(&mesh).unwrap();
+        assert!(!view.is_identity());
+        assert_eq!(view.len(), 8 * mesh.n_solid_elements());
+        assert!(view.find_inverted(&mesh).is_none());
+        assert!((view.total_volume(&mesh) - 1.5 * 1.0 * 0.8).abs() < 1e-12);
+        for e in 0..mesh.n_solid_elements() {
+            assert_eq!(view.children(e).len(), 8);
+        }
+        // 小さな四面体の面は、隣どうしでぴったり重なる（面の出現が 1 回か 2 回）
+        let mut count: HashMap<[u32; 3], usize> = HashMap::new();
+        for t in 0..view.len() {
+            let c = view.conn_of(t);
+            for skip in 0..4 {
+                let mut f: Vec<u32> = (0..4).filter(|&k| k != skip).map(|k| c[k]).collect();
+                f.sort_unstable();
+                *count.entry([f[0], f[1], f[2]]).or_insert(0) += 1;
+            }
+        }
+        assert!(
+            count.values().all(|&n| n == 1 || n == 2),
+            "非多様体の面がある"
+        );
+        // 外に出る面（1 回だけの面）は、外表面を 4 分割した三角形と一致する
+        let surface = crate::mesh::topology::extract_surface(&mesh).unwrap();
+        let (tris, _) = surface.triangulate(&mesh);
+        let mut outer: Vec<[u32; 3]> = count
+            .iter()
+            .filter(|&(_, &n)| n == 1)
+            .map(|(&f, _)| f)
+            .collect();
+        let mut from_surface: Vec<[u32; 3]> = tris
+            .iter()
+            .map(|t| {
+                let mut f = *t;
+                f.sort_unstable();
+                f
+            })
+            .collect();
+        outer.sort_unstable();
+        from_surface.sort_unstable();
+        assert_eq!(outer, from_surface);
     }
 }

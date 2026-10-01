@@ -662,17 +662,6 @@ mod tests {
     }
 
     #[test]
-    fn solving_with_second_order_elements_is_stopped_for_now() {
-        // 電極荷重と後処理が 2 次に対応するまでは、黙って違う答えを出さないよう入口で止める
-        use crate::case::Case;
-        let mut case = Case::new();
-        case.set_conductivity(1, 0.35).unwrap();
-        let q = elevate(&kuhn_box([1, 1, 1], [1.0, 1.0, 1.0])).unwrap();
-        let e = crate::analysis::solve(&q, &case, None).unwrap_err();
-        assert!(e.to_string().contains("まだ使えません"), "{e}");
-    }
-
-    #[test]
     fn a_raised_inverted_tetrahedron_is_only_inverted() {
         // 節点順序の反転した Tet4 を上げると、全ての点でヤコビアンが負の Tet10 になる。
         // Tet4 と同じく |det J| で計算できる

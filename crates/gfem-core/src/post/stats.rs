@@ -13,6 +13,12 @@
 //!
 //! 要素値は区分定数なので補間はせず、階段的に定める。同じ値が並んだときは
 //! 要素の通し番号順に並べる（安定ソート）ので、同じ入力からは常に同じ値になる。
+//!
+//! # 2 次要素の最大値
+//!
+//! 2 次要素では |J| が要素内で変わる。パーセンタイルと平均は要素の代表値（中心の値）で
+//! 数えるが、**最大値とホットスポットは要素内の最大**（頂点での値。
+//! [`FieldResult::j_peak_of`]）で決める。中心の値の最大は、本当の最大を過小評価する。
 
 use crate::case::Case;
 use crate::error::{GfemError, Result};
@@ -24,7 +30,7 @@ use std::collections::BTreeMap;
 /// 1 つの量（|J| や |E|）の分布。
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct QuantityStats {
-    /// 最大値。**要素値**なので平滑化されていない（SPEC §5.1）
+    /// 最大値。**要素値**なので平滑化されていない（SPEC §5.1）。2 次要素では要素内の最大
     pub max: f64,
     /// 体積重み平均
     pub mean: f64,
@@ -43,9 +49,9 @@ pub struct Hotspot {
     pub element_id: ElemId,
     /// 要素の重心 [m]
     pub centroid: [f64; 3],
-    /// そこでの |J| [A/m²]
+    /// そこでの |J| [A/m²]（2 次要素では要素内の最大）
     pub j_magnitude: f64,
-    /// そこでの |E| [V/m]
+    /// そこでの |E| [V/m]（2 次要素では要素内の最大）
     pub e_magnitude: f64,
 }
 
@@ -147,6 +153,9 @@ fn summarise_elements(mesh: &Mesh, fields: &FieldResult, elements: &[usize]) -> 
     let volumes: Vec<f64> = elements.iter().map(|&e| fields.volume[e]).collect();
     let j: Vec<f64> = elements.iter().map(|&e| fields.j_magnitude[e]).collect();
     let e_mag: Vec<f64> = elements.iter().map(|&e| fields.e_magnitude[e]).collect();
+    // 要素内の最大（1 次要素では要素値そのもの）
+    let j_peak: Vec<f64> = elements.iter().map(|&e| fields.j_peak_of(e)).collect();
+    let e_peak: Vec<f64> = elements.iter().map(|&e| fields.e_peak_of(e)).collect();
     let power_terms: Vec<f64> = elements
         .iter()
         .map(|&e| fields.power_density[e] * fields.volume[e])
@@ -158,7 +167,7 @@ fn summarise_elements(mesh: &Mesh, fields: &FieldResult, elements: &[usize]) -> 
         .iter()
         .copied()
         .reduce(|a, b| {
-            if fields.j_magnitude[b] > fields.j_magnitude[a] {
+            if fields.j_peak_of(b) > fields.j_peak_of(a) {
                 b
             } else {
                 a
@@ -175,22 +184,23 @@ fn summarise_elements(mesh: &Mesh, fields: &FieldResult, elements: &[usize]) -> 
         n_elements: elements.len(),
         volume,
         power: reduce::sum(&power_terms),
-        current_density: summarise(&j, &volumes, volume),
-        electric_field: summarise(&e_mag, &volumes, volume),
+        current_density: summarise(&j, &j_peak, &volumes, volume),
+        electric_field: summarise(&e_mag, &e_peak, &volumes, volume),
         hotspot: Hotspot {
             element_id: hot.id,
             centroid: mesh.element_centroid(hot.conn),
-            j_magnitude: fields.j_magnitude[hottest],
-            e_magnitude: fields.e_magnitude[hottest],
+            j_magnitude: fields.j_peak_of(hottest),
+            e_magnitude: fields.e_peak_of(hottest),
         },
     }
 }
 
-fn summarise(values: &[f64], volumes: &[f64], total_volume: f64) -> QuantityStats {
+/// `values` は要素の代表値（平均・パーセンタイル）、`peaks` は要素内の最大（最大値）。
+fn summarise(values: &[f64], peaks: &[f64], volumes: &[f64], total_volume: f64) -> QuantityStats {
     let weighted: Vec<f64> = values.iter().zip(volumes).map(|(v, w)| v * w).collect();
     let quantiles = weighted_quantiles(values, volumes, &[0.5, 0.95, 0.99]);
     QuantityStats {
-        max: values.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+        max: peaks.iter().copied().fold(f64::NEG_INFINITY, f64::max),
         mean: if total_volume > 0.0 {
             reduce::sum(&weighted) / total_volume
         } else {

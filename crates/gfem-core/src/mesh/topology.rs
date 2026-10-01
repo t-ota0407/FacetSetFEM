@@ -184,11 +184,37 @@ impl Surface {
     ///
     /// GUI には四面体メッシュそのものではなく、この軽い三角形群だけを渡す（SPEC §6.3）。
     /// 戻り値は `(三角形の節点索引, 各三角形の元ソリッド要素の通し番号)`。
-    pub fn triangulate(&self) -> (Vec<[NodeIndex; 3]>, Vec<u32>) {
+    ///
+    /// 2 次要素の面（6 節点の三角形）は、辺の中点で **4 枚の三角形**に割る。中点の電位を
+    /// 表示に使うためと、断面（[`crate::mesh::clip`]）の切り口と頂点を共有させるため。
+    /// 切り口は 2 次四面体を 8 個の四面体に分けたもの（[`TetView`]）から作り、その面での
+    /// 割り方はこれと同じになる。向き（外向き法線）は元の面と同じ。
+    pub fn triangulate(&self, mesh: &Mesh) -> (Vec<[NodeIndex; 3]>, Vec<u32>) {
         let mut tris = Vec::with_capacity(self.faces.len());
         let mut owners = Vec::with_capacity(self.faces.len());
         for f in &self.faces {
             let n = f.nodes();
+            if n.len() == 3
+                && !mesh
+                    .solid(f.element as usize)
+                    .kind
+                    .face_mid_nodes()
+                    .is_empty()
+            {
+                let t = f.trace(mesh);
+                let [c0, c1, c2, m01, m12, m20] =
+                    <[NodeIndex; 6]>::try_from(t.nodes()).expect("2 次要素の面は 6 節点");
+                for tri in [
+                    [c0, m01, m20],
+                    [m01, c1, m12],
+                    [m20, m12, c2],
+                    [m01, m12, m20],
+                ] {
+                    tris.push(tri);
+                    owners.push(f.element);
+                }
+                continue;
+            }
             tris.push([n[0], n[1], n[2]]);
             owners.push(f.element);
             if n.len() == 4 {
@@ -642,7 +668,7 @@ CTETRA,10,1,1,2,3,4
 ",
         );
         let s = extract_surface(&mesh).unwrap();
-        let (tris, owners) = s.triangulate();
+        let (tris, owners) = s.triangulate(&mesh);
         // 四面体 1 個の外表面は三角形 4 枚
         assert_eq!(tris.len(), 4);
         assert!(owners.iter().all(|&o| o == 0));
