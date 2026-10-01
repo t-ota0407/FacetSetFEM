@@ -3,7 +3,7 @@
 //! ここに置くのは「要素の識別」（節点数・面・VTK のセル型）と、幾何チェックに
 //! 使う最小限の量（Tet4 の符号付き体積・最大辺長）。
 //! 要素剛性（SPEC §2.3）は要素種ごとのサブモジュールに置く:
-//! [`tet4`]・[`hex8`]・[`penta6`]。共通のアイソパラメトリック処理は [`shape`] にあり、
+//! [`tet4`]・[`hex8`]・[`penta6`]・[`tet10`]。共通のアイソパラメトリック処理は [`shape`] にあり、
 //! 新しい要素種は [`ShapeFunctions`] を実装したファイルを 1 つ足すだけで入る（SPEC §7）。
 //! 面要素（電極荷重に使う）は [`shell`]。
 
@@ -11,11 +11,13 @@ pub mod hex8;
 pub mod penta6;
 pub mod shape;
 pub mod shell;
+pub mod tet10;
 pub mod tet4;
 
 pub use hex8::Hex8;
 pub use penta6::Penta6;
 pub use shape::{MAX_ELEMENT_NODES, QuadraturePoint, ShapeFunctions};
+pub use tet10::Tet10;
 
 /// 対応する要素の種類（SPEC §1.3 / §3.1）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -26,6 +28,8 @@ pub enum ElementKind {
     Penta6,
     /// 1 次六面体（Nastran: CHEXA / 8 節点）
     Hex8,
+    /// 2 次四面体（Nastran: CTETRA / 10 節点。SPEC §2.3）
+    Tet10,
     /// 1 次三角形シェル（Nastran: CTRIA3）。電極面の指定に使う
     Tria3,
     /// 1 次四辺形シェル（Nastran: CQUAD4）。電極面の指定に使う
@@ -39,6 +43,7 @@ impl ElementKind {
             ElementKind::Tet4 => 4,
             ElementKind::Penta6 => 6,
             ElementKind::Hex8 => 8,
+            ElementKind::Tet10 => 10,
             ElementKind::Tria3 => 3,
             ElementKind::Quad4 => 4,
         }
@@ -48,14 +53,27 @@ impl ElementKind {
     pub const fn is_solid(self) -> bool {
         matches!(
             self,
-            ElementKind::Tet4 | ElementKind::Penta6 | ElementKind::Hex8
+            ElementKind::Tet4 | ElementKind::Penta6 | ElementKind::Hex8 | ElementKind::Tet10
         )
+    }
+
+    /// 2 次要素か（辺の中点にも節点を持つ）。
+    pub const fn is_quadratic(self) -> bool {
+        matches!(self, ElementKind::Tet10)
+    }
+
+    /// 頂点の節点数。2 次要素では先頭のこの数だけが頂点で、残りは辺の中点。
+    pub const fn corner_count(self) -> usize {
+        match self {
+            ElementKind::Tet10 => 4,
+            other => other.node_count(),
+        }
     }
 
     /// 対応する Nastran のカード名。
     pub const fn card_name(self) -> &'static str {
         match self {
-            ElementKind::Tet4 => "CTETRA",
+            ElementKind::Tet4 | ElementKind::Tet10 => "CTETRA",
             ElementKind::Penta6 => "CPENTA",
             ElementKind::Hex8 => "CHEXA",
             ElementKind::Tria3 => "CTRIA3",
@@ -63,9 +81,18 @@ impl ElementKind {
         }
     }
 
+    /// 要素数の一覧などに出す名前。カード名が同じ CTETRA の 4 節点と 10 節点を区別する。
+    pub const fn label(self) -> &'static str {
+        match self {
+            ElementKind::Tet10 => "CTETRA(10)",
+            other => other.card_name(),
+        }
+    }
+
     /// VTK のセルタイプ番号（VTU 出力に使う）。
     ///
     /// CTETRA → VTK_TETRA(10), CPENTA → VTK_WEDGE(13), CHEXA → VTK_HEXAHEDRON(12),
+    /// 10 節点の CTETRA → VTK_QUADRATIC_TETRA(24),
     /// CTRIA3 → VTK_TRIANGLE(5), CQUAD4 → VTK_QUAD(9)。
     /// 節点の並びは CPENTA だけ VTK と逆向きなので、書き出すときは
     /// [`vtk_node_order`](Self::vtk_node_order) で並べ替えること。
@@ -74,6 +101,7 @@ impl ElementKind {
             ElementKind::Tet4 => 10,
             ElementKind::Penta6 => 13,
             ElementKind::Hex8 => 12,
+            ElementKind::Tet10 => 24,
             ElementKind::Tria3 => 5,
             ElementKind::Quad4 => 9,
         }
@@ -81,7 +109,7 @@ impl ElementKind {
 
     /// VTK のセルに書くときの節点の並び替え（局所節点番号）。
     ///
-    /// CTETRA / CHEXA / CTRIA3 / CQUAD4 は VTK と同じ並びだが、
+    /// CTETRA（4 節点・10 節点とも）/ CHEXA / CTRIA3 / CQUAD4 は VTK と同じ並びだが、
     /// **CPENTA だけは向きが逆**。VTK_WEDGE は 1 枚目の三角形の法線が
     /// 2 枚目の三角形から**遠ざかる**向きを要求するのに対し、Nastran の CPENTA は
     /// G1〜G3 の法線が G4〜G6 の側を向く。そのまま書くと ParaView 側で
@@ -91,6 +119,7 @@ impl ElementKind {
             ElementKind::Tet4 => &[0, 1, 2, 3],
             ElementKind::Penta6 => &[0, 2, 1, 3, 5, 4],
             ElementKind::Hex8 => &[0, 1, 2, 3, 4, 5, 6, 7],
+            ElementKind::Tet10 => &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
             ElementKind::Tria3 => &[0, 1, 2],
             ElementKind::Quad4 => &[0, 1, 2, 3],
         }
@@ -100,9 +129,12 @@ impl ElementKind {
     ///
     /// 外表面抽出（SPEC §4.1）と、電極面が体表面に載っているかの照合（SPEC §11.1）に使う。
     /// シェル要素はそれ自体が面なので空を返す。
+    ///
+    /// **2 次要素の面は頂点だけで表す**（Tet10 は Tet4 と同じ表）。面の照合は頂点で
+    /// 決まり、面番号も Tet4 と揃うので、ケースファイルの `[EID, 面番号]` がそのまま使える。
     pub const fn faces(self) -> &'static [&'static [usize]] {
         match self {
-            ElementKind::Tet4 => &TET4_FACES,
+            ElementKind::Tet4 | ElementKind::Tet10 => &TET4_FACES,
             ElementKind::Penta6 => &PENTA6_FACES,
             ElementKind::Hex8 => &HEX8_FACES,
             ElementKind::Tria3 | ElementKind::Quad4 => &[],
@@ -199,6 +231,12 @@ mod tests {
     #[test]
     fn node_counts_match_cards() {
         assert_eq!(ElementKind::Tet4.node_count(), 4);
+        assert_eq!(ElementKind::Tet10.node_count(), 10);
+        assert_eq!(ElementKind::Tet10.corner_count(), 4);
+        assert!(ElementKind::Tet10.is_solid() && ElementKind::Tet10.is_quadratic());
+        assert!(!ElementKind::Tet4.is_quadratic());
+        assert_eq!(ElementKind::Tet10.card_name(), "CTETRA");
+        assert_ne!(ElementKind::Tet10.label(), ElementKind::Tet4.label());
         assert_eq!(ElementKind::Hex8.node_count(), 8);
         assert_eq!(ElementKind::Penta6.node_count(), 6);
         assert!(ElementKind::Tet4.is_solid());
@@ -235,12 +273,17 @@ mod tests {
 
     #[test]
     fn every_solid_face_uses_valid_local_nodes() {
-        for kind in [ElementKind::Tet4, ElementKind::Penta6, ElementKind::Hex8] {
-            let mut seen = vec![0usize; kind.node_count()];
+        for kind in [
+            ElementKind::Tet4,
+            ElementKind::Penta6,
+            ElementKind::Hex8,
+            ElementKind::Tet10,
+        ] {
+            let mut seen = vec![0usize; kind.corner_count()];
             for face in kind.faces() {
                 assert!(face.len() == 3 || face.len() == 4);
                 for &n in *face {
-                    assert!(n < kind.node_count());
+                    assert!(n < kind.corner_count());
                     seen[n] += 1;
                 }
             }
@@ -261,6 +304,7 @@ mod tests {
             ElementKind::Tet4,
             ElementKind::Penta6,
             ElementKind::Hex8,
+            ElementKind::Tet10,
             ElementKind::Tria3,
             ElementKind::Quad4,
         ] {

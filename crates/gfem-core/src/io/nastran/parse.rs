@@ -12,6 +12,7 @@ use super::reader::{BulkReader, Card};
 use crate::element::hex8::Hex8;
 use crate::element::penta6::Penta6;
 use crate::element::shape;
+use crate::element::tet10::{self, Orientation};
 use crate::element::{ElementKind, tet4_signed_volume};
 use crate::error::{ErrorKind, GfemError, Result, format_sample_list};
 use crate::mesh::{ElemId, ElementBlock, IdMap, Mesh, NodeId, NodeIndex, Nodes, PropId, Property};
@@ -31,12 +32,15 @@ const IGNORED_CARDS: &[&str] = &[
 /// エラー一覧に並べる最大件数。
 const SAMPLE_LIMIT: usize = 20;
 
-/// 節点フィールドのエラーに出す名前（G1〜G8）。
+/// 節点フィールドのエラーに出す名前（G1〜G10）。
 ///
 /// 要素 1 個につき節点の数だけ引くので、`format!` で作ると 1000 万節点級のモデルで
 /// 数億回の文字列確保になる。エラーにならない限り使わない名前なので、固定の表にしておく。
 /// 英語と日本語の組で持ち、エラーを作るときに片方を選ぶ（[`FieldName`]）。
-const NODE_FIELD_NAMES: [FieldName; 8] = [
+///
+/// **最も節点の多い要素（Tet10 の 10）以上の長さが要る。** 足りないと `take(n)` が
+/// 黙って途中で止まり、接続が 1 要素ずつずれる。
+const NODE_FIELD_NAMES: [FieldName; shape::MAX_ELEMENT_NODES] = [
     ("node G1", "節点 G1"),
     ("node G2", "節点 G2"),
     ("node G3", "節点 G3"),
@@ -45,6 +49,8 @@ const NODE_FIELD_NAMES: [FieldName; 8] = [
     ("node G6", "節点 G6"),
     ("node G7", "節点 G7"),
     ("node G8", "節点 G8"),
+    ("node G9", "節点 G9"),
+    ("node G10", "節点 G10"),
 ];
 
 /// エラーに出すフィールド名（英語, 日本語）。読むたびに訳を選ばないよう、
@@ -251,7 +257,7 @@ impl Builder {
         let name = card.name();
         match name {
             "GRID" => self.count_and(name, |s| s.grid(card)),
-            "CTETRA" => self.count_and(name, |s| s.solid(card, ElementKind::Tet4, 10)),
+            "CTETRA" => self.count_and(name, |s| s.tetra(card)),
             "CPENTA" => self.count_and(name, |s| s.solid(card, ElementKind::Penta6, 15)),
             "CHEXA" => self.count_and(name, |s| s.solid(card, ElementKind::Hex8, 20)),
             "CTRIA3" => self.count_and(name, |s| s.shell(card, ElementKind::Tria3)),
@@ -378,6 +384,58 @@ impl Builder {
         Ok(())
     }
 
+    /// `CTETRA EID PID G1 G2 G3 G4 [G5 ... G10]`
+    ///
+    /// G5〜G10（辺の中点）が全て空欄なら 1 次の Tet4、全て書かれていれば 2 次の Tet10。
+    /// Nastran は中点の一部だけを書くことも許すが、そういう要素は形状関数が別物になるので
+    /// 扱わない（空欄の欄を挙げてエラーにする）。
+    fn tetra(&mut self, card: &Card) -> Result<()> {
+        let last = card.last_non_blank(3);
+        if last <= 3 + 4 {
+            return self.solid(card, ElementKind::Tet4, 10);
+        }
+        let eid = field_id(card, 1, ELEMENT_ID)?;
+        if last > 3 + 10 {
+            return Err(GfemError::syntax(crate::tr!(
+                "CTETRA has more node fields than the 10 it can hold",
+                "CTETRA の節点の欄が、書ける上限の 10 個を超えています"
+            ))
+            .with_line(card.line())
+            .with_card("CTETRA")
+            .with_field(last - 1)
+            .with_entity(crate::tr!("element EID={eid}", "要素 EID={eid}"))
+            .with_hint(crate::tr!(
+                "CTETRA takes G1–G4 (corners) and optionally G5–G10 (mid-side nodes). \
+                 Check the continuation lines",
+                "CTETRA に書けるのは G1〜G4（頂点）と、必要なら G5〜G10（辺の中点）だけです。\
+                 継続行を確認してください"
+            )));
+        }
+        let blank: Vec<&str> = (4..10)
+            .filter(|&k| card.field(3 + k).is_empty())
+            .map(|k| {
+                let (en, ja) = NODE_FIELD_NAMES[k];
+                if crate::i18n::is_ja() { ja } else { en }
+            })
+            .collect();
+        if !blank.is_empty() {
+            return Err(GfemError::unsupported(crate::tr!(
+                "A CTETRA with only some of its mid-side nodes is not supported (blank: {})",
+                "辺の中点の一部だけを書いた CTETRA には対応していません（空欄: {}）",
+                blank.join(", ")
+            ))
+            .with_line(card.line())
+            .with_card("CTETRA")
+            .with_entity(crate::tr!("element EID={eid}", "要素 EID={eid}"))
+            .with_hint(crate::tr!(
+                "Write all six mid-side nodes G5–G10 (second-order element), \
+                 or leave all of them blank (first-order element)",
+                "辺の中点 G5〜G10 を 6 つとも書く（2 次要素）か、すべて空欄にしてください（1 次要素）"
+            )));
+        }
+        self.solid(card, ElementKind::Tet10, 10)
+    }
+
     /// `CTETRA / CPENTA / CHEXA EID PID G1 G2 ...`
     fn solid(&mut self, card: &Card, kind: ElementKind, higher_order_nodes: usize) -> Result<()> {
         let n = kind.node_count();
@@ -395,8 +453,10 @@ impl Builder {
             .with_card(kind.card_name())
             .with_entity(crate::tr!("element EID={eid}", "要素 EID={eid}"))
             .with_hint(crate::tr!(
-                "v1.0 supports first-order elements only (SPEC §1.4). Convert to the {}-node {}",
-                "v1.0 は 1 次要素のみ対応です（SPEC §1.4）。{} 節点の {} に変換してください",
+                "Second-order elements are supported for CTETRA (10 nodes) only (SPEC §2.3). \
+                 Convert to the {}-node {}, or use a tetrahedral mesh",
+                "2 次要素は CTETRA（10 節点）だけに対応しています（SPEC §2.3）。\
+                 {} 節点の {} に変換するか、四面体のメッシュを使ってください",
                 n,
                 kind.card_name()
             )));
@@ -704,6 +764,15 @@ impl Builder {
         }
         check_tet4_geometry(&mesh, &mut warnings)?;
         check_isoparametric_geometry(&mesh)?;
+        check_tet10_geometry(&mesh, &mut warnings)?;
+        // 次数の混在・中点の食い違いは解く前にも必ず止める（SPEC §2.3）。
+        // 表示だけしたい場合があるので、読み込みでは警告に留める（孤立節点と同じ扱い）
+        if let Err(e) = crate::mesh::check_orders(&mesh) {
+            warnings.push(match e.hint() {
+                Some(hint) => format!("{} ({hint})", e.message()),
+                None => e.message().to_string(),
+            });
+        }
 
         let report = ReadReport {
             file: name.to_path_buf(),
@@ -844,6 +913,64 @@ fn check_isoparametric_geometry(mesh: &Mesh) -> Result<()> {
                  メッシュ生成側で該当要素を修正してください"
             )));
         }
+    }
+    Ok(())
+}
+
+/// 10 節点の CTETRA のヤコビアンを検査する（SPEC §2.3 / §3.1）。
+///
+/// 辺が曲がりうるので、10 節点と積分点の全てで `det J` の符号を見る
+/// （[`tet10::orientation`]）。
+///
+/// - 符号が混じる・ゼロになる ＝ 中点が辺の中央から離れすぎて要素が裏返っている。エラー
+/// - 全ての点で負 ＝ 節点順序の反転。Tet4 と同じく |det J| で計算できるので警告に留める
+/// - 体積が数値的にゼロ ＝ 潰れた要素。エラー
+fn check_tet10_geometry(mesh: &Mesh, warnings: &mut Vec<String>) -> Result<()> {
+    let Some(block) = mesh.block(ElementKind::Tet10) else {
+        return Ok(());
+    };
+    let mut bad: Vec<String> = Vec::new();
+    let mut inverted: Vec<String> = Vec::new();
+    for e in 0..block.len() {
+        let mut points = [[0.0f64; 3]; 10];
+        mesh.gather_coords(block.conn_of(e), &mut points);
+        let h = mesh.element_max_edge(block, e);
+        let degenerate = match tet10::volume(&points) {
+            Ok(v) => h <= 0.0 || v <= DEGENERATE_VOLUME_RATIO * h * h * h,
+            Err(_) => true,
+        };
+        if degenerate {
+            bad.push(block.ids()[e].to_string());
+        } else if tet10::orientation(&points) == Orientation::Inverted {
+            inverted.push(block.ids()[e].to_string());
+        }
+    }
+    if !bad.is_empty() {
+        return Err(GfemError::model(crate::tr!(
+            "Some 10-node CTETRA elements are collapsed, or their Jacobian changes sign inside \
+             the element ({}): EID={}",
+            "潰れているか、要素の中でヤコビアンの符号が変わる 10 節点の CTETRA があります\
+             （{} 件）: EID={}",
+            bad.len(),
+            format_sample_list(&bad, SAMPLE_LIMIT)
+        ))
+        .with_card("CTETRA")
+        .with_hint(crate::tr!(
+            "A mid-side node (G5–G10) is too far from the middle of its edge, or the corners \
+             lie in one plane. Fix these elements in the mesh generator",
+            "辺の中点（G5〜G10）が辺の中央から離れすぎているか、頂点が同一平面上にあります。\
+             メッシュ生成側で該当要素を修正してください"
+        )));
+    }
+    if !inverted.is_empty() {
+        warnings.push(crate::tr!(
+            "Some 10-node CTETRA elements have reversed node order (negative Jacobian) ({}): \
+             EID={}. The element stiffness uses |det J|, so the results are not affected",
+            "節点順序が反転している（ヤコビアンが負の）10 節点の CTETRA があります（{} 件）: \
+             EID={}。要素剛性は |det J| で計算するため結果には影響しません",
+            inverted.len(),
+            format_sample_list(&inverted, SAMPLE_LIMIT)
+        ));
     }
     Ok(())
 }
@@ -1062,17 +1189,122 @@ CTETRA,10,1,1,2,3,4
         );
     }
 
+    /// 頂点 (0,0,0), (1,0,0), (0,1,0), (0,0,1) の四面体と、その辺の中点の GRID（ID 1〜10）。
+    const TET10_GRIDS: &str = "\
+GRID,1,,0.0,0.0,0.0
+GRID,2,,1.0,0.0,0.0
+GRID,3,,0.0,1.0,0.0
+GRID,4,,0.0,0.0,1.0
+GRID,5,,0.5,0.0,0.0
+GRID,6,,0.5,0.5,0.0
+GRID,7,,0.0,0.5,0.0
+GRID,8,,0.0,0.0,0.5
+GRID,9,,0.5,0.0,0.5
+GRID,10,,0.0,0.5,0.5
+PSOLID,1,1
+";
+
+    fn node_ids(mesh: &Mesh, e: usize) -> Vec<u32> {
+        mesh.solids[0]
+            .conn_of(e)
+            .iter()
+            .map(|&i| mesh.nodes.id(i))
+            .collect()
+    }
+
     #[test]
-    fn tet10_gives_a_helpful_error() {
+    fn a_ten_node_ctetra_is_read_as_tet10() {
+        // 自由形式: 親の行に G1〜G6、継続行に G7〜G10
+        let text = format!("{TET10_GRIDS}CTETRA,10,1,1,2,3,4,5,6\n,7,8,9,10\n");
+        let (mesh, report) = read(&text, LengthUnit::Meter).unwrap();
+        assert_eq!(mesh.solids.len(), 1);
+        assert_eq!(mesh.solids[0].kind(), ElementKind::Tet10);
+        assert_eq!(node_ids(&mesh, 0), (1..=10).collect::<Vec<u32>>());
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+    }
+
+    #[test]
+    fn a_ten_node_ctetra_in_small_field_format_is_read() {
+        // 小フィールド: 1 行に 8 欄（G1〜G6）、継続行に G7〜G10
+        let text = format!(
+            "{TET10_GRIDS}{:<8}{:>8}{:>8}{:>8}{:>8}{:>8}{:>8}{:>8}{:>8}+\n\
+             {:<8}{:>8}{:>8}{:>8}{:>8}\n",
+            "CTETRA", 10, 1, 1, 2, 3, 4, 5, 6, "+", 7, 8, 9, 10
+        );
+        let (mesh, _) = read(&text, LengthUnit::Meter).unwrap();
+        assert_eq!(mesh.solids[0].kind(), ElementKind::Tet10);
+        assert_eq!(node_ids(&mesh, 0), (1..=10).collect::<Vec<u32>>());
+    }
+
+    #[test]
+    fn ctetra_with_blank_mid_side_nodes_is_first_order() {
+        // G5〜G10 が全て空欄なら 1 次
+        let text = format!("{TET10_GRIDS}CTETRA,10,1,1,2,3,4,,\n,,,,\n");
+        let (mesh, _) = read(&text, LengthUnit::Meter).unwrap();
+        assert_eq!(mesh.solids[0].kind(), ElementKind::Tet4);
+    }
+
+    #[test]
+    fn ctetra_with_some_mid_side_nodes_gives_a_helpful_error() {
+        // 自由形式では行末の空欄が落ちるので、空欄は行の途中に置く
+        let text = format!("{TET10_GRIDS}CTETRA,10,1,1,2,3,4,5,,7\n,8,,10\n");
+        let e = read(&text, LengthUnit::Meter).unwrap_err();
+        let s = e.to_string();
+        assert!(s.contains("一部だけ"), "{s}");
+        assert!(s.contains("G6") && s.contains("G9"), "{s}");
+        assert!(!s.contains("G7"), "{s}");
+    }
+
+    #[test]
+    fn second_order_pentahedra_are_still_rejected() {
         let text = "\
 GRID,1,,0.0,0.0,0.0
-CTETRA,10,1,1,2,3,4,5,6,7,8
-,9,10
+CPENTA,10,1,1,2,3,4,5,6
+,7,8,9
 ";
         let e = read(text, LengthUnit::Meter).unwrap_err();
         let s = e.to_string();
         assert!(s.contains("2 次要素"), "{s}");
-        assert!(s.contains("SPEC §1.4"), "{s}");
+        assert!(s.contains("CTETRA（10 節点）"), "{s}");
+    }
+
+    #[test]
+    fn an_inverted_ten_node_ctetra_is_only_a_warning() {
+        // 頂点 G2 と G3 を入れ替え、中点もそれに合わせて並べる
+        let text = format!("{TET10_GRIDS}CTETRA,10,1,1,3,2,4,7,6\n,5,8,10,9\n");
+        let (mesh, report) = read(&text, LengthUnit::Meter).unwrap();
+        assert_eq!(mesh.solids[0].kind(), ElementKind::Tet10);
+        assert!(
+            report.warnings.iter().any(|w| w.contains("反転")),
+            "{:?}",
+            report.warnings
+        );
+    }
+
+    #[test]
+    fn a_folded_ten_node_ctetra_is_an_error() {
+        // G5（辺 G1-G2 の中点）を反対側の頂点の先まで動かすと、要素が裏返る
+        let text = TET10_GRIDS.replace("GRID,5,,0.5,0.0,0.0", "GRID,5,,-0.25,1.5,0.0")
+            + "CTETRA,10,1,1,2,3,4,5,6\n,7,8,9,10\n";
+        let e = read(&text, LengthUnit::Meter).unwrap_err();
+        assert!(e.to_string().contains("ヤコビアンの符号"), "{e}");
+    }
+
+    #[test]
+    fn mixed_orders_are_a_warning_when_reading() {
+        // 表示だけならできるので読み込みは通す。解く前には止める（mesh::check_orders）
+        let text = format!(
+            "{TET10_GRIDS}GRID,11,,1.0,1.0,1.0\n\
+             CTETRA,10,1,1,2,3,4,5,6\n,7,8,9,10\n\
+             CTETRA,11,1,2,3,4,11\n"
+        );
+        let (mesh, report) = read(&text, LengthUnit::Meter).unwrap();
+        assert_eq!(mesh.solids.len(), 2);
+        assert!(
+            report.warnings.iter().any(|w| w.contains("混ざって")),
+            "{:?}",
+            report.warnings
+        );
     }
 
     #[test]

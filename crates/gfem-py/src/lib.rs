@@ -379,10 +379,11 @@ impl PyMesh {
     }
 
     /// 要素種ごとの要素数。`[("CTETRA", 4032), ("CTRIA3", 48)]` のような並び。
+    /// 10 節点の CTETRA は `"CTETRA(10)"` と書いて 4 節点のものと区別する。
     fn element_counts(&self) -> Vec<(&'static str, usize)> {
         self.inner
             .blocks()
-            .map(|b| (b.kind().card_name(), b.len()))
+            .map(|b| (b.kind().label(), b.len()))
             .collect()
     }
 

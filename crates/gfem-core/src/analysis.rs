@@ -505,6 +505,26 @@ pub fn solve_with_backend<B: LinearBackend>(
     )
 }
 
+/// 2 次要素（Tet10）での求解は、電極荷重と後処理が対応するまで止める（M12 の途中）。
+///
+/// 要素・読み込み・2 次への変換は入ったが、電極の荷重はまだ頂点だけの三角形で配っていて、
+/// そのまま解くと電流の総量は合うのに分布が違う答えになる。気づけない誤りなので、
+/// 対応が揃うまでは入口で止める。
+fn reject_unfinished_quadratic(mesh: &Mesh) -> Result<()> {
+    if mesh.solids.iter().any(|b| b.kind().is_quadratic()) {
+        return Err(GfemError::unsupported(crate::tr!(
+            "Solving with second-order elements (10-node CTETRA) is not available yet",
+            "2 次要素（10 節点の CTETRA）での求解はまだ使えません"
+        ))
+        .with_hint(crate::tr!(
+            "Electrode loads and post-processing for second-order elements are still being \
+             implemented. Solve with first-order elements for now",
+            "2 次要素に対応した電極の荷重と後処理を実装中です。今は 1 次要素で解いてください"
+        )));
+    }
+    Ok(())
+}
+
 fn run_with(
     solver: &dyn LinearSolver,
     lookup: &FaceLookup,
@@ -517,6 +537,10 @@ fn run_with(
     let mesh = lookup.mesh();
 
     // --- 準備 ---
+    // 1 次と 2 次の混在・中点の食い違いは、解けてしまうが答えが黙って狂う（SPEC §2.3）。
+    // 1 次要素だけのメッシュでは何もせずに返る
+    crate::mesh::check_orders(mesh)?;
+    reject_unfinished_quadratic(mesh)?;
     // 検証と荷重の組み立てで同じ下ごしらえ（パッチ選択の索引など）を使う
     let mut warnings = case.validate_with(lookup)?;
     let prepare = extract + started.elapsed().as_secs_f64();

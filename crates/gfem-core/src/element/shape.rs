@@ -22,10 +22,11 @@
 use crate::error::{GfemError, Result};
 use crate::material::Conductivity;
 
-/// 扱える要素の最大節点数。Tet4 = 4、Penta6 = 6、Hex8 = 8。
+/// 扱える要素の最大節点数。Tet4 = 4、Penta6 = 6、Hex8 = 8、Tet10 = 10。
 ///
-/// 2 次要素（Tet10 など、SPEC §9）を入れるときはここを増やす。
-pub const MAX_ELEMENT_NODES: usize = 8;
+/// 配列の大きさが変わるだけで、演算は先頭 `NODES` 個にしか触れないので、
+/// ここを増やしても既存の要素の結果はビット単位で変わらない。
+pub const MAX_ELEMENT_NODES: usize = 10;
 
 /// 積分点。
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -128,16 +129,32 @@ pub fn stiffness<E: ShapeFunctions>(
     sigma: &Conductivity,
     k: &mut [[f64; MAX_ELEMENT_NODES]; MAX_ELEMENT_NODES],
 ) -> Result<f64> {
+    stiffness_with_sign::<E>(points, sigma, k, 1.0)
+}
+
+/// [`stiffness`] の、ヤコビアンの符号を指定する版。
+///
+/// `sign = −1` は「節点順序が反転しているだけの要素」を `|det J|` で計算するときに使う
+/// （Tet10。`element::tet10::stiffness`）。`sign · det J ≤ 0` の積分点があればエラー。
+/// `sign = 1` のときは `1.0 · det J` が `det J` とビット単位で同じなので、
+/// [`stiffness`] の結果は符号の引数を入れる前と変わらない。
+pub fn stiffness_with_sign<E: ShapeFunctions>(
+    points: &[[f64; 3]],
+    sigma: &Conductivity,
+    k: &mut [[f64; MAX_ELEMENT_NODES]; MAX_ELEMENT_NODES],
+    sign: f64,
+) -> Result<f64> {
     for row in k.iter_mut() {
         row.fill(0.0);
     }
     let mut volume = 0.0;
     for point in E::quadrature() {
         let geometry = point_geometry::<E>(points, point.local);
-        if geometry.det_jacobian <= 0.0 || geometry.det_jacobian.is_nan() {
-            return Err(negative_jacobian(geometry.det_jacobian));
+        let det = sign * geometry.det_jacobian;
+        if det <= 0.0 || det.is_nan() {
+            return Err(negative_jacobian(det));
         }
-        let scale = point.weight * geometry.det_jacobian;
+        let scale = point.weight * det;
         volume += scale;
         for j in 0..E::NODES {
             let sg = sigma.apply(geometry.grad[j]);
@@ -152,9 +169,14 @@ pub fn stiffness<E: ShapeFunctions>(
 
 /// 要素の体積 [m³]。
 pub fn volume<E: ShapeFunctions>(points: &[[f64; 3]]) -> Result<f64> {
+    volume_with_sign::<E>(points, 1.0)
+}
+
+/// [`volume`] の、ヤコビアンの符号を指定する版（[`stiffness_with_sign`] と同じ扱い）。
+pub fn volume_with_sign<E: ShapeFunctions>(points: &[[f64; 3]], sign: f64) -> Result<f64> {
     let mut total = 0.0;
     for point in E::quadrature() {
-        let det = point_geometry::<E>(points, point.local).det_jacobian;
+        let det = sign * point_geometry::<E>(points, point.local).det_jacobian;
         if det <= 0.0 || det.is_nan() {
             return Err(negative_jacobian(det));
         }
@@ -255,8 +277,9 @@ pub(crate) mod testing {
         assert!(volume > 0.0);
         for (i, row) in k.iter().enumerate().take(E::NODES) {
             for (j, &value) in row[..E::NODES].iter().enumerate() {
+                // 対称な 2 成分は同じ積を逆の順に掛けるので、丸めの分だけずれうる
                 assert!(
-                    (value - k[j][i]).abs() < 1e-16 * row[i].abs().max(1.0),
+                    (value - k[j][i]).abs() < 1e-15 * row[i].abs().max(1.0),
                     "非対称: ({i},{j})"
                 );
             }

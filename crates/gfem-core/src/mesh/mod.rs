@@ -11,6 +11,7 @@
 pub mod idmap;
 pub mod isosurface;
 pub mod pick;
+pub mod quadratic;
 pub mod section;
 pub mod spatial;
 pub mod streamline;
@@ -24,6 +25,7 @@ use std::path::PathBuf;
 pub use idmap::IdMap;
 pub use isosurface::{TriangleMesh, iso_surface};
 pub use pick::{PatchFrame, RectShape, SurfacePicker};
+pub use quadratic::{check_orders, elevate};
 pub use section::{Plane, clip, slice};
 pub use spatial::CellGrid;
 pub use streamline::{Navigator, Streamline, TraceDirection, TraceOptions};
