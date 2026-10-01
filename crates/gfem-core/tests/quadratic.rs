@@ -6,8 +6,7 @@
 //! 1. **厳密解**: 多層スラブの上下面を丸ごと電極にすると、φ は層ごとに z の 1 次式になる。
 //!    層の境目も節点に乗るので、2 次要素でも**全ての節点（辺の中点を含む）で厳密**に出る
 //! 2. **再現性**: 逐次・並列の組み立て × CPU 逐次・CPU 並列の CG で、電位がビット単位で一致
-//! 3. **AMG**: 2 次要素の行列でも収束し、反復回数が 1 次要素と同じ桁に収まる。
-//!    2 次要素では θ を 0.15 にする（`SolverOptions::for_mesh`。SPEC §4.5）
+//! 3. **AMG**: 2 次要素の行列でも収束し、反復回数が 1 次要素と同じ桁に収まる
 //! 4. **GPU のメモリの見積り**: 組み立てる前の非ゼロ数の見積りが、実際の非ゼロ数を下回らない
 //! 5. **解析を通す**: 直列抵抗の厳密解・保存則・VTU・領域統計
 //! 6. **エネルギー収支**: 小さな電極で電界が要素内で大きく変わっても、消費電力を積分点で
@@ -24,10 +23,7 @@ use gfem_core::io::vtu::VtuOptions;
 use gfem_core::mesh::elevate;
 use gfem_core::mesh::topology::extract_surface;
 use gfem_core::mesh::{Plane, TetView, clip, iso_surface, slice};
-use gfem_core::solver::{
-    BackendSolver, CpuParallel, CpuSerial, DEFAULT_STRENGTH_THRESHOLD, LinearSolver,
-    QUADRATIC_STRENGTH_THRESHOLD,
-};
+use gfem_core::solver::{BackendSolver, CpuParallel, CpuSerial, LinearSolver};
 use gfem_core::{Mesh, assemble};
 
 const CURRENT: f64 = 2.0e-3; // A
@@ -79,7 +75,7 @@ fn case_for(anode_pid: u32, preconditioner: Preconditioner) -> Case {
     case
 }
 
-/// 組み立てて解く。戻り値は (電位, 反復回数)。設定は解析と同じく `for_mesh` を通す。
+/// 組み立てて解く。戻り値は (電位, 反復回数)。
 fn solve(
     mesh: &Mesh,
     case: &Case,
@@ -91,9 +87,8 @@ fn solve(
     case.validate_with(&lookup).unwrap();
     let system = assemble(mesh, case, &lookup, parallel_assembly).unwrap();
     let mut phi = vec![0.0; mesh.nodes.len()];
-    let options = case.solver.for_mesh(mesh);
     let report = solver
-        .solve(&system.matrix, &system.load, &mut phi, &options, None)
+        .solve(&system.matrix, &system.load, &mut phi, &case.solver, None)
         .unwrap();
     assert!(report.converged, "{report:?}");
     (phi, report.iterations)
@@ -231,28 +226,6 @@ fn amg_converges_on_second_order_matrices() {
     // AMG は 2 次でも Jacobi よりずっと少なく、1 次と同じ桁で収まる
     assert!(amg_p2 < counts[0].2 / 3, "{counts:?}");
     assert!(amg_p2 <= 4 * amg_p1, "{counts:?}");
-}
-
-#[test]
-fn the_amg_threshold_follows_the_element_order() {
-    let linear = slab(LX, LY, 2, 2, &LAYERS);
-    let quadratic = elevate(&linear).unwrap();
-    let options = case_for(TOP_PID, Preconditioner::Amg).solver;
-    assert_eq!(options.amg.strength_threshold, DEFAULT_STRENGTH_THRESHOLD);
-    assert_eq!(
-        options.for_mesh(&linear).amg.strength_threshold,
-        DEFAULT_STRENGTH_THRESHOLD
-    );
-    assert_eq!(
-        options.for_mesh(&quadratic).amg.strength_threshold,
-        QUADRATIC_STRENGTH_THRESHOLD
-    );
-    // 既定値でない θ を選んでいれば、2 次要素でもそれを使う
-    let mut chosen = options;
-    chosen.amg.strength_threshold = 0.3;
-    assert_eq!(chosen.for_mesh(&quadratic).amg.strength_threshold, 0.3);
-    // 1 次要素では θ 以外も含めて何も変えない
-    assert_eq!(options.for_mesh(&linear), options);
 }
 
 #[test]

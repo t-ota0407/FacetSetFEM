@@ -539,12 +539,10 @@ fn run_with(
 
     // --- 求解 ---
     let mark = Instant::now();
-    // 2 次要素では AMG の θ を 2 次要素向けにする（SPEC §4.5。1 次要素では何も変えない）
-    let options = case.solver.for_mesh(mesh);
     let (mut potential, reports, rhs_scale) = match gauge {
         Gauge::MeanZero => {
             let mut potential = vec![0.0; mesh.nodes.len()];
-            let report = solver.solve(&matrix, &load, &mut potential, &options, progress)?;
+            let report = solver.solve(&matrix, &load, &mut potential, &case.solver, progress)?;
             (potential, vec![report], None)
         }
         // 完全電極モデル: 電極の電位を仮に決めた系を重ね合わせる（SPEC §2.5）
@@ -554,7 +552,7 @@ fn run_with(
                 &matrix,
                 &load,
                 &electrodes,
-                &options,
+                &case.solver,
                 progress,
             )?;
             for (e, &u) in electrodes.iter_mut().zip(&solution.terminal_potentials) {

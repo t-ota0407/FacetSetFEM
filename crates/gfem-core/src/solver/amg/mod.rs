@@ -76,13 +76,6 @@ pub struct AmgOptions {
 /// 最細レベルの強連結の閾値 θ の既定値（1 次要素で調整した値）。
 pub const DEFAULT_STRENGTH_THRESHOLD: f64 = 0.08;
 
-/// 2 次要素（Tet10）の行列で使う θ（SPEC §4.5「2 次要素の行列」）。
-///
-/// 2 次要素の剛性行列は非対角に正の成分を持ち、1 行の項も倍ほど多い。θ = 0.08 のままだと
-/// 粗化が弱く、反復回数が同じ節点数の 1 次要素の 3 倍前後になる。0.15 にすると 3 割ほど減る
-/// （3 層スラブ、2.7 万〜69 万節点で 78 → 56、87 → 60、97 → 63 回）。
-pub const QUADRATIC_STRENGTH_THRESHOLD: f64 = 0.15;
-
 impl Default for AmgOptions {
     fn default() -> Self {
         Self {
