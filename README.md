@@ -369,6 +369,17 @@ GPU のテストは GPU が無い機械では skip される。ただし `backen
   `load_library` と同じ形）。必要なら、電極アレイ（ピッチを指定して格子状に一括で置く）と、
   面を形で切り抜いて面積をメッシュに依らず正確にする荷重（SPEC §2.4 に手が入るので要議論）
 
+### 書き出し（2026-10 に追加）
+
+GUI の「ファイル」メニュー、または Python から:
+
+- **電極を含めたメッシュ**を Nastran に書き出す（電極ごとに新しい PSHELL の PID を振る。ほかのソフトウェアで
+  同じ電極を使うため）: `case.write_nastran("out.bdf")` → `[("E1", 202), ("E2", 203)]`
+- **節点ごと・要素ごとの結果**を CSV に書き出す（値は丸めない）: `result.write_nodes_csv("nodes.csv")`、
+  `result.write_elements_csv("elements.csv")`
+
+詳しくは SPEC §5.5。
+
 ### 2 次四面体（M12）の残り
 
 M12 は完了（ケースファイルの `mesh.element_order: 2`、GUI の解析設定の「要素の次数」、Python の

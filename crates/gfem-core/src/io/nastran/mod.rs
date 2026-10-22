@@ -6,12 +6,15 @@
 //! - [`field`] — 1 行のフィールド分解と Fortran 由来の数値表記の解釈
 //! - [`reader`] — 物理行 → 論理カード（継続行・書式混在・セクションの吸収）
 //! - [`parse`] — 論理カード → [`crate::mesh::Mesh`]
+//! - [`write`] — メッシュ（と電極の面）→ 自由形式のバルクデータ
 
 pub mod coord;
 pub mod field;
 pub mod parse;
 pub mod reader;
+pub mod write;
 
 pub use coord::{CoordKind, CoordSystem, CoordSystems};
 pub use parse::{CardCount, ReadReport, read_nastran, read_nastran_from};
 pub use reader::{BulkReader, Card};
+pub use write::{ShellSet, free_pids, write_nastran};

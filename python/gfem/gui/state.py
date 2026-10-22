@@ -1409,6 +1409,31 @@ class Session:
     def write_region_stats_csv(self, path) -> None:
         self._require_solution().write_region_stats_csv(path)
 
+    def write_nodes_csv(self, path) -> None:
+        """節点ごとの結果（座標と電位）の CSV（SPEC §5.5）。"""
+        self._require_solution().write_nodes_csv(path)
+
+    def write_elements_csv(self, path) -> None:
+        """要素ごとの結果（重心の座標と E・J など）の CSV（SPEC §5.5）。"""
+        self._require_solution().write_elements_csv(path)
+
+    def export_nastran(self, path) -> list[tuple[str, int]]:
+        """メッシュに電極の面をシェル要素として書き足して Nastran で書き出す（SPEC §3.1）。
+
+        電極ごとに新しい PSHELL の PID を振り、`[(電極名, PID), …]` を返す。座標は
+        メッシュを読み込んだ単位で書く。解いていなくても書き出せる（導電率も要らない）。
+        要素の次数が 2 なら、2 次に上げたメッシュ（10 節点の CTETRA と CTRIA6）を書く。
+        """
+        study = self._require_study()
+        if not study.electrodes:
+            raise GfemError(
+                error_text(
+                    tr("There are no electrodes to export"),
+                    hint=tr("Add electrodes first (Electrodes → Add electrode)"),
+                )
+            )
+        return study.build_case(self._require_mesh(), materials=False).write_nastran(path)
+
     def write_convergence_csv(self, path) -> None:
         self._require_solution().write_convergence_csv(path)
 

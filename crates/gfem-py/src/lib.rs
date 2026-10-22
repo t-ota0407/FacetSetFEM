@@ -1002,6 +1002,55 @@ impl PyCase {
             .map_err(to_py)
     }
 
+    /// メッシュに電極の面をシェル要素として書き足し、Nastran（自由形式）で書き出す（SPEC §3.1）。
+    ///
+    /// GUI で体表面から選んだ電極を、ほかのソフトウェア（COMSOL など）に持っていくための経路。
+    /// 電極ごとに新しい PSHELL の PID を振る。`pids` で `{電極名: PID}` を指定でき、
+    /// 指定の無い電極にはメッシュの PID と重ならない番号を順に振る。座標は `length_unit`
+    /// （省略時はメッシュを読み込んだ単位）で書く。戻り値は `{電極名: PID}`。
+    /// 2 次要素のメッシュでは、電極の面は辺の中点つきの CTRIA6 になる。
+    #[pyo3(signature = (path, pids = None, length_unit = None))]
+    fn write_nastran(
+        &self,
+        py: Python<'_>,
+        path: PathBuf,
+        pids: Option<std::collections::BTreeMap<String, u32>>,
+        length_unit: Option<&str>,
+    ) -> PyResult<Vec<(String, u32)>> {
+        let mesh = self.mesh.get();
+        let unit = match length_unit {
+            Some(u) => LengthUnit::parse(u).map_err(to_py)?,
+            None => mesh.inner.length_unit,
+        };
+        let pids = pids.unwrap_or_default();
+        py.detach(|| -> gfem_core::Result<Vec<(String, u32)>> {
+            let lookup = mesh.lookup()?;
+            // 指定の無い電極に振る番号。指定された PID とも重ならないよう、まとめて多めに取る
+            let mut free = gfem_core::io::nastran::free_pids(
+                &mesh.inner,
+                self.inner.electrodes.len() + pids.len(),
+            )
+            .into_iter()
+            .filter(|p| !pids.values().any(|q| q == p));
+            let mut sets = Vec::with_capacity(self.inner.electrodes.len());
+            for e in &self.inner.electrodes {
+                let faces = gfem_core::case::resolve_faces(&lookup, e)?;
+                let pid = match pids.get(&e.name) {
+                    Some(&pid) => pid,
+                    None => free.next().expect("候補は電極の数より多く取ってある"),
+                };
+                sets.push(gfem_core::io::nastran::ShellSet {
+                    name: e.name.clone(),
+                    pid,
+                    faces: faces.iter().map(|&f| lookup.face_trace(f)).collect(),
+                });
+            }
+            gfem_core::io::nastran::write_nastran(&path, &mesh.inner, &sets, unit)?;
+            Ok(sets.into_iter().map(|s| (s.name, s.pid)).collect())
+        })
+        .map_err(to_py)
+    }
+
     /// 実行前の整合性チェックの不備を**全部**集める（SPEC §6.2 の手順 4）。
     ///
     /// `(不備, 警告)` をどちらも文字列の一覧で返す（例外は出さない）。不備の 1 件目は
@@ -1518,6 +1567,24 @@ impl PySolution {
     /// 領域統計を CSV に書き出す（SPEC §5.5）。
     fn write_region_stats_csv(&self, path: PathBuf) -> PyResult<()> {
         gfem_core::post::write_region_stats_csv(&path, self.stats()?).map_err(to_py)
+    }
+
+    /// 節点ごとの結果を CSV に書き出す: `node_id,x_m,y_m,z_m,phi_V`（SPEC §5.5）。
+    ///
+    /// 値は読み直すと同じ値に戻る最短の表記で書く。座標の列があるので、ほかのソフトウェアに
+    /// 「この点で値を出す」点の一覧としてそのまま渡せる。
+    fn write_nodes_csv(&self, py: Python<'_>, path: PathBuf) -> PyResult<()> {
+        let mesh = &self.mesh.get().inner;
+        py.detach(|| gfem_core::post::write_node_table(&path, mesh, &self.inner.potential))
+            .map_err(to_py)
+    }
+
+    /// 要素ごとの結果を CSV に書き出す（重心の座標と E・J・|E|・|J|・要素内の最大・
+    /// 電力密度・体積。SPEC §5.5）。重心は頂点の平均で、1 次と 2 次で同じ点になる。
+    fn write_elements_csv(&self, py: Python<'_>, path: PathBuf) -> PyResult<()> {
+        let mesh = &self.mesh.get().inner;
+        py.detach(|| gfem_core::post::write_element_table(&path, mesh, &self.inner.fields))
+            .map_err(to_py)
     }
 
     /// 収束履歴を CSV に書き出す。

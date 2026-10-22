@@ -451,11 +451,16 @@ class Study:
             return mesh.elevate()
         return mesh
 
-    def build_case(self, mesh: Mesh | None = None) -> Case:
-        """`gfem.Case` を組み立てる。"""
+    def build_case(self, mesh: Mesh | None = None, *, materials: bool = True) -> Case:
+        """`gfem.Case` を組み立てる。
+
+        `materials=False` なら導電率を入れない（電極を含めたメッシュの書き出しなど、
+        σ が要らない処理のため。σ を決める前でも使えるようにする）。
+        """
         mesh = mesh if mesh is not None else self.read_mesh()
         case = Case(mesh)
-        case.set_conductivity({m.pid: m.sigma for m in self.materials})
+        if materials:
+            case.set_conductivity({m.pid: m.sigma for m in self.materials})
         for m in self.materials:
             if m.name:
                 case.set_region_name(m.pid, m.name)

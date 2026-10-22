@@ -3,6 +3,7 @@
 
 pub mod error;
 pub mod stats;
+pub mod table;
 
 pub use error::{
     ErrorNorms, convergence_order, l2_error_electric_field, l2_error_field, l2_error_potential,
@@ -12,6 +13,7 @@ pub use stats::{
     Hotspot, QuantityStats, RegionStats, region_stats, total_stats, write_convergence_csv,
     write_region_stats_csv,
 };
+pub use table::{write_element_table, write_node_table};
 
 use crate::assemble::csr::CsrMatrix;
 use crate::assemble::load::ElectrodeGeometry;

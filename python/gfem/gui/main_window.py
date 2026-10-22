@@ -377,7 +377,19 @@ class MainWindow(QMainWindow):
         self._add_action(file_menu, tr("Open case..."), self.open_case_dialog)
         file_menu.addSeparator()
         self._add_action(file_menu, tr("Save case..."), self.save_case_dialog, "Ctrl+S")
+        self._add_action(
+            file_menu,
+            tr("Export mesh with electrodes to Nastran..."),
+            self.export_nastran_dialog,
+        )
+        file_menu.addSeparator()
         self._add_action(file_menu, tr("Export results to VTU..."), self.export_vtu_dialog)
+        self._add_action(
+            file_menu, tr("Export nodal results to CSV..."), self.export_nodes_csv_dialog
+        )
+        self._add_action(
+            file_menu, tr("Export element results to CSV..."), self.export_elements_csv_dialog
+        )
         self._add_action(
             file_menu, tr("Export region statistics to CSV..."), self.export_region_stats_dialog
         )
@@ -598,6 +610,49 @@ class MainWindow(QMainWindow):
             "CSV (*.csv)",
             self.session.write_region_stats_csv,
         )
+
+    def export_nodes_csv_dialog(self) -> None:
+        self._export_dialog(
+            tr("Export nodal results"),
+            "nodes.csv",
+            "CSV (*.csv)",
+            self.session.write_nodes_csv,
+        )
+
+    def export_elements_csv_dialog(self) -> None:
+        self._export_dialog(
+            tr("Export element results"),
+            "elements.csv",
+            "CSV (*.csv)",
+            self.session.write_elements_csv,
+        )
+
+    def export_nastran_dialog(self) -> None:
+        if self.session.study is None:
+            QMessageBox.information(
+                self, tr("Export to Nastran"), tr("Open a model first (File → Open model).")
+            )
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, tr("Export to Nastran"), "mesh_with_electrodes.bdf", "Nastran (*.bdf *.nas)"
+        )
+        if path:
+            self.export_nastran(path)
+
+    def export_nastran(self, path: str | Path) -> None:
+        """電極を含めたメッシュを書き出し、電極ごとに振った PID をログに出す。"""
+        try:
+            pids = self.run_busy(
+                tr("Writing the Nastran file"),
+                lambda: self.session.export_nastran(path),
+                Path(path).name,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.show_error(exc)
+            return
+        self.log(tr("Wrote the Nastran file: {path}", path=path))
+        for name, pid in pids:
+            self.log(tr("  Electrode {name}: PSHELL PID={pid}", name=name, pid=pid), status=False)
 
     def export_convergence_dialog(self) -> None:
         self._export_dialog(
