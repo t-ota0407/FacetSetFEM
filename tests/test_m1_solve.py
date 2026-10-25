@@ -155,8 +155,9 @@ def test_the_documented_example_gives_the_documented_numbers(sample_bdf, repo_ro
     case.add_electrode("E2", role="cathode", current=2e-3, shell_pids=[201])
     result = case.solve()
 
-    readme = (repo_root / "README.md").read_text(encoding="utf-8")
-    assert repr(result) in readme, f"README の例を {repr(result)} に直してください"
+    for name in ("README.md", "README.ja.md"):  # 英語版と日本語版
+        readme = (repo_root / name).read_text(encoding="utf-8")
+        assert repr(result) in readme, f"{name} の例を {repr(result)} に直してください"
     assert f">>> round(result.impedance, 1)\n    {round(result.impedance, 1)}" in gfem.__doc__
 
 

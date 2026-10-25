@@ -3,6 +3,8 @@ name = "gfem-py"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
 publish.workspace = true
 description = "GenericFEM の Python バインディング（PyO3）"
 

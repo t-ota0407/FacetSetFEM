@@ -17,6 +17,9 @@ dist/
 # ビルド成果物（maturin develop --release が python/gfem/ に置く）
 *.pdb
 
+# 論文の原稿・実験のスクリプトとデータ（人体モデル・COMSOL の出力を含む。公開しない）
+/paper/
+
 # 計算結果
 *.vtu
 *.vtp

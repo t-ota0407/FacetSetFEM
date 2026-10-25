@@ -6,6 +6,9 @@ members = ["crates/gfem-core", "crates/gfem-cuda", "crates/gfem-py"]
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.97"
+license = "MIT"
+repository = "https://github.com/t-ota0407/GenericFEM"
+# crates.io には出さない（配布は GitHub。SPEC §11.2）
 publish = false
 
 [workspace.dependencies]
