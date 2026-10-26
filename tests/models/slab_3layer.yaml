@@ -1,11 +1,11 @@
-# GenericFEM サンプルケース（SPEC §3.3）
+# FacetSetFEM サンプルケース（SPEC §3.3）
 #
-#   .venv/Scripts/python.exe -m gfem.gui tests/models/slab_3layer.yaml
+#   .venv/Scripts/python.exe -m facetsetfem.gui tests/models/slab_3layer.yaml
 #
 # か、バッチから:
 #
-#   import gfem
-#   result = gfem.Study.load("tests/models/slab_3layer.yaml").solve()
+#   import facetsetfem
+#   result = facetsetfem.Study.load("tests/models/slab_3layer.yaml").solve()
 #   print(result.impedance)
 
 version: 1

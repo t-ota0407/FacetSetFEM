@@ -9,11 +9,11 @@ from __future__ import annotations
 
 import pytest
 
-from gfem.i18n import tr
+from facetsetfem.i18n import tr
 from PySide6.QtCore import QItemSelectionModel, Qt
 from PySide6.QtTest import QTest
 
-from gfem.gui.widgets import MixedValueSpinBox
+from facetsetfem.gui.widgets import MixedValueSpinBox
 
 SIGMA = {1: 0.10, 2: 0.04, 3: 0.35}
 
@@ -31,7 +31,7 @@ def window(main_window, sample_bdf):
 
 
 def _item(window, kind, key=None):
-    from gfem.gui.main_window import ROLE_KEY, ROLE_KIND
+    from facetsetfem.gui.main_window import ROLE_KEY, ROLE_KIND
 
     it = window.tree.findItems("", Qt.MatchFlag.MatchContains | Qt.MatchFlag.MatchRecursive)
     for item in it:
@@ -98,7 +98,7 @@ def test_matching_values_are_shown_as_is(window):
 
 
 def test_a_tissue_hint_sets_sigma_and_name_for_all(window):
-    from gfem.gui.state import TISSUE_HINTS
+    from facetsetfem.gui.state import TISSUE_HINTS
 
     name, value = next(iter(TISSUE_HINTS.items()))
     _select(window, _item(window, "region", 2), _item(window, "region", 3))

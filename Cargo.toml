@@ -1,19 +1,19 @@
 [workspace]
 resolver = "3"
-members = ["crates/gfem-core", "crates/gfem-cuda", "crates/gfem-py"]
+members = ["crates/facetsetfem-core", "crates/facetsetfem-cuda", "crates/facetsetfem-py"]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.97"
 license = "MIT"
-repository = "https://github.com/t-ota0407/GenericFEM"
+repository = "https://github.com/t-ota0407/FacetSetFEM"
 # crates.io には出さない（配布は GitHub。SPEC §11.2）
 publish = false
 
 [workspace.dependencies]
-gfem-core = { path = "crates/gfem-core" }
-gfem-cuda = { path = "crates/gfem-cuda" }
+facetsetfem-core = { path = "crates/facetsetfem-core" }
+facetsetfem-cuda = { path = "crates/facetsetfem-cuda" }
 # VTU の圧縮に使う。C ライブラリに依存しない純 Rust 実装（miniz_oxide）を選ぶ
 flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
 # CPU 並列（SPEC §4.4）。総和はブロック分割なので逐次とビット単位で一致する

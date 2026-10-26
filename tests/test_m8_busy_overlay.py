@@ -17,7 +17,7 @@ import pytest
 
 pytest.importorskip("PySide6.QtWidgets")
 
-from gfem.gui.busy import REVEAL_DELAY_MS, BusyOverlay, busy_scope, run_in_thread
+from facetsetfem.gui.busy import REVEAL_DELAY_MS, BusyOverlay, busy_scope, run_in_thread
 
 
 @pytest.fixture
@@ -90,7 +90,7 @@ def test_when_to_wait_before_showing(main_window, sample_bdf):
     大きなモデルでは領域を選び直すだけでも 1 秒近くかかり、その間は画面を更新する
     隙が無い。猶予を置くと処理の最後に一瞬だけ光って終わってしまう。
     """
-    from gfem.gui.main_window import BIG_MODEL_NODES
+    from facetsetfem.gui.main_window import BIG_MODEL_NODES
 
     window = main_window
     window.open_mesh(sample_bdf, "mm")
@@ -117,7 +117,7 @@ def test_a_scope_can_ask_for_the_normal_delay(main_window, sample_bdf):
     大きなモデルでは既定で「待たずに出す」が、電極をクリックで置く経路は
     1 回 0.1 秒程度なので、そのまま出すと**クリックのたびに一瞬光る**。
     """
-    from gfem.gui.busy import REVEAL_DELAY_MS
+    from facetsetfem.gui.busy import REVEAL_DELAY_MS
 
     window = main_window
     window.open_mesh(sample_bdf, "mm")

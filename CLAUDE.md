@@ -22,6 +22,8 @@
 - 2026-09 に全体の見直し（リファクタリング）を行った（確定バグ・来歴記録・ドキュメント・
   不具合の疑い・前後処理の性能・重複と構造の整理。SPEC §8 の「2026-09」）。
   見つけて残っているものは README.ja.md の「次にやること」
+- 2026-10-26 に GenericFEM から FacetSetFEM に改名した（Python は `facetsetfem`、クレートは `facetsetfem-*`。SPEC §11.2）。
+  過去のコミットや計算結果のファイルには旧名（`gfem`）が残っている
 - 2026-10 に MIT で GitHub に公開する準備をした（SPEC §11.2）。論文の原稿・人体モデル・実験のデータ
   （`paper/`）はリポジトリに入れない
 
@@ -32,21 +34,21 @@
   同じ前処理を選べば全バックエンドでビット単位一致する——AMG でも守られている（SPEC §4.4 / §4.5）
 - 重いテスト（二層半無限媒質・規模の計測・1000 万節点）は `#[ignore]` にしてあるので、
   検証一式を回すときは `cargo test --release -- --include-ignored` を使う
-- GPU のテストは GPU が無ければ黙って通る（`gfem-core` は CPU だけで完全にテストできる
+- GPU のテストは GPU が無ければ黙って通る（`facetsetfem-core` は CPU だけで完全にテストできる
   状態を保つ。設計原則 5）。GPU があるのに落ちたら本物の不具合。`backend: cuda` で GPU が
   使えないときのフォールバックだけは、GPU を隠した別プロセスで必ず確かめている
 - **Rust を変えたら `maturin develop` してから pytest を回す。コミットした後も同じ。**
   実行サマリにはビルド時の Git の状態が埋め込まれるので、古いままだと
   `test_the_git_state_describes_this_build` が落ちる（SPEC §5.5）
 - **画面に出る文言は英語と日本語の両方を書く**（既定は英語。SPEC §6.6）。Rust は
-  `tr!("English", "日本語")` で並べて書き、Python は `gfem.i18n.tr("English")` を通して
-  `python/gfem/locale_ja.py` に訳を足す（読み込み時に決まる定数は `N_("...")`）。
+  `tr!("English", "日本語")` で並べて書き、Python は `facetsetfem.i18n.tr("English")` を通して
+  `python/facetsetfem/locale_ja.py` に訳を足す（読み込み時に決まる定数は `N_("...")`）。
   `tests/test_i18n.py` が訳漏れと日本語の直書きを検出する。テストは日本語の表示で回している
   （`tests/conftest.py` と `.cargo/config.toml`）ので、既存のテストの日本語の文言は変えないこと
 - **同じものを 2 か所に書かない。** 長さ単位の換算表・バックエンドと前処理の選択肢と別名は
-  Rust 側だけに置き、Python は `gfem.metres_per_unit` / `gfem.backend_choices()` などで引く
+  Rust 側だけに置き、Python は `facetsetfem.metres_per_unit` / `facetsetfem.backend_choices()` などで引く
   （SPEC §6.5）。テスト用のメッシュは、ユニットテストなら `crate::testing::kuhn_box`、
-  結合テストなら `crates/gfem-core/tests/common` を使い、新しく書き起こさない
+  結合テストなら `crates/facetsetfem-core/tests/common` を使い、新しく書き起こさない
 - **完全電極モデル（CEM）の電極があると行列は正則になり、射影をかけない**（`Gauge::NotNeeded`。SPEC §2.5 / §4.3）。
   射影や AMG の最粗レベル（零空間方向の正則化）は `Gauge::MeanZero` のときだけ。一様電流密度だけのケースの
   演算は 1 つも変えていないので、そちらの答えはビット単位で変わらない——この性質を崩さないこと
@@ -95,7 +97,7 @@ SPEC.md に根拠が書いてあるが、実装中に忘れやすいので再掲
 2. **全計算を f64 で行う。** 単精度に落として速くなる場面はない（CG はメモリ帯域律速）
 3. **ゲージ固定は射影 CG で行う。** 1 節点ピン留めは解を歪めるので使わない
 4. **電極荷重は面積按分**（一様電流密度）。節点均等分配はメッシュ密度に依存して歪むので使わない
-5. **`gfem-core` は CUDA・Python に依存させない。** CPU だけで完全にテストできる状態を保つ
+5. **`facetsetfem-core` は CUDA・Python に依存させない。** CPU だけで完全にテストできる状態を保つ
 6. **エラーは親切に。** 「何が」「どのファイルのどの行 / どの要素 ID で」「どうすれば直るか」を必ず書く
 7. **単位は内部で必ず SI（m, S/m, A）に正規化する。** Nastran ファイルには単位情報がないため、読み込み時に変換する
 

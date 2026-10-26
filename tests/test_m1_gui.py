@@ -13,8 +13,8 @@ from __future__ import annotations
 
 import pytest
 
-import gfem
-from gfem.gui.state import DISPLAY_FIELDS, Session
+import facetsetfem
+from facetsetfem.gui.state import DISPLAY_FIELDS, Session
 
 SIGMA = {1: 0.10, 2: 0.04, 3: 0.35}
 NAMES = {1: "skin", 2: "fat", 3: "muscle"}
@@ -70,17 +70,17 @@ def test_missing_conductivity_is_caught_before_solving(sample_bdf):
     s.open_mesh(sample_bdf, "mm")
     s.add_electrode("E1", "anode", 2.0e-3, [101])
     s.add_electrode("E2", "cathode", 2.0e-3, [201])
-    with pytest.raises(gfem.GfemError) as excinfo:
+    with pytest.raises(facetsetfem.FacetSetFemError) as excinfo:
         s.validate()
     assert "導電率が未設定" in str(excinfo.value)
 
 
 def test_the_command_line_never_guesses_the_length_unit():
-    """`python -m gfem.gui model.bdf` は単位を黙って決めない（SPEC §3.2）。
+    """`python -m facetsetfem.gui model.bdf` は単位を黙って決めない（SPEC §3.2）。
 
     以前は mm とみなして開いていた。`--unit` で明示するか、GUI で寸法を見て選ぶ。
     """
-    from gfem.gui import parse_arguments
+    from facetsetfem.gui import parse_arguments
 
     assert parse_arguments(["model.bdf"]).unit is None  # → 寸法を見せて選ばせる
     assert parse_arguments(["model.bdf", "--unit", "cm"]).unit == "cm"
@@ -93,11 +93,11 @@ def test_the_command_line_never_guesses_the_length_unit():
 
 def test_electrode_names_stay_unique(session):
     """電極名はツリー・削除・結果で電極を引く鍵なので、重複を作らせない。"""
-    with pytest.raises(gfem.GfemError, match="すでにあります"):
+    with pytest.raises(facetsetfem.FacetSetFemError, match="すでにあります"):
         session.add_electrode("E1")
-    with pytest.raises(gfem.GfemError, match="すでにあります"):
+    with pytest.raises(facetsetfem.FacetSetFemError, match="すでにあります"):
         session.rename_electrode("E2", "E1")
-    with pytest.raises(gfem.GfemError, match="空"):
+    with pytest.raises(facetsetfem.FacetSetFemError, match="空"):
         session.rename_electrode("E2", "  ")
     session.rename_electrode("E2", "E3")
     assert [e.name for e in session.study.electrodes] == ["E1", "E3"]
@@ -109,7 +109,7 @@ def test_region_stats_table_volume_is_in_the_unit_of_its_heading(session):
     以前は見出しが mm³ なのに値は m³ × 1e6（＝ cm³）で、1000 倍ずれていた。
     サンプルモデルは 60 mm × 40 mm × 20 mm = 48 cm³。
     """
-    from gfem.gui.state import REGION_STATS_COLUMNS
+    from facetsetfem.gui.state import REGION_STATS_COLUMNS
 
     session.solve()
     column = REGION_STATS_COLUMNS.index("Volume [cm³]")
@@ -133,7 +133,7 @@ def test_summary_records_the_conditions_that_were_solved(session, tmp_path):
     session.write_summary_json(out)
 
     text = json.loads(out.read_text(encoding="utf-8"))["provenance"]["case_text"]
-    solved = gfem.Study.from_dict(yaml.safe_load(text))
+    solved = facetsetfem.Study.from_dict(yaml.safe_load(text))
     assert {m.pid: m.sigma for m in solved.materials} == SIGMA
     assert [e.name for e in solved.electrodes] == ["E1", "E2"]
 
@@ -261,11 +261,11 @@ def test_opening_a_mesh_with_the_unit_dialog_reads_the_file_once(main_window, sa
     """
     from PySide6.QtWidgets import QDialog
 
-    import gfem.gui.main_window as main_window_module
-    import gfem.gui.state as state_module
+    import facetsetfem.gui.main_window as main_window_module
+    import facetsetfem.gui.state as state_module
 
     reads: list[str] = []
-    real_read = gfem.read_nastran
+    real_read = facetsetfem.read_nastran
 
     def counting_read(path, length_unit=None):
         reads.append(length_unit)
@@ -294,7 +294,7 @@ def test_opening_a_mesh_with_the_unit_dialog_reads_the_file_once(main_window, sa
 def test_renaming_an_electrode_to_an_existing_name_is_refused(window, monkeypatch):
     shown: list[str] = []
     monkeypatch.setattr(
-        "gfem.gui.main_window.QMessageBox.critical", lambda *args: shown.append(args[2])
+        "facetsetfem.gui.main_window.QMessageBox.critical", lambda *args: shown.append(args[2])
     )
     page = window.page_electrode
     page.bind("E2")
@@ -365,7 +365,7 @@ def test_view_and_screenshot(window, tmp_path):
 
 
 def test_unit_selector_shows_both_units(qt_app):
-    from gfem.gui.widgets import UnitSelector
+    from facetsetfem.gui.widgets import UnitSelector
 
     dialog = UnitSelector((60.0, 40.0, 20.0))
     dialog.combo.setCurrentText("mm")

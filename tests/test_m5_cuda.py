@@ -1,6 +1,6 @@
 """CUDA バックエンドの Python 側からの確認（SPEC §8 M5）。
 
-Rust 側（`crates/gfem-cuda/tests/`）がビット単位一致そのものを検証する。
+Rust 側（`crates/facetsetfem-cuda/tests/`）がビット単位一致そのものを検証する。
 ここでは**研究で実際にやる形**——ケースファイルに `backend: cuda` と書いて解く——が
 Python API で完結すること、GPU が無い／足りないときに黙って壊れないことを確かめる。
 
@@ -17,7 +17,7 @@ import sys
 import numpy as np
 import pytest
 
-import gfem
+import facetsetfem
 
 from test_m4_elements_and_backends import (
     AREA_M2,
@@ -33,7 +33,7 @@ from test_m4_elements_and_backends import (
 
 def gpu_ready(n_nodes: int = 1) -> bool:
     """この規模を GPU で解けるか。"""
-    return gfem.cuda_available() and gfem.cuda_check(n_nodes) is None
+    return facetsetfem.cuda_available() and facetsetfem.cuda_check(n_nodes) is None
 
 
 requires_gpu = pytest.mark.skipif(not gpu_ready(), reason="使える GPU が無い")
@@ -43,9 +43,9 @@ requires_gpu = pytest.mark.skipif(not gpu_ready(), reason="使える GPU が無�
 
 
 def test_describe_gpus_always_returns_something():
-    text = gfem.describe_gpus()
+    text = facetsetfem.describe_gpus()
     assert isinstance(text, str) and text
-    if gfem.cuda_available() and gfem.cuda_devices():
+    if facetsetfem.cuda_available() and facetsetfem.cuda_devices():
         assert "GPU 0" in text
     else:
         # 無いなら無いと書く（黙って空にしない）
@@ -53,7 +53,7 @@ def test_describe_gpus_always_returns_something():
 
 
 def test_device_list_has_the_expected_shape():
-    for d in gfem.cuda_devices():
+    for d in facetsetfem.cuda_devices():
         assert set(d) == {
             "ordinal",
             "name",
@@ -69,7 +69,7 @@ def test_device_list_has_the_expected_shape():
 
 def test_absurd_problem_sizes_are_rejected_with_a_reason():
     """VRAM に載らない規模は、理由つきで断られる（SPEC §4.4）。"""
-    reason = gfem.cuda_check(1_000_000_000)
+    reason = facetsetfem.cuda_check(1_000_000_000)
     assert reason is not None
     assert "VRAM" in reason or "GPU" in reason
 
@@ -83,7 +83,7 @@ def test_cuda_gives_the_same_answer_as_the_cpu(tmp_path):
     mesh = write_deck(tmp_path, "tet", nx=6, ny=4)
 
     def solved(backend):
-        case = gfem.Case(mesh)
+        case = facetsetfem.Case(mesh)
         case.set_conductivity(SIGMA)
         case.add_electrode("E1", role="anode", current=CURRENT, shell_pids=[TOP_PID])
         case.add_electrode("E2", role="cathode", current=CURRENT, shell_pids=[BOTTOM_PID])
@@ -108,17 +108,17 @@ def test_study_can_ask_for_cuda(tmp_path):
     """ケースファイルからも GPU を選べる（SPEC §3.3）。"""
     path = tmp_path / "slab.bdf"
     path.write_text(slab_deck("tet"), encoding="utf-8")
-    study = gfem.Study(
+    study = facetsetfem.Study(
         mesh_file=path,
         length_unit="mm",
-        materials=[gfem.Material(pid=pid, sigma=s) for pid, s in SIGMA.items()],
+        materials=[facetsetfem.Material(pid=pid, sigma=s) for pid, s in SIGMA.items()],
         electrodes=[
-            gfem.ElectrodeSpec(name="E1", role="anode", current=CURRENT, shell_pids=[TOP_PID]),
-            gfem.ElectrodeSpec(
+            facetsetfem.ElectrodeSpec(name="E1", role="anode", current=CURRENT, shell_pids=[TOP_PID]),
+            facetsetfem.ElectrodeSpec(
                 name="E2", role="cathode", current=CURRENT, shell_pids=[BOTTOM_PID]
             ),
         ],
-        solver=gfem.SolverSpec(backend="cuda", tolerance=1e-13),
+        solver=facetsetfem.SolverSpec(backend="cuda", tolerance=1e-13),
     )
     result = study.solve()
     assert result.backend == "cuda"
@@ -132,7 +132,7 @@ def test_auto_stays_on_the_cpu_for_small_meshes(tmp_path):
     """小さい問題は転送のほうが高くつくので GPU に載せない（SPEC §4.4）。"""
     mesh = write_deck(tmp_path, "tet")
     assert mesh.n_nodes < 100_000
-    case = gfem.Case(mesh)
+    case = facetsetfem.Case(mesh)
     case.set_conductivity(SIGMA)
     case.add_electrode("E1", role="anode", current=CURRENT, shell_pids=[TOP_PID])
     case.add_electrode("E2", role="cathode", current=CURRENT, shell_pids=[BOTTOM_PID])
@@ -147,10 +147,10 @@ def test_auto_stays_on_the_cpu_for_small_meshes(tmp_path):
 #: プロセスの中では GPU を隠せない。
 _FALLBACK_SCRIPT = r"""
 import json, sys
-import gfem
+import facetsetfem
 
-mesh = gfem.read_nastran(sys.argv[1], length_unit="mm")
-case = gfem.Case(mesh)
+mesh = facetsetfem.read_nastran(sys.argv[1], length_unit="mm")
+case = facetsetfem.Case(mesh)
 case.set_conductivity({1: 0.10, 2: 0.04, 3: 0.35})
 case.add_electrode("E1", role="anode", current=2e-3, shell_pids=[101])
 case.add_electrode("E2", role="cathode", current=2e-3, shell_pids=[201])
@@ -176,7 +176,7 @@ def test_falling_back_to_the_cpu_is_never_silent(sample_bdf):
     Windows では空文字の環境変数は未設定と同じになるので -1 を使う）。
     """
     # テストは日本語の表示で回す（conftest.py）。子プロセスにも引き継ぐ
-    env = dict(os.environ, CUDA_VISIBLE_DEVICES="-1", PYTHONUTF8="1", GFEM_LANG="ja")
+    env = dict(os.environ, CUDA_VISIBLE_DEVICES="-1", PYTHONUTF8="1", FACETSETFEM_LANG="ja")
     done = subprocess.run(
         [sys.executable, "-c", _FALLBACK_SCRIPT, str(sample_bdf)],
         env=env,
@@ -194,8 +194,8 @@ def test_falling_back_to_the_cpu_is_never_silent(sample_bdf):
     assert any("CPU で解きます" in w for w in out["warnings"]), out["warnings"]
 
     # 代わりに使った CPU のソルバは、ふつうに CPU で解いたのとビット単位で同じ答えを出す
-    mesh = gfem.read_nastran(sample_bdf, length_unit="mm")
-    case = gfem.Case(mesh)
+    mesh = facetsetfem.read_nastran(sample_bdf, length_unit="mm")
+    case = facetsetfem.Case(mesh)
     case.set_conductivity({1: 0.10, 2: 0.04, 3: 0.35})
     case.add_electrode("E1", role="anode", current=2e-3, shell_pids=[101])
     case.add_electrode("E2", role="cathode", current=2e-3, shell_pids=[201])
@@ -211,12 +211,12 @@ def test_amg_is_checked_against_the_vram_it_really_needs():
     見積りを通ったあと解いている途中で VRAM が尽きて止まった。
     Jacobi なら載るが AMG なら載らない規模を、いまの空き VRAM から選んで確かめる。
     """
-    free = max(d["free_memory"] for d in gfem.cuda_devices() if d["usable"])
-    csr_per_node = 8 + 15 * 12  # 行ポインタ + 節点あたり 15 非ゼロ（gfem-cuda の見積りと同じ）
+    free = max(d["free_memory"] for d in facetsetfem.cuda_devices() if d["usable"])
+    csr_per_node = 8 + 15 * 12  # 行ポインタ + 節点あたり 15 非ゼロ（facetsetfem-cuda の見積りと同じ）
     jacobi_per_node = csr_per_node + 7 * 8
     amg_per_node = jacobi_per_node + 1.4 * csr_per_node
     n = int(0.9 * free / ((jacobi_per_node + amg_per_node) / 2))
 
-    assert gfem.cuda_check(n) is None
-    reason = gfem.cuda_check(n, preconditioner="amg")
+    assert facetsetfem.cuda_check(n) is None
+    reason = facetsetfem.cuda_check(n, preconditioner="amg")
     assert reason is not None and "VRAM" in reason

@@ -1,6 +1,6 @@
 """Python 側からの検証（SPEC §8 M2）。
 
-厳密な収束次数の測定は Rust 側（`crates/gfem-core/tests/convergence.rs`）で行う。
+厳密な収束次数の測定は Rust 側（`crates/facetsetfem-core/tests/convergence.rs`）で行う。
 ここでは**研究で実際にやる形**——結果配列と要素重心を numpy で受け取り、
 解析解と突き合わせる——が Python API だけで完結することを確かめる。
 """
@@ -10,7 +10,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-import gfem
+import facetsetfem
 from conftest import SLAB_AREA, SLAB_LAYERS
 
 CURRENT = 2.0e-3
@@ -19,8 +19,8 @@ CURRENT = 2.0e-3
 @pytest.fixture(scope="module")
 def layered_solution(full_face_bdf, slab_sigma):
     """上下面全体を電極にした 3 層スラブの解。一次元の厳密解を持つ。"""
-    mesh = gfem.read_nastran(full_face_bdf, length_unit="mm")
-    case = gfem.Case(mesh)
+    mesh = facetsetfem.read_nastran(full_face_bdf, length_unit="mm")
+    case = facetsetfem.Case(mesh)
     case.set_conductivity(slab_sigma)
     case.add_electrode("E1", role="anode", current=CURRENT, shell_pids=[101])
     case.add_electrode("E2", role="cathode", current=CURRENT, shell_pids=[201])

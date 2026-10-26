@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from gfem.gui.state import Session
+from facetsetfem.gui.state import Session
 
 SIGMA = {1: 0.10, 2: 0.04, 3: 0.35}
 CURRENT = 2.0e-3
@@ -62,7 +62,7 @@ def test_unsaved_changes_are_found_by_content(sample_bdf, tmp_path):
 
 def test_the_status_line_keeps_the_substance_of_a_headed_message():
     """「エラー:」だけの見出し行は、2 行目の中身と続けてステータスバーに出す。"""
-    from gfem.gui.main_window import status_line
+    from facetsetfem.gui.main_window import status_line
 
     assert status_line("エラー:\n[設定エラー] 電極 E1 はすでにあります\n  対処: ...") == (
         "エラー: [設定エラー] 電極 E1 はすでにあります"
@@ -74,7 +74,7 @@ def test_the_status_line_keeps_the_substance_of_a_headed_message():
 @pytest.mark.parametrize("text", ["abc", "0.1, x", "0:1:y", "nan"])
 def test_unreadable_sweep_values_are_explained_in_japanese(text):
     """以前は `could not convert string to float: 'abc'` がそのまま出ていた。"""
-    from gfem.gui.sweep_dialog import parse_values
+    from facetsetfem.gui.sweep_dialog import parse_values
 
     with pytest.raises(ValueError) as excinfo:
         parse_values(text)
@@ -85,7 +85,7 @@ def test_unreadable_sweep_values_are_explained_in_japanese(text):
 
 def test_a_cancelled_solve_is_not_reported_as_a_failure(sample_bdf, qt_app):
     """中断は失敗ではないので、別のシグナル（`cancelled`）で知らせる。"""
-    from gfem.gui.solver_thread import SolverThread
+    from facetsetfem.gui.solver_thread import SolverThread
 
     s = Session()
     s.open_mesh(sample_bdf, "mm")
@@ -149,7 +149,7 @@ def test_the_isosurface_is_coloured_on_the_whole_model_range(window, qt_app):
 
 def test_streamlines_can_be_seen_through_the_surface(window, qt_app):
     """流線は体の中を通るので、重ねている間は外表面を透かす。"""
-    from gfem.gui.main_window import STREAMLINE_SURFACE_OPACITY
+    from facetsetfem.gui.main_window import STREAMLINE_SURFACE_OPACITY
 
     _solve(window, qt_app)
     window.page_result.streamlines.setChecked(True)
@@ -260,7 +260,7 @@ def test_closing_asks_about_unsaved_changes(window, monkeypatch):
 
 def test_the_scalar_bar_title_drops_the_bars_and_splits_the_unit():
     """VTK の既定のフォントでは `|` が描かれない。量と単位は 2 行に分けて細い帯に収める。"""
-    from gfem.gui.main_window import scalar_bar_title
+    from facetsetfem.gui.main_window import scalar_bar_title
 
     assert scalar_bar_title("|J| [A/m2]") == "J\n[A/m2]"
     assert scalar_bar_title("power density [W/m3]") == "power density\n[W/m3]"
@@ -285,7 +285,7 @@ def test_the_scalar_bar_gets_its_own_strip_beside_the_model(window, qt_app):
 
 def test_coloured_surfaces_are_not_darkened_too_much_by_shading(window, qt_app):
     """値で塗っている間は環境光を足し、光の当たらない面でも色が読めるようにする。"""
-    from gfem.gui.main_window import SCALAR_LIGHTING
+    from facetsetfem.gui.main_window import SCALAR_LIGHTING
 
     _solve(window, qt_app)
     ambients = [
@@ -302,7 +302,7 @@ def test_choosing_a_slice_faces_it_and_shows_the_body_outline(window, qt_app):
     """断面を選ぶと正面から見る向きにし、体の外形を薄く重ねる。"""
     import numpy as np
 
-    from gfem.gui.main_window import SECTION_CONTEXT_OPACITY
+    from facetsetfem.gui.main_window import SECTION_CONTEXT_OPACITY
 
     _solve(window, qt_app)
     page = window.page_result
@@ -320,7 +320,7 @@ def test_choosing_a_slice_faces_it_and_shows_the_body_outline(window, qt_app):
 
 def test_other_electrodes_are_outlined_while_one_is_edited(window):
     """選んでいない電極も、縁を役割の色で描いて位置を見せる。"""
-    from gfem.gui.main_window import ELECTRODE_OUTLINE_COLORS
+    from facetsetfem.gui.main_window import ELECTRODE_OUTLINE_COLORS
     from pyvista import Color
 
     outline = window.session.electrode_outline("E1")
@@ -343,7 +343,7 @@ def test_a_new_electrode_is_selected_right_away(window):
 
 
 def test_a_bad_tolerance_is_explained_where_it_was_typed(window):
-    from gfem.gui.pages import tolerance_problem
+    from facetsetfem.gui.pages import tolerance_problem
 
     assert tolerance_problem("1e-10") is None
     assert "範囲外" in tolerance_problem("5")
@@ -405,7 +405,7 @@ def test_only_the_controls_of_the_current_mode_can_be_used(window, qt_app):
 
 
 def test_statistics_carry_units_and_a_zero_reference_reads_as_zero(sample_bdf):
-    from gfem.gui.state import REGION_STATS_COLUMNS
+    from facetsetfem.gui.state import REGION_STATS_COLUMNS
 
     assert "|J| max [A/m²]" in REGION_STATS_COLUMNS
     assert "|E| 99% [V/m]" in REGION_STATS_COLUMNS
@@ -491,7 +491,7 @@ def test_leaving_a_section_restores_the_previous_view(window, qt_app):
 
 def test_the_undo_menu_stays_narrow_with_a_long_label(window):
     """操作名が長くても（領域をまとめて選んだときなど）、メニューは横に伸びない。全文はツールチップに。"""
-    from gfem.gui.main_window import HISTORY_LABEL_LIMIT
+    from facetsetfem.gui.main_window import HISTORY_LABEL_LIMIT
 
     label = "領域 " + ", ".join(str(p) for p in range(1, 63)) + " の設定を変更"
     window.checkpoint(label)

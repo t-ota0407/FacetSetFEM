@@ -5,7 +5,7 @@
 
 できた wheel は `dist/` に入る。渡された側は
 
-    pip install gfem-0.1.0-cp312-abi3-win_amd64.whl
+    pip install facetsetfem-0.1.0-cp312-abi3-win_amd64.whl
 
 だけで、Rust も CUDA Toolkit も無しに使える（GPU で走らせるには
 NVIDIA ドライバは要る）。
@@ -19,7 +19,7 @@ SPEC §12 の未決事項 3 は「PyInstaller による単体化か、環境構�
   レンダリングバックエンドを丸ごと抱き込むことになり、
   数百 MB の exe になるうえ、GPU ドライバとの相性問題が出たときに切り分けにくい
 - **研究用途では Python から叩けるほうが価値が高い。** バッチでパラメータを
-  振る（`gfem.sweep`）のも、結果を pandas に流すのも、
+  振る（`facetsetfem.sweep`）のも、結果を pandas に流すのも、
   ライブラリとして入っているほうが素直（SPEC §6.5）
 - **wheel は abi3 なので Python 3.12 以降で 1 つ作れば済む。**
   ビルド機と実行機で Python の細かいバージョンが違っても動く
@@ -91,7 +91,7 @@ def main(argv: list[str] | None = None) -> int:
     env.pop("CONDA_PREFIX", None)
     run(command, env=env)
 
-    wheels = sorted(args.out.glob("gfem-*.whl"))
+    wheels = sorted(args.out.glob("facetsetfem-*.whl"))
     if not wheels:
         print("wheel ができていません", file=sys.stderr)
         return 1
@@ -101,8 +101,8 @@ def main(argv: list[str] | None = None) -> int:
     print("  CUDA:", "外してあります" if args.no_cuda else "入っています")
     print("\n渡された側の手順:")
     print(f"  pip install {newest.name}")
-    print("  python -m gfem.gui            # GUI")
-    print("  python -c \"import gfem; print(gfem.describe_gpus())\"")
+    print("  python -m facetsetfem.gui            # GUI")
+    print("  python -c \"import facetsetfem; print(facetsetfem.describe_gpus())\"")
     return 0
 
 

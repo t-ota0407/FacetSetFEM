@@ -9,7 +9,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from gfem.gui.state import HIDDEN, TRANSPARENT, VISIBLE, Session
+from facetsetfem.gui.state import HIDDEN, TRANSPARENT, VISIBLE, Session
 
 FIELD = "|J| [A/m2]"
 
@@ -145,7 +145,7 @@ def test_show_only_hides_the_others(window):
 
 
 def test_hidden_electrodes_lose_their_outline(window):
-    from gfem.gui.main_window import ELECTRODE_OUTLINE_COLORS
+    from facetsetfem.gui.main_window import ELECTRODE_OUTLINE_COLORS
     from pyvista import Color
 
     anode = Color(ELECTRODE_OUTLINE_COLORS["anode"]).float_rgb

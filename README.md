@@ -1,4 +1,4 @@
-# GenericFEM
+# FacetSetFEM
 
 English | [日本語](README.ja.md)
 
@@ -40,13 +40,13 @@ See [About the images](#about-the-images) for the source of the anatomical model
 ### From a wheel (no Rust or CUDA Toolkit needed)
 
 ```bash
-pip install gfem-0.1.0-cp312-abi3-win_amd64.whl
-python -m gfem.gui
+pip install facetsetfem-0.1.0-cp312-abi3-win_amd64.whl
+python -m facetsetfem.gui
 ```
 
 The wheel works with Python 3.12 or later and pulls in the GUI dependencies (PySide6, PyVista, pyvistaqt).
 Solving on a GPU needs an NVIDIA driver and a GPU of compute capability 6.0 or later; without one,
-GenericFEM falls back to the CPU automatically. To build the wheel yourself, run
+FacetSetFEM falls back to the CPU automatically. To build the wheel yourself, run
 `python scripts/build_release.py` (add `--no-cuda` for a CPU-only build); it is written to `dist/`.
 
 ### From source
@@ -54,12 +54,12 @@ GenericFEM falls back to the CPU automatically. To build the wheel yourself, run
 Requires Rust 1.97+ and Python 3.12+.
 
 ```bash
-git clone https://github.com/t-ota0407/GenericFEM.git
-cd GenericFEM
+git clone https://github.com/t-ota0407/FacetSetFEM.git
+cd FacetSetFEM
 python -m venv .venv
 .venv/Scripts/python.exe -m pip install -r requirements.txt
 .venv/Scripts/maturin.exe develop --release
-.venv/Scripts/python.exe -m gfem.gui tests/models/slab_3layer.yaml
+.venv/Scripts/python.exe -m facetsetfem.gui tests/models/slab_3layer.yaml
 ```
 
 Development and testing are done on Windows 11 with the MSVC toolchain (Visual Studio Build Tools with the
@@ -70,11 +70,11 @@ C++ workload and the Windows SDK). The build succeeds without the CUDA Toolkit; 
 ### GUI
 
 ```bash
-python -m gfem.gui tests/models/slab_3layer.yaml          # a case file
-python -m gfem.gui tests/models/slab_3layer.bdf --unit mm # a Nastran mesh (asks for the unit if omitted)
+python -m facetsetfem.gui tests/models/slab_3layer.yaml          # a case file
+python -m facetsetfem.gui tests/models/slab_3layer.bdf --unit mm # a Nastran mesh (asks for the unit if omitted)
 ```
 
-Nastran files carry no unit information, so GenericFEM never guesses the length unit: it shows the
+Nastran files carry no unit information, so FacetSetFEM never guesses the length unit: it shows the
 model dimensions and asks. The interface language can be switched under *View → Language*
 (or `--lang ja`).
 
@@ -92,10 +92,10 @@ of the model are not selected.
 ### Python API
 
 ```python
-import gfem
+import facetsetfem
 
-mesh = gfem.read_nastran("tests/models/slab_3layer.bdf", length_unit="mm")
-case = gfem.Case(mesh)
+mesh = facetsetfem.read_nastran("tests/models/slab_3layer.bdf", length_unit="mm")
+case = facetsetfem.Case(mesh)
 case.set_conductivity({1: 0.10, 2: 0.04, 3: 0.35})   # sigma [S/m] per PSOLID PID
 case.add_electrode("E1", role="anode",   current=2e-3, shell_pids=[101])
 case.add_electrode("E2", role="cathode", current=2e-3, shell_pids=[201])
@@ -116,7 +116,7 @@ result.write_summary_json("summary.json")   # with input hashes and Git state
 Electrodes on the body surface of a model without shell elements:
 
 ```python
-mesh = gfem.read_nastran("head.nas", length_unit="mm")
+mesh = facetsetfem.read_nastran("head.nas", length_unit="mm")
 for row in mesh.surface_pids():   # regions exposed on the outer surface, largest first
     print(row["pid"], row["n_faces"], row["area"])
 
@@ -131,28 +131,28 @@ case.add_electrode("E2", role="cathode", current=2e-3,
 Other entry points:
 
 ```python
-result = gfem.Study.load("tests/models/slab_3layer.yaml").solve()   # a YAML case file
+result = facetsetfem.Study.load("tests/models/slab_3layer.yaml").solve()   # a YAML case file
 
 # Complete electrode model (contact impedance in ohm m^2)
 case.add_electrode("E1", role="anode", current=2e-3, shell_pids=[101],
                    distribution="complete_electrode", contact_impedance=0.01)
 
 # Parameter study
-study = gfem.Study.load("tests/models/slab_3layer.yaml")
-table = gfem.sweep(study, {"sigma.2": [0.02, 0.04], "current": [1e-3, 2e-3]})
+study = facetsetfem.Study.load("tests/models/slab_3layer.yaml")
+table = facetsetfem.sweep(study, {"sigma.2": [0.02, 0.04], "current": [1e-3, 2e-3]})
 table.write_csv("sweep.csv")
 
 # Quadratic tetrahedra (or `mesh.element_order: 2` in the case file)
 mesh2 = mesh.elevate()
 
-print(gfem.describe_gpus())   # available GPUs
+print(facetsetfem.describe_gpus())   # available GPUs
 ```
 
 Exports for other software: `case.write_nastran("out.bdf")` writes the mesh with the electrodes as
 shell elements, and `result.write_nodes_csv(...)` / `result.write_elements_csv(...)` write
 unrounded nodal and element values.
 
-> The bundled tissue conductivities (`gfem.tissue("muscle")`) are representative values for getting the
+> The bundled tissue conductivities (`facetsetfem.tissue("muscle")`) are representative values for getting the
 > order of magnitude right, not a literature database. Check the literature for real analyses.
 
 ## Performance

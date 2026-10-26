@@ -1,0 +1,16 @@
+[package]
+name = "facetsetfem-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "FacetSetFEM のコア。CUDA・Python に一切依存しない（SPEC §7）"
+
+[dependencies]
+flate2.workspace = true
+# 入力ファイルのハッシュ（SPEC §5.5 のプロビナンス記録）
+sha2.workspace = true
+# CPU 並列（SPEC §4.4 / §8 M4）
+rayon.workspace = true

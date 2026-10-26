@@ -11,7 +11,7 @@ import shutil
 import pytest
 import yaml
 
-import gfem
+import facetsetfem
 from conftest import SLAB_AREA, SLAB_LAYERS
 
 #: SPEC §3.3 に載っているケースファイルの形（サンプルモデルに合わせた値）
@@ -72,7 +72,7 @@ def case_dir(tmp_path, sample_bdf):
 
 
 def test_loads_the_spec_example(case_dir):
-    study = gfem.Study.load(case_dir / "case.yaml")
+    study = facetsetfem.Study.load(case_dir / "case.yaml")
     assert study.length_unit == "mm"
     assert [m.pid for m in study.materials] == [1, 2, 3]
     assert study.region_names() == {1: "skin", 2: "fat", 3: "muscle"}
@@ -84,14 +84,14 @@ def test_loads_the_spec_example(case_dir):
 
 
 def test_mesh_path_is_relative_to_the_case_file(case_dir):
-    study = gfem.Study.load(case_dir / "case.yaml")
+    study = facetsetfem.Study.load(case_dir / "case.yaml")
     assert study.resolved_mesh_file() == (case_dir / "slab_3layer.bdf").resolve()
     mesh = study.read_mesh()
     assert mesh.n_nodes == 936
 
 
 def test_solving_from_a_case_file_writes_the_requested_output(case_dir):
-    study = gfem.Study.load(case_dir / "case.yaml")
+    study = facetsetfem.Study.load(case_dir / "case.yaml")
     result = study.solve()
     assert result.conservation["warnings"] == []
     # output.vtu が書かれている
@@ -101,10 +101,10 @@ def test_solving_from_a_case_file_writes_the_requested_output(case_dir):
 
 
 def test_case_file_and_python_api_agree(case_dir, slab_sigma):
-    from_file = gfem.Study.load(case_dir / "case.yaml").solve()
+    from_file = facetsetfem.Study.load(case_dir / "case.yaml").solve()
 
-    mesh = gfem.read_nastran(case_dir / "slab_3layer.bdf", length_unit="mm")
-    case = gfem.Case(mesh)
+    mesh = facetsetfem.read_nastran(case_dir / "slab_3layer.bdf", length_unit="mm")
+    case = facetsetfem.Case(mesh)
     case.set_conductivity(slab_sigma)
     case.add_electrode("E1", role="anode", current=2e-3, shell_pids=[101])
     case.add_electrode("E2", role="cathode", current=2e-3, shell_pids=[201])
@@ -117,7 +117,7 @@ def test_case_file_and_python_api_agree(case_dir, slab_sigma):
 
 
 def test_round_trip_preserves_the_settings(case_dir, tmp_path):
-    study = gfem.Study.load(case_dir / "case.yaml")
+    study = facetsetfem.Study.load(case_dir / "case.yaml")
     out = tmp_path / "saved.yaml"
     study.save(out)
 
@@ -126,7 +126,7 @@ def test_round_trip_preserves_the_settings(case_dir, tmp_path):
     assert written["mesh"]["length_unit"] == "mm"
     assert written["electrodes"][0]["faces"]["shell_pids"] == [101]
 
-    again = gfem.Study.load(out)
+    again = facetsetfem.Study.load(out)
     assert again.to_dict() == study.to_dict()
 
 
@@ -134,7 +134,7 @@ def test_nastran_file_is_never_modified(case_dir):
     """解析条件は YAML に持ち、メッシュファイルは触らない（SPEC §3.3）。"""
     bdf = case_dir / "slab_3layer.bdf"
     before = bdf.read_bytes()
-    gfem.Study.load(case_dir / "case.yaml").solve()
+    facetsetfem.Study.load(case_dir / "case.yaml").solve()
     assert bdf.read_bytes() == before
 
 
@@ -146,7 +146,7 @@ def test_full_face_case_matches_the_analytic_solution(tmp_path, full_face_bdf):
     )
     (tmp_path / "case.yaml").write_text(text, encoding="utf-8")
 
-    result = gfem.Study.load(tmp_path / "case.yaml").solve()
+    result = facetsetfem.Study.load(tmp_path / "case.yaml").solve()
     expected_r = sum(t / (s * SLAB_AREA) for _p, t, s in SLAB_LAYERS)
     assert result.impedance == pytest.approx(expected_r, rel=1e-8)
 
@@ -157,8 +157,8 @@ def test_full_face_case_matches_the_analytic_solution(tmp_path, full_face_bdf):
 def _load_bad(tmp_path, text: str):
     path = tmp_path / "bad.yaml"
     path.write_text(text, encoding="utf-8")
-    with pytest.raises(gfem.GfemError) as excinfo:
-        gfem.Study.load(path)
+    with pytest.raises(facetsetfem.FacetSetFemError) as excinfo:
+        facetsetfem.Study.load(path)
     return str(excinfo.value)
 
 
@@ -252,6 +252,6 @@ def test_broken_yaml_is_reported(tmp_path):
 
 
 def test_missing_file_is_reported(tmp_path):
-    with pytest.raises(gfem.GfemError) as excinfo:
-        gfem.Study.load(tmp_path / "does_not_exist.yaml")
+    with pytest.raises(facetsetfem.FacetSetFemError) as excinfo:
+        facetsetfem.Study.load(tmp_path / "does_not_exist.yaml")
     assert "開けません" in str(excinfo.value)

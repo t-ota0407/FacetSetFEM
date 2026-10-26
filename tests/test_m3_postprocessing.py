@@ -20,7 +20,7 @@ import numpy as np
 import pytest
 import yaml
 
-import gfem
+import facetsetfem
 from conftest import SLAB_AREA, SLAB_LAYERS
 
 CURRENT = 2.0e-3
@@ -29,8 +29,8 @@ CURRENT = 2.0e-3
 @pytest.fixture(scope="module")
 def solution(sample_bdf, slab_sigma):
     """上面に 2 枚のパッチ電極を置いた 3 層スラブの解。"""
-    mesh = gfem.read_nastran(sample_bdf, length_unit="mm")
-    case = gfem.Case(mesh)
+    mesh = facetsetfem.read_nastran(sample_bdf, length_unit="mm")
+    case = facetsetfem.Case(mesh)
     case.set_conductivity(slab_sigma)
     for pid, name in [(1, "skin"), (2, "fat"), (3, "muscle")]:
         case.set_region_name(pid, name)
@@ -128,7 +128,7 @@ def test_summary_json_records_the_provenance(solution, tmp_path):
     provenance = data["provenance"]
     # 入力ファイルのハッシュ（SHA-256 は 64 桁の 16 進）
     assert len(provenance["mesh_sha256"]) == 64
-    assert provenance["gfem_version"] == gfem.__version__
+    assert provenance["facetsetfem_version"] == facetsetfem.__version__
     assert provenance["timestamp_utc"].endswith("Z")
     # ケースファイル全文
     assert "version: 1" in provenance["case_text"]
@@ -146,9 +146,9 @@ def test_the_mesh_hash_is_taken_when_the_mesh_is_read(tmp_path, sample_bdf, slab
     shutil.copy(sample_bdf, bdf)
     original = hashlib.sha256(bdf.read_bytes()).hexdigest()
 
-    mesh = gfem.read_nastran(bdf, length_unit="mm")
+    mesh = facetsetfem.read_nastran(bdf, length_unit="mm")
     assert mesh.report.sha256 == original  # sha256sum と同じ値
-    case = gfem.Case(mesh)
+    case = facetsetfem.Case(mesh)
     case.set_conductivity(slab_sigma)
     case.add_electrode("E1", role="anode", current=CURRENT, shell_pids=[101])
     case.add_electrode("E2", role="cathode", current=CURRENT, shell_pids=[201])
@@ -180,14 +180,14 @@ def test_the_summary_records_the_conditions_that_were_solved(tmp_path, sample_bd
         "output: {summary_json: summary.json}\n",
         encoding="utf-8",
     )
-    study = gfem.Study.load(case_yaml)
+    study = facetsetfem.Study.load(case_yaml)
     study.materials[2].sigma = 0.50  # 読み込んだ後に条件を変えて解く
     study.solve()
 
     provenance = json.loads((tmp_path / "summary.json").read_text(encoding="utf-8"))[
         "provenance"
     ]
-    solved = gfem.Study.from_dict(yaml.safe_load(provenance["case_text"]))
+    solved = facetsetfem.Study.from_dict(yaml.safe_load(provenance["case_text"]))
     assert {m.pid: m.sigma for m in solved.materials} == {1: 0.10, 2: 0.04, 3: 0.50}
     assert provenance["case_file"] == str(case_yaml)
 
@@ -208,9 +208,9 @@ def test_the_git_state_describes_this_build(solution):
     assert tree["same_commit_as_build"] is True, (
         "拡張モジュールのビルド後にコミットが進んでいます。maturin develop してください"
     )
-    # Python 拡張の git_dirty は gfem-core だけでなく 3 クレート全部のソースを見る
+    # Python 拡張の git_dirty は facetsetfem-core だけでなく 3 クレート全部のソースを見る
     scope = provenance["git_dirty_scope"]
-    assert "crates/gfem-py/src" in scope and "crates/gfem-core/src" in scope
+    assert "crates/facetsetfem-py/src" in scope and "crates/facetsetfem-core/src" in scope
     status = subprocess.run(
         ["git", "status", "--porcelain", "--", *scope],
         cwd=tree["path"],
@@ -280,7 +280,7 @@ def test_iso_surface_outside_the_range_is_empty(solution):
 
 def test_unknown_quantity_lists_the_choices(solution):
     _mesh, result = solution
-    with pytest.raises(gfem.GfemError) as excinfo:
+    with pytest.raises(facetsetfem.FacetSetFemError) as excinfo:
         result.iso_surface("temperature", 1.0)
     assert "j_magnitude" in str(excinfo.value)
 
@@ -332,7 +332,7 @@ def test_seed_outside_the_mesh_is_skipped(solution):
 
 def test_unknown_direction_is_rejected(solution):
     _mesh, result = solution
-    with pytest.raises(gfem.GfemError) as excinfo:
+    with pytest.raises(facetsetfem.FacetSetFemError) as excinfo:
         result.streamlines([[0.03, 0.02, 0.01]], direction="sideways")
     assert "forward / backward" in str(excinfo.value)
 
@@ -364,7 +364,7 @@ output:
         encoding="utf-8",
     )
 
-    study = gfem.Study.load(tmp_path / "case.yaml")
+    study = facetsetfem.Study.load(tmp_path / "case.yaml")
     study.solve()
     for name in ("result.vtu", "stats.csv", "convergence.csv", "summary.json"):
         assert (tmp_path / name).exists(), f"{name} が書き出されていません"

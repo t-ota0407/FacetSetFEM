@@ -6,7 +6,7 @@
 # Python
 .venv/
 __pycache__/
-# *.pyd も含む（maturin develop が python/gfem/ に置くビルド成果物）
+# *.pyd も含む（maturin develop が python/facetsetfem/ に置くビルド成果物）
 *.py[cod]
 *.egg-info/
 .pytest_cache/
@@ -14,7 +14,7 @@ build/
 dist/
 *.whl
 
-# ビルド成果物（maturin develop --release が python/gfem/ に置く）
+# ビルド成果物（maturin develop --release が python/facetsetfem/ に置く）
 *.pdb
 
 # 論文の原稿・実験のスクリプトとデータ（人体モデル・COMSOL の出力を含む。公開しない）

@@ -1,7 +1,7 @@
 """M6: AMG 前処理（SPEC §4.5 / §8 M6）。
 
 数学的な性質（V サイクルの対称正定値性、近零空間の保存、バックエンド間の
-ビット単位一致）は Rust 側の `crates/gfem-core/tests/amg.rs` で固めてある。
+ビット単位一致）は Rust 側の `crates/facetsetfem-core/tests/amg.rs` で固めてある。
 ここで見るのは **Python から使えるか**と**ケースファイルから選べるか**。
 """
 
@@ -12,15 +12,15 @@ import shutil
 
 import pytest
 
-import gfem
-from gfem.study import Study
+import facetsetfem
+from facetsetfem.study import Study
 
 CURRENT = 2.0e-3  # A
 
 
 def build_case(bdf, sigma, preconditioner):
-    mesh = gfem.read_nastran(bdf, length_unit="mm")
-    case = gfem.Case(mesh)
+    mesh = facetsetfem.read_nastran(bdf, length_unit="mm")
+    case = facetsetfem.Case(mesh)
     case.set_conductivity(sigma)
     case.add_electrode("E1", role="anode", current=CURRENT, shell_pids=[101])
     case.add_electrode("E2", role="cathode", current=CURRENT, shell_pids=[201])
@@ -41,8 +41,8 @@ def solved(sample_bdf, slab_sigma):
 
 
 def test_amg_is_a_known_preconditioner():
-    assert "amg" in gfem.preconditioner_choices()
-    assert "jacobi" in gfem.preconditioner_choices()
+    assert "amg" in facetsetfem.preconditioner_choices()
+    assert "jacobi" in facetsetfem.preconditioner_choices()
 
 
 def test_set_solver_accepts_amg(sample_bdf, slab_sigma):
@@ -54,7 +54,7 @@ def test_set_solver_accepts_amg(sample_bdf, slab_sigma):
 
 def test_an_unknown_preconditioner_says_what_is_available(sample_bdf, slab_sigma):
     case = build_case(sample_bdf, slab_sigma, "jacobi")
-    with pytest.raises(gfem.GfemError) as excinfo:
+    with pytest.raises(facetsetfem.FacetSetFemError) as excinfo:
         case.set_solver(preconditioner="ilu")
     message = str(excinfo.value)
     assert "ilu" in message
@@ -147,7 +147,7 @@ def test_an_unknown_preconditioner_is_rejected_when_the_case_is_loaded(case_dir)
     path.write_text(
         text.replace("preconditioner: jacobi", "preconditioner: ilu"), encoding="utf-8"
     )
-    with pytest.raises(gfem.GfemError) as excinfo:
+    with pytest.raises(facetsetfem.FacetSetFemError) as excinfo:
         Study.load(path)
     message = str(excinfo.value)
     assert "ilu" in message

@@ -9,8 +9,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-import gfem
-from gfem.gui.state import Session
+import facetsetfem
+from facetsetfem.gui.state import Session
 
 #: 立方体を 6 個の四面体に分ける Kuhn 分割（局所節点 c = bx + 2 by + 4 bz）
 KUHN = [(0, 1, 3, 7), (0, 1, 7, 5), (0, 5, 7, 4), (0, 3, 2, 7), (0, 6, 4, 7), (0, 2, 6, 7)]
@@ -52,7 +52,7 @@ def session(buried_bdf) -> Session:
 
 
 def test_region_surface_is_the_boundary_of_the_region(buried_bdf):
-    mesh = gfem.read_nastran(buried_bdf, length_unit="mm")
+    mesh = facetsetfem.read_nastran(buried_bdf, length_unit="mm")
     triangles, elements = mesh.region_surface(2)
     assert triangles.shape[1] == 3
     assert len(elements) == len(triangles)

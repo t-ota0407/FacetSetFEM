@@ -14,8 +14,8 @@ import gc
 import numpy as np
 import pytest
 
-import gfem
-from gfem.gui.state import Session
+import facetsetfem
+from facetsetfem.gui.state import Session
 
 SIGMA = {1: 0.10, 2: 0.04, 3: 0.35}
 ARRAYS = [
@@ -31,9 +31,9 @@ ARRAYS = [
 
 
 @pytest.fixture
-def solution(sample_bdf) -> gfem.Solution:
-    mesh = gfem.read_nastran(sample_bdf, length_unit="mm")
-    case = gfem.Case(mesh)
+def solution(sample_bdf) -> facetsetfem.Solution:
+    mesh = facetsetfem.read_nastran(sample_bdf, length_unit="mm")
+    case = facetsetfem.Case(mesh)
     case.set_conductivity(SIGMA)
     case.add_electrode("E1", role="anode", current=2.0e-3, shell_pids=[101])
     case.add_electrode("E2", role="cathode", current=2.0e-3, shell_pids=[201])
@@ -78,7 +78,7 @@ def test_views_are_the_same_values_as_before(solution):
 
 def test_mesh_points_are_an_independent_copy(sample_bdf):
     """座標を書き換えられると以後の解析がすべて狂うので、毎回複製して渡す。"""
-    mesh = gfem.read_nastran(sample_bdf, length_unit="mm")
+    mesh = facetsetfem.read_nastran(sample_bdf, length_unit="mm")
     before = mesh.bounding_box()
     p = mesh.points()
     assert p.flags.writeable

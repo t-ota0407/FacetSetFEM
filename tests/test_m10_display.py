@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from gfem.gui.state import DEFAULT_RESULT_FIELD, SHAPE_FIELD, Session
+from facetsetfem.gui.state import DEFAULT_RESULT_FIELD, SHAPE_FIELD, Session
 
 SIGMA = {1: 0.10, 2: 0.04, 3: 0.35}
 
@@ -159,8 +159,8 @@ def _solve(window, qt_app):
 
 def test_the_same_button_goes_back_to_the_result(window, qt_app, monkeypatch):
     """ボタン 1 つで形状表示と結果の表示を行き来できること。解き直さない。"""
-    from gfem.gui.pages import SHOW_RESULT_LABEL, SHOW_SHAPE_LABEL
-    from gfem.i18n import tr
+    from facetsetfem.gui.pages import SHOW_RESULT_LABEL, SHOW_SHAPE_LABEL
+    from facetsetfem.i18n import tr
 
     page = window.page_result
     _solve(window, qt_app)
@@ -196,8 +196,8 @@ def test_choosing_another_view_by_hand_forgets_the_saved_one(window, qt_app):
     もう別の見方に移っているのに「結果の表示に戻す」が残ると、押したときに
     いま選んだ見方が上書きされてしまう。稜線の切り替えは見方に含めない。
     """
-    from gfem.gui.pages import SHOW_RESULT_LABEL, SHOW_SHAPE_LABEL
-    from gfem.i18n import tr
+    from facetsetfem.gui.pages import SHOW_RESULT_LABEL, SHOW_SHAPE_LABEL
+    from facetsetfem.i18n import tr
 
     page = window.page_result
     _solve(window, qt_app)
@@ -216,8 +216,8 @@ def test_choosing_another_view_by_hand_forgets_the_saved_one(window, qt_app):
 
 def test_a_new_solve_forgets_the_view_of_the_old_result(window, qt_app):
     """形状表示のまま解き直したら、新しい結果の |J| を出し、古い見方は忘れる。"""
-    from gfem.gui.pages import SHOW_SHAPE_LABEL
-    from gfem.i18n import tr
+    from facetsetfem.gui.pages import SHOW_SHAPE_LABEL
+    from facetsetfem.i18n import tr
 
     page = window.page_result
     _solve(window, qt_app)
@@ -241,7 +241,7 @@ def test_the_button_is_disabled_when_there_is_nothing_to_change(window):
 
 def test_edges_are_on_for_small_models_only(window, monkeypatch):
     """細かいメッシュで稜線を全部描くと、潰れて形がかえって見えなくなる。"""
-    from gfem.gui import pages
+    from facetsetfem.gui import pages
 
     assert window.page_result.edges.isChecked(), "小さなモデルでは稜線を出す"
 

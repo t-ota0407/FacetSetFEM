@@ -1,6 +1,6 @@
 """要素種の拡張・座標系・CPU 並列の Python 側からの確認（SPEC §8 M4）。
 
-Rust 側でも同じ性質を検証しているが（`crates/gfem-core/tests/elements.rs`,
+Rust 側でも同じ性質を検証しているが（`crates/facetsetfem-core/tests/elements.rs`,
 `parallel.rs`）、ここでは**研究で実際にやる形**——Nastran ファイルを読んで
 Python API で解く——で M4 の 3 つの成果が使えることを確かめる。
 
@@ -14,7 +14,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-import gfem
+import facetsetfem
 
 #: 電極電流 [A]
 CURRENT = 2.0e-3
@@ -133,14 +133,14 @@ def slab_deck(kind: str, nx: int = 3, ny: int = 2) -> str:
     return "\n".join(lines) + "\n"
 
 
-def write_deck(tmp_path, kind: str, **kwargs) -> "gfem.Mesh":
+def write_deck(tmp_path, kind: str, **kwargs) -> "facetsetfem.Mesh":
     path = tmp_path / f"slab_{kind}.bdf"
     path.write_text(slab_deck(kind, **kwargs), encoding="utf-8")
-    return gfem.read_nastran(path, length_unit="mm")
+    return facetsetfem.read_nastran(path, length_unit="mm")
 
 
-def solved(mesh: "gfem.Mesh", **solver) -> "gfem.Solution":
-    case = gfem.Case(mesh)
+def solved(mesh: "facetsetfem.Mesh", **solver) -> "facetsetfem.Solution":
+    case = facetsetfem.Case(mesh)
     case.set_conductivity(SIGMA)
     case.add_electrode("E1", role="anode", current=CURRENT, shell_pids=[TOP_PID])
     case.add_electrode("E2", role="cathode", current=CURRENT, shell_pids=[BOTTOM_PID])
@@ -211,7 +211,7 @@ def _read_grids(tmp_path, deck: str) -> np.ndarray:
     """
     path = tmp_path / "coord.bdf"
     path.write_text(deck, encoding="utf-8")
-    return gfem.read_nastran(path, length_unit="mm").points()
+    return facetsetfem.read_nastran(path, length_unit="mm").points()
 
 
 #: 直交座標系。CID=10 は 90° 回した系、CID=20 は平行移動しただけの系
@@ -265,8 +265,8 @@ def test_unknown_coordinate_system_is_reported(tmp_path):
     deck = "PSOLID,1,1\nGRID,7,99,1.0,2.0,3.0\n"
     path = tmp_path / "bad_cp.bdf"
     path.write_text(deck, encoding="utf-8")
-    with pytest.raises(gfem.GfemError) as excinfo:
-        gfem.read_nastran(path, length_unit="mm")
+    with pytest.raises(facetsetfem.FacetSetFemError) as excinfo:
+        facetsetfem.read_nastran(path, length_unit="mm")
     message = str(excinfo.value)
     assert "99" in message, message
     assert "7" in message, message
@@ -286,8 +286,8 @@ def test_inverted_hex_is_reported_at_read_time(tmp_path):
     path = tmp_path / "inverted.bdf"
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
-    with pytest.raises(gfem.GfemError) as excinfo:
-        gfem.read_nastran(path, length_unit="mm")
+    with pytest.raises(facetsetfem.FacetSetFemError) as excinfo:
+        facetsetfem.read_nastran(path, length_unit="mm")
     message = str(excinfo.value)
     assert "ヤコビアン" in message, message
     assert "CHEXA" in message, message
@@ -312,7 +312,7 @@ def test_solid_cells_feed_pyvista_directly(tmp_path, kind):
 def test_gui_state_shows_a_hex_mesh(tmp_path):
     """GUI のセッション状態も要素種を選ばない（SPEC §6.3）。"""
     pytest.importorskip("pyvista")
-    from gfem.gui.state import Session
+    from facetsetfem.gui.state import Session
 
     path = tmp_path / "hex.bdf"
     path.write_text(slab_deck("hex"), encoding="utf-8")
@@ -343,7 +343,7 @@ def test_parallel_backend_is_bitwise_identical_to_serial(tmp_path):
 
 def test_case_reports_and_validates_the_backend(tmp_path):
     mesh = write_deck(tmp_path, "tet")
-    case = gfem.Case(mesh)
+    case = facetsetfem.Case(mesh)
     assert case.solver["backend"] == "auto"
 
     case.set_solver(backend="cpu_parallel")
@@ -353,7 +353,7 @@ def test_case_reports_and_validates_the_backend(tmp_path):
     case.set_solver(backend="cuda")
     assert case.solver["backend"] == "cuda"
 
-    with pytest.raises(gfem.GfemError) as excinfo:
+    with pytest.raises(facetsetfem.FacetSetFemError) as excinfo:
         case.set_solver(backend="opencl")
     assert "opencl" in str(excinfo.value)
     # 弾かれた後も設定は元のまま
@@ -362,18 +362,18 @@ def test_case_reports_and_validates_the_backend(tmp_path):
 
 def test_study_accepts_cpu_parallel(tmp_path):
     """ケースファイルからも並列を選べる（SPEC §3.3）。"""
-    spec = gfem.SolverSpec(backend="cpu_parallel")
+    spec = facetsetfem.SolverSpec(backend="cpu_parallel")
     assert spec.to_dict()["backend"] == "cpu_parallel"
 
     path = tmp_path / "slab.bdf"
     path.write_text(slab_deck("tet"), encoding="utf-8")
-    study = gfem.Study(
+    study = facetsetfem.Study(
         mesh_file=path,
         length_unit="mm",
-        materials=[gfem.Material(pid=pid, sigma=s) for pid, s in SIGMA.items()],
+        materials=[facetsetfem.Material(pid=pid, sigma=s) for pid, s in SIGMA.items()],
         electrodes=[
-            gfem.ElectrodeSpec(name="E1", role="anode", current=CURRENT, shell_pids=[TOP_PID]),
-            gfem.ElectrodeSpec(
+            facetsetfem.ElectrodeSpec(name="E1", role="anode", current=CURRENT, shell_pids=[TOP_PID]),
+            facetsetfem.ElectrodeSpec(
                 name="E2", role="cathode", current=CURRENT, shell_pids=[BOTTOM_PID]
             ),
         ],

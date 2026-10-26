@@ -1,7 +1,7 @@
 """表示言語の切り替え（SPEC §6.6）。
 
 既定は英語、日本語にも切り替えられる。Python 側の文言は英語をキーにした辞書
-（`gfem/locale_ja.py`）から訳を引くので、ソースを走査して
+（`facetsetfem/locale_ja.py`）から訳を引くので、ソースを走査して
 
 - `tr("...")` / `N_("...")` に渡した英語の文言すべてに訳があること
 - 使われていない訳が残っていないこと
@@ -20,11 +20,11 @@ from pathlib import Path
 
 import pytest
 
-import gfem
-from gfem.i18n import tr
-from gfem.locale_ja import JA
+import facetsetfem
+from facetsetfem.i18n import tr
+from facetsetfem.locale_ja import JA
 
-PACKAGE = Path(gfem.__file__).resolve().parent
+PACKAGE = Path(facetsetfem.__file__).resolve().parent
 JAPANESE = re.compile(r"[　-〿぀-ヿ一-鿿！-｠]")
 
 #: 訳を通さなくてよい日本語（言語の名前はその言語で書く）。全角の記号・空白も日本語として扱う
@@ -107,40 +107,40 @@ def test_no_japanese_is_hard_coded_outside_the_catalogue():
 
 @pytest.fixture
 def english():
-    before = gfem.i18n.language()
-    gfem.i18n.set_language("en")
+    before = facetsetfem.i18n.language()
+    facetsetfem.i18n.set_language("en")
     yield
-    gfem.i18n.set_language(before)
+    facetsetfem.i18n.set_language(before)
 
 
 def test_english_is_the_default_of_a_fresh_process(tmp_path):
-    """既定は英語（環境変数 GFEM_LANG で上書きしない限り）。"""
+    """既定は英語（環境変数 FACETSETFEM_LANG で上書きしない限り）。"""
     import os
     import subprocess
     import sys
 
-    env = {k: v for k, v in os.environ.items() if k != "GFEM_LANG"}
+    env = {k: v for k, v in os.environ.items() if k != "FACETSETFEM_LANG"}
     out = subprocess.run(
-        [sys.executable, "-c", "import gfem; print(gfem.i18n.language())"],
+        [sys.executable, "-c", "import facetsetfem; print(facetsetfem.i18n.language())"],
         capture_output=True, text=True, env=env, check=True,
     )
     assert out.stdout.strip() == "en"
-    env["GFEM_LANG"] = "ja"
+    env["FACETSETFEM_LANG"] = "ja"
     out = subprocess.run(
-        [sys.executable, "-c", "import gfem; print(gfem.i18n.language())"],
+        [sys.executable, "-c", "import facetsetfem; print(facetsetfem.i18n.language())"],
         capture_output=True, text=True, env=env, check=True,
     )
     assert out.stdout.strip() == "ja"
 
 
 def test_core_errors_follow_the_language(english, sample_bdf):
-    mesh = gfem.read_nastran(sample_bdf, length_unit="mm")
-    case = gfem.Case(mesh)
-    with pytest.raises(gfem.GfemError) as excinfo:
+    mesh = facetsetfem.read_nastran(sample_bdf, length_unit="mm")
+    case = facetsetfem.Case(mesh)
+    with pytest.raises(facetsetfem.FacetSetFemError) as excinfo:
         case.validate()
     assert not JAPANESE.search(str(excinfo.value)), str(excinfo.value)
-    gfem.i18n.set_language("ja")
-    with pytest.raises(gfem.GfemError) as excinfo:
+    facetsetfem.i18n.set_language("ja")
+    with pytest.raises(facetsetfem.FacetSetFemError) as excinfo:
         case.validate()
     assert JAPANESE.search(str(excinfo.value))
 
@@ -149,7 +149,7 @@ def test_tr_fills_placeholders_in_both_languages(english):
     text = "Loaded: {path}"
     if text in JA:
         assert tr(text, path="a.bdf") == "Loaded: a.bdf"
-        gfem.i18n.set_language("ja")
+        facetsetfem.i18n.set_language("ja")
         assert "a.bdf" in tr(text, path="a.bdf")
 
 
@@ -157,7 +157,7 @@ def test_tr_fills_placeholders_in_both_languages(english):
 
 
 def test_session_texts_are_english_by_default(english, sample_bdf):
-    from gfem.gui.state import Session
+    from facetsetfem.gui.state import Session
 
     s = Session()
     s.open_mesh(sample_bdf, "mm")
@@ -175,8 +175,8 @@ def test_session_texts_are_english_by_default(english, sample_bdf):
 
 
 def test_dialogs_are_english_by_default(english, main_window):
-    from gfem.gui.sweep_dialog import SweepDialog
-    from gfem.gui.widgets import UnitSelector
+    from facetsetfem.gui.sweep_dialog import SweepDialog
+    from facetsetfem.gui.widgets import UnitSelector
 
     dialog = UnitSelector((0.06, 0.04, 0.02))
     assert dialog.windowTitle() == "Choose the length unit"
@@ -191,15 +191,15 @@ def test_dialogs_are_english_by_default(english, main_window):
 def test_the_startup_language_follows_cli_then_env_then_settings(monkeypatch, tmp_path):
     from PySide6.QtCore import QSettings
 
-    from gfem.gui import language as lang
+    from facetsetfem.gui import language as lang
 
     store = QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
     monkeypatch.setattr(lang, "_settings", lambda: store)
-    monkeypatch.delenv("GFEM_LANG", raising=False)
+    monkeypatch.delenv("FACETSETFEM_LANG", raising=False)
     assert lang.startup_language() == "en", "何も指定しなければ英語"
     lang.save_language("ja")
     assert lang.startup_language() == "ja", "メニューで選んだ言語"
-    monkeypatch.setenv("GFEM_LANG", "en")
+    monkeypatch.setenv("FACETSETFEM_LANG", "en")
     assert lang.startup_language() == "en", "環境変数は設定より強い"
     assert lang.startup_language("ja") == "ja", "--lang がいちばん強い"
 
@@ -208,17 +208,17 @@ def test_choosing_a_language_in_the_menu_saves_it(main_window, monkeypatch, tmp_
     from PySide6.QtCore import QSettings
     from PySide6.QtWidgets import QMessageBox
 
-    from gfem.gui import language as lang
+    from facetsetfem.gui import language as lang
 
     store = QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
     monkeypatch.setattr(lang, "_settings", lambda: store)
     shown = []
     monkeypatch.setattr(QMessageBox, "information", lambda _p, title, text: shown.append(text))
-    before = gfem.i18n.language()
+    before = facetsetfem.i18n.language()
     main_window.choose_language("en")
     assert lang.saved_language() == "en"
-    assert gfem.i18n.language() == before, "開いているウィンドウの言語はその場では変えない"
-    assert shown == ["The display language will change the next time you start GenericFEM."]
+    assert facetsetfem.i18n.language() == before, "開いているウィンドウの言語はその場では変えない"
+    assert shown == ["The display language will change the next time you start FacetSetFEM."]
     assert main_window.language_actions["en"].isChecked()
     assert not main_window.language_actions["ja"].isChecked()
     main_window.choose_language(before)

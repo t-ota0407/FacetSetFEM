@@ -14,15 +14,15 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # テストは日本語の表示で回す（SPEC §6.6）。表示言語の既定は英語だが、既存のテストの
 # 多くは日本語の文言を確かめている。英語の文言は tests/test_i18n.py などで言語を
 # 切り替えて確かめる（Rust のテストは .cargo/config.toml で同じようにしている）
-import gfem.i18n  # noqa: E402
+import facetsetfem.i18n  # noqa: E402
 
-gfem.i18n.set_language("ja")
+facetsetfem.i18n.set_language("ja")
 
 
 def _load_script(name: str) -> ModuleType:
     """`scripts/` 以下のスクリプトをモジュールとして読み込む。"""
     path = REPO_ROOT / "scripts" / f"{name}.py"
-    spec = importlib.util.spec_from_file_location(f"gfem_scripts.{name}", path)
+    spec = importlib.util.spec_from_file_location(f"facetsetfem_scripts.{name}", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
@@ -92,7 +92,7 @@ def main_window(qt_app):
     テストごとに作らず、開き直して状態だけ初期化する。
     """
     pytest.importorskip("pyvistaqt")
-    from gfem.gui.main_window import MainWindow
+    from facetsetfem.gui.main_window import MainWindow
 
     try:
         w = MainWindow()

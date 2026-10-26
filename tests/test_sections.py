@@ -15,8 +15,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-import gfem
-from gfem.gui.state import Session
+import facetsetfem
+from facetsetfem.gui.state import Session
 from test_m4_elements_and_backends import write_deck
 
 SIGMA = {1: 0.10, 2: 0.04, 3: 0.35}
@@ -41,11 +41,11 @@ def session(sample_bdf) -> Session:
     return s
 
 
-# --- Python API（gfem.Mesh） -------------------------------------------------
+# --- Python API（facetsetfem.Mesh） -------------------------------------------------
 
 
 def test_a_slice_is_the_cross_section_of_the_model(sample_bdf):
-    mesh = gfem.read_nastran(sample_bdf, length_unit="mm")
+    mesh = facetsetfem.read_nastran(sample_bdf, length_unit="mm")
     data = mesh.slice([0.0, 0.0, 0.0073], [0.0, 0.0, 1.0])
     n, m = len(data["points"]), len(data["triangles"])
     assert m > 0
@@ -61,7 +61,7 @@ def test_a_slice_is_the_cross_section_of_the_model(sample_bdf):
 
 def test_a_clip_shows_the_kept_half_with_its_cut_face(sample_bdf):
     # x > 30 mm を切り落とすと 30 × 40 × 20 mm の箱が残る。見える面は箱の表面全部
-    mesh = gfem.read_nastran(sample_bdf, length_unit="mm")
+    mesh = facetsetfem.read_nastran(sample_bdf, length_unit="mm")
     data = mesh.clip([0.030, 0.0, 0.0], [1.0, 0.0, 0.0])
     half = LX / 2
     expected = 2 * (half * LY + half * LZ + LY * LZ)
@@ -84,10 +84,10 @@ def test_sections_work_for_every_element_type(tmp_path, kind):
 
 
 def test_a_bad_plane_is_rejected_with_a_reason(sample_bdf):
-    mesh = gfem.read_nastran(sample_bdf, length_unit="mm")
-    with pytest.raises(gfem.GfemError, match="法線"):
+    mesh = facetsetfem.read_nastran(sample_bdf, length_unit="mm")
+    with pytest.raises(facetsetfem.FacetSetFemError, match="法線"):
         mesh.slice([0.0, 0.0, 0.0], [0.0, 0.0, 0.0])
-    with pytest.raises(gfem.GfemError, match="位置"):
+    with pytest.raises(facetsetfem.FacetSetFemError, match="位置"):
         mesh.clip([float("nan"), 0.0, 0.0], [0.0, 0.0, 1.0])
 
 

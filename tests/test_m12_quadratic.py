@@ -1,6 +1,6 @@
 """2 次四面体（SPEC §2.3 / §8 M12）の Python API・ケースファイル・GUI。
 
-物理の検証（厳密解・保存則・再現性・AMG・GPU）は Rust の `crates/gfem-core/tests/quadratic.rs`
+物理の検証（厳密解・保存則・再現性・AMG・GPU）は Rust の `crates/facetsetfem-core/tests/quadratic.rs`
 にある。ここは Python から使う経路を見る。
 """
 
@@ -11,28 +11,28 @@ import shutil
 import numpy as np
 import pytest
 
-import gfem
-from gfem.gui.state import Session
+import facetsetfem
+from facetsetfem.gui.state import Session
 
 SIGMA = {1: 0.10, 2: 0.04, 3: 0.35}
 CURRENT = 2.0e-3
 
 
 @pytest.fixture(scope="module")
-def linear(sample_bdf) -> gfem.Mesh:
-    return gfem.read_nastran(sample_bdf, length_unit="mm")
+def linear(sample_bdf) -> facetsetfem.Mesh:
+    return facetsetfem.read_nastran(sample_bdf, length_unit="mm")
 
 
 @pytest.fixture(scope="module")
-def quadratic(linear) -> gfem.Mesh:
+def quadratic(linear) -> facetsetfem.Mesh:
     return linear.elevate()
 
 
 @pytest.fixture
-def slab_study(tmp_path, sample_bdf, repo_root) -> gfem.Study:
+def slab_study(tmp_path, sample_bdf, repo_root) -> facetsetfem.Study:
     shutil.copy(sample_bdf, tmp_path / "slab_3layer.bdf")
     shutil.copy(repo_root / "tests" / "models" / "slab_3layer.yaml", tmp_path / "case.yaml")
-    return gfem.Study.load(tmp_path / "case.yaml")
+    return facetsetfem.Study.load(tmp_path / "case.yaml")
 
 
 # --- メッシュ ----------------------------------------------------------------
@@ -56,7 +56,7 @@ def test_a_mesh_can_be_raised_to_second_order(linear, quadratic):
 
 
 def test_a_second_order_mesh_cannot_be_raised_again(quadratic):
-    with pytest.raises(gfem.GfemError, match="すでに"):
+    with pytest.raises(facetsetfem.FacetSetFemError, match="すでに"):
         quadratic.elevate()
 
 
@@ -78,7 +78,7 @@ def test_the_element_order_round_trips_through_the_case_file(slab_study, tmp_pat
     slab_study.element_order = 2
     assert slab_study.to_dict()["mesh"]["element_order"] == 2
     slab_study.save(tmp_path / "quadratic.yaml")
-    again = gfem.Study.load(tmp_path / "quadratic.yaml")
+    again = facetsetfem.Study.load(tmp_path / "quadratic.yaml")
     assert again.element_order == 2
     assert again.read_mesh().element_order == 2
 
@@ -87,8 +87,8 @@ def test_the_element_order_round_trips_through_the_case_file(slab_study, tmp_pat
 def test_an_unknown_element_order_is_a_helpful_error(slab_study, value):
     data = slab_study.to_dict()
     data["mesh"]["element_order"] = value
-    with pytest.raises(gfem.GfemError) as info:
-        gfem.Study.from_dict(data)
+    with pytest.raises(facetsetfem.FacetSetFemError) as info:
+        facetsetfem.Study.from_dict(data)
     text = str(info.value)
     assert "要素の次数" in text and "element_order" in text
 

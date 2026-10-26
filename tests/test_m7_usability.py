@@ -12,8 +12,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-import gfem
-from gfem.gui.state import Session
+import facetsetfem
+from facetsetfem.gui.state import Session
 from test_m4_elements_and_backends import slab_deck, write_deck
 
 CURRENT = 2.0e-3
@@ -21,7 +21,7 @@ SLAB_SIGMA = {1: 0.10, 2: 0.04, 3: 0.35}
 
 
 def _solved(mesh):
-    case = gfem.Case(mesh)
+    case = facetsetfem.Case(mesh)
     case.set_conductivity(SLAB_SIGMA)
     case.add_electrode("E1", role="anode", current=CURRENT, shell_pids=[101])
     case.add_electrode("E2", role="cathode", current=CURRENT, shell_pids=[201])
@@ -211,11 +211,11 @@ def slab_study(tmp_path, sample_bdf, repo_root):
 
     shutil.copy(sample_bdf, tmp_path / "slab_3layer.bdf")
     shutil.copy(repo_root / "tests" / "models" / "slab_3layer.yaml", tmp_path / "case.yaml")
-    return gfem.Study.load(tmp_path / "case.yaml")
+    return facetsetfem.Study.load(tmp_path / "case.yaml")
 
 
 def test_a_sweep_covers_the_cartesian_product(slab_study):
-    table = gfem.sweep(
+    table = facetsetfem.sweep(
         slab_study, {"sigma.2": [0.02, 0.04], "current": [1.0e-3, 2.0e-3]}
     )
     assert len(table) == 4
@@ -237,12 +237,12 @@ def test_a_sweep_covers_the_cartesian_product(slab_study):
 
 def test_a_sweep_does_not_touch_the_original_study(slab_study):
     before = [m.sigma for m in slab_study.materials]
-    gfem.sweep(slab_study, {"sigma.2": [0.01, 0.02]})
+    facetsetfem.sweep(slab_study, {"sigma.2": [0.01, 0.02]})
     assert [m.sigma for m in slab_study.materials] == before
 
 
 def test_pairwise_sweeps_line_the_values_up(slab_study):
-    table = gfem.sweep(
+    table = facetsetfem.sweep(
         slab_study,
         {"sigma.1": [0.08, 0.12], "sigma.3": [0.30, 0.40]},
         product=False,
@@ -252,14 +252,14 @@ def test_pairwise_sweeps_line_the_values_up(slab_study):
 
 
 def test_pairwise_sweeps_need_matching_lengths(slab_study):
-    with pytest.raises(gfem.GfemError) as excinfo:
-        gfem.sweep(slab_study, {"sigma.1": [0.1], "sigma.3": [0.3, 0.4]}, product=False)
+    with pytest.raises(facetsetfem.FacetSetFemError) as excinfo:
+        facetsetfem.sweep(slab_study, {"sigma.1": [0.1], "sigma.3": [0.3, 0.4]}, product=False)
     assert "個数" in str(excinfo.value)
 
 
 def test_an_unknown_parameter_says_what_is_available(slab_study):
-    with pytest.raises(gfem.GfemError) as excinfo:
-        gfem.sweep(slab_study, {"sigma.99": [0.1]})
+    with pytest.raises(facetsetfem.FacetSetFemError) as excinfo:
+        facetsetfem.sweep(slab_study, {"sigma.99": [0.1]})
     message = str(excinfo.value)
     assert "99" in message
     assert "1" in message and "2" in message and "3" in message
@@ -267,7 +267,7 @@ def test_an_unknown_parameter_says_what_is_available(slab_study):
 
 def test_sweeps_can_keep_going_past_a_broken_case(slab_study):
     # 片方の電極だけ電流を変えると Σ I = 0 が崩れる（SPEC §2.2）
-    table = gfem.sweep(
+    table = facetsetfem.sweep(
         slab_study,
         {"electrode.E1.current": [2.0e-3, 3.0e-3]},
         keep_going=True,
@@ -278,7 +278,7 @@ def test_sweeps_can_keep_going_past_a_broken_case(slab_study):
 
 
 def test_a_sweep_writes_a_csv(slab_study, tmp_path):
-    table = gfem.sweep(slab_study, {"current": [1.0e-3, 2.0e-3]})
+    table = facetsetfem.sweep(slab_study, {"current": [1.0e-3, 2.0e-3]})
     path = tmp_path / "sweep.csv"
     table.write_csv(path)
     lines = path.read_text(encoding="utf-8").splitlines()
@@ -292,7 +292,7 @@ def test_a_sweep_writes_a_csv(slab_study, tmp_path):
 
 def test_a_sweep_reports_progress(slab_study):
     seen = []
-    gfem.sweep(
+    facetsetfem.sweep(
         slab_study,
         {"current": [1.0e-3, 2.0e-3, 3.0e-3]},
         progress=lambda i, n, values: seen.append((i, n)),
@@ -304,11 +304,11 @@ def test_a_sweep_reports_progress(slab_study):
 
 
 def test_the_presets_cover_the_usual_tissues():
-    names = gfem.tissue_names()
+    names = facetsetfem.tissue_names()
     for expected in ("skin", "fat", "muscle", "bone_cortical", "blood"):
         assert expected in names
     for name in names:
-        t = gfem.tissue(name)
+        t = facetsetfem.tissue(name)
         assert t.sigma > 0.0
         # 「どこから来た値か」が必ず添えてある（SPEC §11.2）
         assert t.source
@@ -317,24 +317,24 @@ def test_the_presets_cover_the_usual_tissues():
 
 def test_the_preset_ordering_matches_physical_intuition():
     # 骨は脂肪より通しにくく、脳脊髄液は最も通しやすい
-    assert gfem.tissue("bone_cortical").sigma < gfem.tissue("fat").sigma
-    assert gfem.tissue("fat").sigma < gfem.tissue("muscle").sigma
-    assert gfem.tissue("muscle").sigma < gfem.tissue("blood").sigma
-    assert gfem.tissue("blood").sigma < gfem.tissue("csf").sigma
+    assert facetsetfem.tissue("bone_cortical").sigma < facetsetfem.tissue("fat").sigma
+    assert facetsetfem.tissue("fat").sigma < facetsetfem.tissue("muscle").sigma
+    assert facetsetfem.tissue("muscle").sigma < facetsetfem.tissue("blood").sigma
+    assert facetsetfem.tissue("blood").sigma < facetsetfem.tissue("csf").sigma
 
 
 def test_an_unknown_tissue_suggests_candidates():
-    with pytest.raises(gfem.GfemError) as excinfo:
-        gfem.tissue("muscel")
+    with pytest.raises(facetsetfem.FacetSetFemError) as excinfo:
+        facetsetfem.tissue("muscel")
     message = str(excinfo.value)
     assert "muscel" in message
     assert "muscle" in message
 
 
 def test_tissue_names_are_normalised():
-    assert gfem.tissue("MUSCLE").name == "muscle"
-    assert gfem.tissue(" Grey Matter ").name == "grey_matter"
-    assert gfem.tissue("grey-matter").name == "grey_matter"
+    assert facetsetfem.tissue("MUSCLE").name == "muscle"
+    assert facetsetfem.tissue(" Grey Matter ").name == "grey_matter"
+    assert facetsetfem.tissue("grey-matter").name == "grey_matter"
 
 
 def test_a_custom_library_can_replace_the_presets(tmp_path):
@@ -347,20 +347,20 @@ def test_a_custom_library_can_replace_the_presets(tmp_path):
         "gel: 0.5\n",
         encoding="utf-8",
     )
-    library = gfem.load_library(path)
+    library = facetsetfem.load_library(path)
     assert set(library) == {"bone", "gel"}
     assert library["bone"].sigma == 0.0123
     assert library["bone"].source == "社内測定 2026-05"
     assert library["gel"].sigma == 0.5
     # 同梱プリセットは書き換わらない
-    assert "gel" not in gfem.TISSUES
+    assert "gel" not in facetsetfem.TISSUES
 
 
 def test_a_broken_library_says_where_the_problem_is(tmp_path):
     path = tmp_path / "tissues.yaml"
     path.write_text("bone:\n  note: 値を書き忘れた\n", encoding="utf-8")
-    with pytest.raises(gfem.GfemError) as excinfo:
-        gfem.load_library(path)
+    with pytest.raises(facetsetfem.FacetSetFemError) as excinfo:
+        facetsetfem.load_library(path)
     message = str(excinfo.value)
     assert "sigma" in message
     assert "bone" in message
@@ -369,23 +369,23 @@ def test_a_broken_library_says_where_the_problem_is(tmp_path):
 def test_a_non_positive_conductivity_is_rejected(tmp_path):
     path = tmp_path / "tissues.yaml"
     path.write_text("bone:\n  sigma: 0.0\n", encoding="utf-8")
-    with pytest.raises(gfem.GfemError) as excinfo:
-        gfem.load_library(path)
+    with pytest.raises(facetsetfem.FacetSetFemError) as excinfo:
+        facetsetfem.load_library(path)
     assert "正では" in str(excinfo.value)
 
 
 def test_the_gui_hints_come_from_the_presets():
-    from gfem.gui.state import TISSUE_HINTS
+    from facetsetfem.gui.state import TISSUE_HINTS
 
-    assert TISSUE_HINTS["muscle"] == gfem.tissue("muscle").sigma
-    assert set(TISSUE_HINTS) == set(gfem.tissue_names())
+    assert TISSUE_HINTS["muscle"] == facetsetfem.tissue("muscle").sigma
+    assert set(TISSUE_HINTS) == set(facetsetfem.tissue_names())
 
 
 # --- パラメータスタディの GUI -----------------------------------------------
 
 
 def test_the_sweep_dialog_offers_the_parameters_of_the_case(slab_study):
-    from gfem.gui.sweep_dialog import parameter_choices
+    from facetsetfem.gui.sweep_dialog import parameter_choices
 
     keys = [key for _label, key in parameter_choices(slab_study)]
     assert "current" in keys
@@ -404,7 +404,7 @@ def test_the_sweep_dialog_offers_the_parameters_of_the_case(slab_study):
     ],
 )
 def test_the_dialog_reads_values_in_the_usual_notations(text, expected):
-    from gfem.gui.sweep_dialog import parse_values
+    from facetsetfem.gui.sweep_dialog import parse_values
 
     got = parse_values(text)
     assert len(got) == len(expected)
@@ -413,14 +413,14 @@ def test_the_dialog_reads_values_in_the_usual_notations(text, expected):
 
 @pytest.mark.parametrize("text", ["", "0.02:0.06", "0.02:0.06:0", "あ"])
 def test_the_dialog_rejects_values_it_cannot_read(text):
-    from gfem.gui.sweep_dialog import parse_values
+    from facetsetfem.gui.sweep_dialog import parse_values
 
     with pytest.raises(ValueError):
         parse_values(text)
 
 
 def test_the_sweep_dialog_runs_and_fills_the_table(main_window, sample_bdf, tmp_path):
-    from gfem.gui.sweep_dialog import SweepDialog
+    from facetsetfem.gui.sweep_dialog import SweepDialog
 
     window = main_window
     window.open_mesh(sample_bdf, "mm")
@@ -479,12 +479,12 @@ _DISTRIBUTION_OF = {
 
 
 def _third_party_imports() -> set[str]:
-    """gfem パッケージが import しているサードパーティのモジュール（トップレベル名）。"""
+    """facetsetfem パッケージが import しているサードパーティのモジュール（トップレベル名）。"""
     import ast
     import sys
     from pathlib import Path
 
-    package = Path(gfem.__file__).parent
+    package = Path(facetsetfem.__file__).parent
     found: set[str] = set()
     for source in package.rglob("*.py"):
         tree = ast.parse(source.read_text(encoding="utf-8"))
@@ -497,7 +497,7 @@ def _third_party_imports() -> set[str]:
                 continue
             for name in names:
                 top = name.split(".")[0]
-                if top not in sys.stdlib_module_names and top not in {"gfem", "__future__"}:
+                if top not in sys.stdlib_module_names and top not in {"facetsetfem", "__future__"}:
                     found.add(top)
     return found
 
@@ -506,7 +506,7 @@ def test_the_wheel_declares_everything_the_package_imports(repo_root):
     """`pip install` した人が GUI まで動かせること。
 
     以前は GUI が使う pyvistaqt が依存に無く、wheel を入れただけでは
-    `python -m gfem.gui` が import で落ちた。逆に使っていない pandas が入っていた。
+    `python -m facetsetfem.gui` が import で落ちた。逆に使っていない pandas が入っていた。
     """
     import tomllib
 

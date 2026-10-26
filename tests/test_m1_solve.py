@@ -15,15 +15,15 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-import gfem
+import facetsetfem
 from conftest import SLAB_AREA, SLAB_LAYERS
 
 CURRENT = 2.0e-3  # A
 
 
 def build_case(bdf, sigma, current=CURRENT, tolerance=1.0e-12):
-    mesh = gfem.read_nastran(bdf, length_unit="mm")
-    case = gfem.Case(mesh)
+    mesh = facetsetfem.read_nastran(bdf, length_unit="mm")
+    case = facetsetfem.Case(mesh)
     case.set_conductivity(sigma)
     case.add_electrode("E1", role="anode", current=current, shell_pids=[101])
     case.add_electrode("E2", role="cathode", current=current, shell_pids=[201])
@@ -96,12 +96,12 @@ def test_electrode_load_is_area_weighted(sample_bdf, slab_sigma):
 
 
 def test_missing_conductivity_is_reported(sample_bdf):
-    mesh = gfem.read_nastran(sample_bdf, length_unit="mm")
-    case = gfem.Case(mesh)
+    mesh = facetsetfem.read_nastran(sample_bdf, length_unit="mm")
+    case = facetsetfem.Case(mesh)
     case.set_conductivity({1: 0.1})  # PID 2, 3 が未設定
     case.add_electrode("E1", role="anode", current=CURRENT, shell_pids=[101])
     case.add_electrode("E2", role="cathode", current=CURRENT, shell_pids=[201])
-    with pytest.raises(gfem.GfemError) as excinfo:
+    with pytest.raises(facetsetfem.FacetSetFemError) as excinfo:
         case.validate()
     message = str(excinfo.value)
     assert "導電率が未設定" in message
@@ -111,45 +111,45 @@ def test_missing_conductivity_is_reported(sample_bdf):
 
 def test_unbalanced_current_is_rejected(sample_bdf, slab_sigma):
     """全 Neumann 境界なので Σ I_k = 0 でないと解が存在しない（SPEC §2.2）。"""
-    mesh = gfem.read_nastran(sample_bdf, length_unit="mm")
-    case = gfem.Case(mesh)
+    mesh = facetsetfem.read_nastran(sample_bdf, length_unit="mm")
+    case = facetsetfem.Case(mesh)
     case.set_conductivity(slab_sigma)
     case.add_electrode("E1", role="anode", current=2e-3, shell_pids=[101])
     case.add_electrode("E2", role="cathode", current=1e-3, shell_pids=[201])
-    with pytest.raises(gfem.GfemError) as excinfo:
+    with pytest.raises(facetsetfem.FacetSetFemError) as excinfo:
         case.solve()
     assert "一致しません" in str(excinfo.value)
 
 
 def test_missing_electrode_role_is_rejected(sample_bdf, slab_sigma):
-    mesh = gfem.read_nastran(sample_bdf, length_unit="mm")
-    case = gfem.Case(mesh)
+    mesh = facetsetfem.read_nastran(sample_bdf, length_unit="mm")
+    case = facetsetfem.Case(mesh)
     case.set_conductivity(slab_sigma)
     case.add_electrode("E1", role="anode", current=CURRENT, shell_pids=[101])
-    with pytest.raises(gfem.GfemError) as excinfo:
+    with pytest.raises(facetsetfem.FacetSetFemError) as excinfo:
         case.validate()
     assert "cathode" in str(excinfo.value)
 
 
 def test_unknown_shell_pid_is_reported(sample_bdf, slab_sigma):
-    mesh = gfem.read_nastran(sample_bdf, length_unit="mm")
-    case = gfem.Case(mesh)
+    mesh = facetsetfem.read_nastran(sample_bdf, length_unit="mm")
+    case = facetsetfem.Case(mesh)
     case.set_conductivity(slab_sigma)
     case.add_electrode("E1", role="anode", current=CURRENT, shell_pids=[999])
     case.add_electrode("E2", role="cathode", current=CURRENT, shell_pids=[201])
-    with pytest.raises(gfem.GfemError) as excinfo:
+    with pytest.raises(facetsetfem.FacetSetFemError) as excinfo:
         case.validate()
     assert "PID=999" in str(excinfo.value)
 
 
 def test_the_documented_example_gives_the_documented_numbers(sample_bdf, repo_root):
-    """README と `gfem` の docstring に載せている例の出力が、実際の値と一致すること。
+    """README と `facetsetfem` の docstring に載せている例の出力が、実際の値と一致すること。
 
     以前は docstring の等価抵抗が 83.0 Ω のまま古くなっていた（実際は 206.4 Ω）。
     結果はビット単位で再現する（CLAUDE.md 設計原則 1）ので、表示の文字列ごと比べられる。
     """
-    mesh = gfem.read_nastran(sample_bdf, length_unit="mm")
-    case = gfem.Case(mesh)
+    mesh = facetsetfem.read_nastran(sample_bdf, length_unit="mm")
+    case = facetsetfem.Case(mesh)
     case.set_conductivity({1: 0.10, 2: 0.04, 3: 0.35})
     case.add_electrode("E1", role="anode", current=2e-3, shell_pids=[101])
     case.add_electrode("E2", role="cathode", current=2e-3, shell_pids=[201])
@@ -158,7 +158,7 @@ def test_the_documented_example_gives_the_documented_numbers(sample_bdf, repo_ro
     for name in ("README.md", "README.ja.md"):  # 英語版と日本語版
         readme = (repo_root / name).read_text(encoding="utf-8")
         assert repr(result) in readme, f"{name} の例を {repr(result)} に直してください"
-    assert f">>> round(result.impedance, 1)\n    {round(result.impedance, 1)}" in gfem.__doc__
+    assert f">>> round(result.impedance, 1)\n    {round(result.impedance, 1)}" in facetsetfem.__doc__
 
 
 def test_duplicate_electrode_names_are_rejected(sample_bdf, slab_sigma):
@@ -167,20 +167,20 @@ def test_duplicate_electrode_names_are_rejected(sample_bdf, slab_sigma):
     荷重が打ち消し合って 0 反復で「収束」し、R = 0 Ω・|J| = 0 の結果が
     警告なしで返っていた。電極名の重複そのものを止める。
     """
-    mesh = gfem.read_nastran(sample_bdf, length_unit="mm")
-    case = gfem.Case(mesh)
+    mesh = facetsetfem.read_nastran(sample_bdf, length_unit="mm")
+    case = facetsetfem.Case(mesh)
     case.set_conductivity(slab_sigma)
     case.add_electrode("E", role="anode", current=CURRENT, shell_pids=[101])
     case.add_electrode("E", role="cathode", current=CURRENT, shell_pids=[101])
-    with pytest.raises(gfem.GfemError) as excinfo:
+    with pytest.raises(facetsetfem.FacetSetFemError) as excinfo:
         case.solve()
     assert "同じ名前の電極" in str(excinfo.value)
 
 
 def test_bad_role_name_lists_the_choices(sample_bdf):
-    mesh = gfem.read_nastran(sample_bdf, length_unit="mm")
-    case = gfem.Case(mesh)
-    with pytest.raises(gfem.GfemError) as excinfo:
+    mesh = facetsetfem.read_nastran(sample_bdf, length_unit="mm")
+    case = facetsetfem.Case(mesh)
+    with pytest.raises(facetsetfem.FacetSetFemError) as excinfo:
         case.add_electrode("E1", role="positive", current=CURRENT, shell_pids=[101])
     assert "anode / cathode" in str(excinfo.value)
 
@@ -205,7 +205,7 @@ def test_progress_callback_receives_the_convergence_history(sample_bdf, slab_sig
 
 def test_progress_callback_can_cancel(sample_bdf, slab_sigma):
     case = build_case(sample_bdf, slab_sigma)
-    with pytest.raises(gfem.SolverCancelled):
+    with pytest.raises(facetsetfem.SolverCancelled):
         case.solve(progress=lambda it, res: it < 3)
 
 
@@ -295,7 +295,7 @@ def test_result_vtu_is_readable_by_vtk(sample_bdf, slab_sigma, tmp_path):
 
 def test_surface_extraction_for_display(sample_bdf):
     """GUI には四面体そのものではなく外表面の三角形だけを渡す（SPEC §6.3）。"""
-    mesh = gfem.read_nastran(sample_bdf, length_unit="mm")
+    mesh = facetsetfem.read_nastran(sample_bdf, length_unit="mm")
     tris = mesh.surface_triangles()
     owners = mesh.surface_triangle_elements()
     assert tris.ndim == 2 and tris.shape[1] == 3

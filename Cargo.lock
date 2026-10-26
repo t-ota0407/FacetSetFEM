@@ -114,17 +114,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "252afb9ae5eaa683babdc6a068b3f5726eb19e05070c731f9b2a23a7c3e8ed34"
 
 [[package]]
-name = "flate2"
-version = "1.1.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "843fba2746e448b37e26a819579957415c8cef339bf08564fe8b7ddbd959573c"
-dependencies = [
- "crc32fast",
- "miniz_oxide",
-]
-
-[[package]]
-name = "gfem-core"
+name = "facetsetfem-core"
 version = "0.1.0"
 dependencies = [
  "flate2",
@@ -133,21 +123,31 @@ dependencies = [
 ]
 
 [[package]]
-name = "gfem-cuda"
+name = "facetsetfem-cuda"
 version = "0.1.0"
 dependencies = [
  "cudarc",
- "gfem-core",
+ "facetsetfem-core",
 ]
 
 [[package]]
-name = "gfem-py"
+name = "facetsetfem-py"
 version = "0.1.0"
 dependencies = [
- "gfem-core",
- "gfem-cuda",
+ "facetsetfem-core",
+ "facetsetfem-cuda",
  "numpy",
  "pyo3",
+]
+
+[[package]]
+name = "flate2"
+version = "1.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "843fba2746e448b37e26a819579957415c8cef339bf08564fe8b7ddbd959573c"
+dependencies = [
+ "crc32fast",
+ "miniz_oxide",
 ]
 
 [[package]]

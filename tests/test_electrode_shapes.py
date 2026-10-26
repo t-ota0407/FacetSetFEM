@@ -4,7 +4,7 @@
 形も面積も合わせられないので、形・寸法・角の半径・向きを選べるようにした。
 
 面の選び方そのもの（面積・向き・角丸・回り込まないこと）は Rust 側の
-`crates/gfem-core/tests/electrode_shape.rs` で確かめている。ここでは Python と GUI から
+`crates/facetsetfem-core/tests/electrode_shape.rs` で確かめている。ここでは Python と GUI から
 使ったときに一貫しているか（ケースファイルに残るか、画面に対してまっすぐ置けるか、
 指定面積とのずれを見せるか）を見る。
 """
@@ -14,9 +14,9 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-import gfem
-from gfem.gui.pages import describe_selection
-from gfem.gui.state import Session
+import facetsetfem
+from facetsetfem.gui.pages import describe_selection
+from facetsetfem.gui.state import Session
 
 SIGMA = {1: 0.10, 2: 0.04, 3: 0.35}
 CURRENT = 2.0e-3
@@ -150,8 +150,8 @@ def test_a_bad_patch_in_a_case_file_says_where_and_how(tmp_path, sample_bdf, pat
     形の解釈は Rust 側だけにあり、Python は場所を添えるだけ。
     """
     path = _write_case(tmp_path, sample_bdf, patch)
-    with pytest.raises(gfem.GfemError) as info:
-        gfem.Study.load(path)
+    with pytest.raises(facetsetfem.FacetSetFemError) as info:
+        facetsetfem.Study.load(path)
     message = str(info.value)
     assert "場所:" in message
     for needle in needles:
@@ -160,7 +160,7 @@ def test_a_bad_patch_in_a_case_file_says_where_and_how(tmp_path, sample_bdf, pat
 
 def test_a_mistyped_key_is_refused(session):
     """キーの打ち間違い（widht）を黙って無視しないこと。黙ると既定の円になる。"""
-    with pytest.raises(gfem.GfemError, match="使えないキー"):
+    with pytest.raises(facetsetfem.FacetSetFemError, match="使えないキー"):
         session.pick_patch(TOP, shape="rect", widht=0.02, height=0.02, axis=[1, 0, 0])
 
 

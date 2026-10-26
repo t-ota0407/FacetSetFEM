@@ -1,4 +1,4 @@
-# GenericFEM — 経皮電気刺激シミュレーション 仕様書
+# FacetSetFEM — 経皮電気刺激シミュレーション 仕様書
 
 版: 1.1／最終更新: 2026-09-26
 
@@ -292,7 +292,7 @@ AMG の粗い格子で密な行が広がるため。代わりに、**問題が�
 
 ゲルの種類・皮膚の湿り具合・貼ってからの時間で何倍も変わるので、**文献値を 1 つ選んで結論を出さない**。
 
-- **実測の電極間抵抗に合わせる**: `gfem.fit_contact_impedance(study, measured_ohm)` が、R(z) が実測値に
+- **実測の電極間抵抗に合わせる**: `facetsetfem.fit_contact_impedance(study, measured_ohm)` が、R(z) が実測値に
   一致する z を割線法で探す（全 CEM 電極に同じ z を入れる）。R(z) は z について単調増加で、
   z が大きいと `R ≈ R_体 + z (1/A_a + 1/A_c)` とほぼ直線になるので、数回で収まる
 - **何通りかの値で解いて比べる**: パラメータスタディで `contact_impedance`（全電極）/
@@ -395,9 +395,9 @@ AMG の粗い格子で密な行が広がるため。代わりに、**問題が�
 
 Nastran ファイルは形状と領域分けのみを担い、解析条件はケースファイルに保存する。Nastran ファイルは書き換えない。
 
-**YAML の読み書きは Python 側（PyYAML）が担当する**（M1 で確定）。`gfem-core` は YAML を知らず、プログラム的に組み立てられた `Case` 構造体だけを受け取る。理由:
+**YAML の読み書きは Python 側（PyYAML）が担当する**（M1 で確定）。`facetsetfem-core` は YAML を知らず、プログラム的に組み立てられた `Case` 構造体だけを受け取る。理由:
 
-- `gfem-core` の依存を増やさない（設計原則 5）
+- `facetsetfem-core` の依存を増やさない（設計原則 5）
 - 場所つきの親切なエラー（設計原則 6）を Rust と Python の二重に実装せずに済む。場所はファイル名と項目の位置（`case.yaml の electrodes[1]` など）で示す。行番号まで出せるのは YAML の構文エラー（PyYAML が出す）だけ
 - GUI もバッチスクリプトも Python から使うので、Python 側にあるほうが自然（§6.5）
 
@@ -479,7 +479,7 @@ output:
 `complete_electrode`（§2.5）。`complete_electrode` には `contact_impedance`（Ω·m²、正の有限値）が
 必須で、`uniform_current_density` に `contact_impedance` を書くとエラーにする（書いた値が
 黙って使われないのを避けるため）。選択肢の一覧は Rust 側だけに置き、Python は
-`gfem.distribution_choices()` で引く（§6.5）。CEM の電極があるときの `solver.gauge` は
+`facetsetfem.distribution_choices()` で引く（§6.5）。CEM の電極があるときの `solver.gauge` は
 意味を持たない（行列が正則なので射影しない。§4.3）が、ケースファイルの互換のため項目は残す。
 
 ---
@@ -614,10 +614,10 @@ trait LinearBackend {
 
 **どれを選んでも答えはビット単位で同じ**なので、この判断が結果を変えることはない。
 
-選択は 2 か所に分かれている。`gfem-core` は GPU の有無を知らない（設計原則 5）ので、
-`Backend::resolve` が決めるのは CPU 逐次か CPU 並列まで。GPU を試すかどうかは `gfem-py` が
+選択は 2 か所に分かれている。`facetsetfem-core` は GPU の有無を知らない（設計原則 5）ので、
+`Backend::resolve` が決めるのは CPU 逐次か CPU 並列まで。GPU を試すかどうかは `facetsetfem-py` が
 `Backend::wants_gpu(n)` で判断し（`cuda` 指定なら常に、`auto` なら 25 万節点以上）、
-実際に使えるか（GPU の有無・CC・空き VRAM）は `gfem-cuda` が答える。
+実際に使えるか（GPU の有無・CC・空き VRAM）は `facetsetfem-cuda` が答える。
 
 **並列アセンブリ**（M4 で確定）。要素ループを並列化して `atomicAdd` で足し込むと
 加算順序が実行ごとに変わり再現性が壊れる（設計原則 1）。そこで**行（節点）ごとに
@@ -646,17 +646,17 @@ trait LinearBackend {
 ことが保証される。GPU からホストへ落ちるのは内積・総和の結果 1 個だけで、
 作業ベクトルは反復の間 VRAM に置いたままになる。
 
-**外部バックエンドの差し込み方**（M5 で確定）。`gfem-core` は CUDA に依存しない
+**外部バックエンドの差し込み方**（M5 で確定）。`facetsetfem-core` は CUDA に依存しない
 （設計原則 5）ので、`analysis::solve` が自分で CUDA を選ぶことはできない。そこで
 ホスト側のスライスだけを受け渡す**オブジェクト安全な `LinearSolver`** を用意し、
 `analysis::solve_with(mesh, case, progress, Some(&solver))` で外から渡せるようにした。
 `BackendSolver<B>` が任意の `LinearBackend` をこれに包む。GPU を使うかどうかの判断は
-`gfem-py` が行う（下記）。
+`facetsetfem-py` が行う（下記）。
 
 ```text
-gfem-cuda  →  CudaBackend（LinearBackend）→ BackendSolver → LinearSolver
-gfem-py    →  GPU を使うか判断して solve_with に渡す
-gfem-core  →  CUDA を知らないまま、渡されたソルバで解く
+facetsetfem-cuda  →  CudaBackend（LinearBackend）→ BackendSolver → LinearSolver
+facetsetfem-py    →  GPU を使うか判断して solve_with に渡す
+facetsetfem-core  →  CUDA を知らないまま、渡されたソルバで解く
 ```
 
 **内積の再現性**: 素朴な並列内積は加算順序が非決定的になるため、**固定長ブロックの階層リダクション**（決定的な木構造の総和）を用いる。GPU も固定ブロック分割 + 決定的な階層リダクションで実装する。
@@ -688,8 +688,8 @@ gfem-core  →  CUDA を知らないまま、渡されたソルバで解く
 場合は、理由（GPU が無い／CC 不足／VRAM 不足）を結果の警告に必ず載せる。
 `auto` のときは CPU で解くのが当たり前なので警告は出さない。
 
-フォールバックするときは、`gfem-py` が **CPU のソルバを明示的に渡す**（逐次か並列かは
-`auto` と同じ規則で節点数から決める）。`gfem-core` の `solve_with` は「`cuda` を指定したのに
+フォールバックするときは、`facetsetfem-py` が **CPU のソルバを明示的に渡す**（逐次か並列かは
+`auto` と同じ規則で節点数から決める）。`facetsetfem-core` の `solve_with` は「`cuda` を指定したのに
 ソルバが渡されていない」をプログラムの誤りとしてエラーにするので、ここで `None` を渡すと
 本当の理由（GPU が無い・VRAM が足りない）が利用者に届かない。実行サマリには
 頼んだ設定（`backend_setting: cuda`）と実際に使ったもの（`backend: cpu_*`）の両方が残る。
@@ -720,7 +720,7 @@ AMG で 0.85 → 0.48 秒）。パラメータスタディや GUI での解き�
   VRAM をストリーム順序付きのプール（`cuMemAllocAsync`）から取り、解放もストリームに
   積むだけにする。プールが VRAM を手放すのは次の同期のときなので、同期しないと
   解き終わったあとも掴んだままになる（22 万節点で 67 MB。コンテキストごと捨てていた
-  以前は問題にならなかった）。回帰テストは `gfem-cuda/tests/reuse.rs`。空き VRAM を
+  以前は問題にならなかった）。回帰テストは `facetsetfem-cuda/tests/reuse.rs`。空き VRAM を
   見るので、ほかの GPU テストと同じプロセスに入れていない
 
 ### 4.5 AMG 前処理（M6 で確定）
@@ -888,7 +888,7 @@ SpMV 1.5 回ぶん弱に相当する。
 **VRAM の見積り**（2026-09 に追加）。階層（2 段目以降の A と、全レベルの P・R・対角・
 作業ベクトル）は、最細レベルの CSR の 1.27〜1.28 倍を使う（3 層スラブ、3,465〜172,081 節点の
 実測。規模にほとんど依らない。最細レベルを複製していた頃は 2.27 倍だった）。GPU を使えるかの
-判定（`gfem_cuda::can_use_gpu`）では、AMG のときだけ CSR の 1.4 倍を足す。以前は前処理を
+判定（`facetsetfem_cuda::can_use_gpu`）では、AMG のときだけ CSR の 1.4 倍を足す。以前は前処理を
 見ずに見積もっていたので、見積りを通ったあと解いている途中で VRAM が尽きると、
 CPU に落ちずにエラーで止まった。
 
@@ -912,7 +912,7 @@ AMG はそのまま 2 次要素の行列に使える。近零空間は定数の�
 | 207,025 | 87 | 60 | 56 |
 | 686,857 | 97 | 63 | 68 |
 
-上下面を丸ごと電極にした薄い層の 3 層スラブ（60 × 40 × 20 mm。gfem-cuda の `end_to_end.rs` と同じ）では逆に、
+上下面を丸ごと電極にした薄い層の 3 層スラブ（60 × 40 × 20 mm。facetsetfem-cuda の `end_to_end.rs` と同じ）では逆に、
 θ を上げるほど粗いレベルの行列が密になった:
 
 | 2 次の節点数 | θ 0.08 | θ 0.15 | θ 0.25 |
@@ -1112,7 +1112,7 @@ CEM の電極があるときは次のように読み替える（M11。§2.5）:
 
 **電極を含めたメッシュの書き出し**（2026-10 に追加。`io::nastran::write_nastran`、Python の
 `Case.write_nastran`、GUI の「ファイル → 電極を含めたメッシュを Nastran に書き出す」）。
-GenericFEM で体表面から選んだ電極を、ほかのソフトウェアへ持っていくための経路。
+FacetSetFEM で体表面から選んだ電極を、ほかのソフトウェアへ持っていくための経路。
 
 - 読み込んだメッシュ（節点・ソリッド要素・もとのシェル要素・PSOLID / PSHELL）に、**電極ごとに新しい PSHELL の
   PID を振ったシェル要素**を書き足す。PID は指定でき、指定が無ければメッシュの PID と重ならない番号を順に振る
@@ -1143,9 +1143,9 @@ GenericFEM で体表面から選んだ電極を、ほかのソフトウェアへ
 
 **Git の状態の取り方**（2026-09 に修正）:
 
-- **ビルド時**（`git_commit` / `git_dirty`）: そのバイナリを作ったソースの状態をビルドスクリプトが埋め込む（`crates/gfem-core/build_git.rs` を gfem-core と gfem-py の `build.rs` が共有）。数えるのは**結果に効くソースだけ**で、何を数えたかを `git_dirty_scope` に残す。gfem-core 自身は gfem-core のソース、Python 拡張は 3 クレート全部のソース。クレートごとに分けているのは、ほかのクレートの編集で gfem-core まで再コンパイルさせないため
+- **ビルド時**（`git_commit` / `git_dirty`）: そのバイナリを作ったソースの状態をビルドスクリプトが埋め込む（`crates/facetsetfem-core/build_git.rs` を facetsetfem-core と facetsetfem-py の `build.rs` が共有）。数えるのは**結果に効くソースだけ**で、何を数えたかを `git_dirty_scope` に残す。facetsetfem-core 自身は facetsetfem-core のソース、Python 拡張は 3 クレート全部のソース。クレートごとに分けているのは、ほかのクレートの編集で facetsetfem-core まで再コンパイルさせないため
 - 以前は `.git/HEAD` と `.git/index` だけを監視していたので、**ソースを編集して再ビルドしても埋め込み直されず**（`git_dirty = false` のまま）、ブランチ上でコミットしてもコミットハッシュが古いままになりえた。いまはソースそのものと HEAD が指すブランチの参照も監視し、回帰テストで「埋め込まれた状態 = いまの作業ツリー」を確かめている
-- **実行時**（`source_tree`）: `maturin develop` の開発環境では Python のコードが作業ツリーから直接読まれるので、ビルドし直さずに編集・コミットするとビルド時の状態とずれる。サマリを書く時点の作業ツリー（`python/gfem` を含む）も記録し、ビルド後にコミットが進んでいたら `same_commit_as_build: false` と「maturin develop でビルドし直す」旨を添える。wheel で入れた環境では作業ツリーが無いので記録しない
+- **実行時**（`source_tree`）: `maturin develop` の開発環境では Python のコードが作業ツリーから直接読まれるので、ビルドし直さずに編集・コミットするとビルド時の状態とずれる。サマリを書く時点の作業ツリー（`python/facetsetfem` を含む）も記録し、ビルド後にコミットが進んでいたら `same_commit_as_build: false` と「maturin develop でビルドし直す」旨を添える。wheel で入れた環境では作業ツリーが無いので記録しない
 
 **VTU ライタの実装上の取り決め**（M0 で確定）
 
@@ -1245,7 +1245,7 @@ VTU 出力と GUI の表示経路で共通）。
 切ると別の選択の編集がまとまってしまう。
 
 **パラメータスタディ**（M7 で追加）。σ・刺激電流・電極の面・ソルバ設定を振って
-一括で解き、結果を表で比べる。計算は `gfem.sweep` が行い、GUI は入力を集めて
+一括で解き、結果を表で比べる。計算は `facetsetfem.sweep` が行い、GUI は入力を集めて
 結果を並べるだけ（§7 の「GUI にロジックを置かない」）。**1 極だけ電流を変えると
 Σ I_k = 0 が崩れて解が存在しなくなる**（§2.2）ので、刺激強度は全電極まとめて振る
 指定子（`current`）を用意してある。接触インピーダンスも振れる（全電極まとめて `contact_impedance`、1 極だけなら `electrode.<名前>.contact_impedance`。M11）。GUI では電流を**電極のページと同じ mA** で入れ、
@@ -1477,10 +1477,10 @@ VTU 出力と GUI の表示経路で共通）。
 GUI から使う機能は全て Python API としても公開し、**バッチスクリプトから同じコアを叩けるようにする**。研究用途では「GUI で 1 条件確認して、スクリプトで 100 条件回す」が典型的なため、これは必須要件。
 
 ```python
-import gfem
+import facetsetfem
 
-mesh = gfem.read_nastran("model.bdf", length_unit="mm")
-case = gfem.Case(mesh)
+mesh = facetsetfem.read_nastran("model.bdf", length_unit="mm")
+case = facetsetfem.Case(mesh)
 case.set_conductivity({1: 0.10, 2: 0.04, 3: 0.35, 4: 0.02})
 case.add_electrode("E1", role="anode",   current=2e-3, shell_pids=[101, 102])
 case.add_electrode("E2", role="cathode", current=2e-3, shell_pids=[201])
@@ -1501,8 +1501,8 @@ result.write_vtu("out.vtu")
 §5.1）で、パラメータスタディの `j_max_A_per_m2` / `e_max_V_per_m` はこれを使う。
 
 **選択肢と換算表は Rust 側の 1 か所だけに置く**（2026-09 に整理）。長さ単位の換算係数
-（`gfem.metres_per_unit`）、バックエンドと前処理の選択肢（`gfem.backend_choices()` /
-`gfem.preconditioner_choices()`）と別名（`"gpu"` など）の解釈は、Python 側でも Rust から引く。
+（`facetsetfem.metres_per_unit`）、バックエンドと前処理の選択肢（`facetsetfem.backend_choices()` /
+`facetsetfem.preconditioner_choices()`）と別名（`"gpu"` など）の解釈は、Python 側でも Rust から引く。
 ケースファイルの検査・GUI の選択肢・エラーの対処の文言が同じ表を見るので、片方だけ直して
 食い違うことがない。以前は換算表が 3 か所、別名の表が 2 か所にあった。
 
@@ -1517,27 +1517,27 @@ Python API のエラー（ケースファイル・パラメータスタディ・
 バックエンドや前処理の名前、電極の役割（anode / cathode）のような**機械が読む名前は訳さない**。
 コメント・docstring・SPEC は日本語のまま。
 
-**言語はプロセス全体で 1 つ**で、Rust コアが持つ（`gfem_core::set_language` /
-Python からは `gfem.i18n.set_language("ja")`）。コアのエラーと GUI の文言が別々の言語に
-なることがない。最初に使われるまでに指定されなければ環境変数 `GFEM_LANG`（`en` / `ja`）を見て、
+**言語はプロセス全体で 1 つ**で、Rust コアが持つ（`facetsetfem_core::set_language` /
+Python からは `facetsetfem.i18n.set_language("ja")`）。コアのエラーと GUI の文言が別々の言語に
+なることがない。最初に使われるまでに指定されなければ環境変数 `FACETSETFEM_LANG`（`en` / `ja`）を見て、
 それも無ければ英語。
 
 **文言の持ち方**:
 
 - **Rust**: `tr!("English {x}", "日本語 {x}")` で同じ場所に英語と日本語を並べて書く
-  （`gfem_core::i18n`）。`format!` の書式はリテラルでなければならないので、英語をキーにした
+  （`facetsetfem_core::i18n`）。`format!` の書式はリテラルでなければならないので、英語をキーにした
   表を引く方式は Rust では取れない。並べて書けば訳の付け忘れも起きない
-- **Python**: 英語の文言をキーにした辞書（`gfem/locale_ja.py`）から日本語訳を引く
-  （`gfem.i18n.tr("Loaded: {path}", path=p)`）。モジュールの読み込み時に決まる定数（表示量の名前・
+- **Python**: 英語の文言をキーにした辞書（`facetsetfem/locale_ja.py`）から日本語訳を引く
+  （`facetsetfem.i18n.tr("Loaded: {path}", path=p)`）。モジュールの読み込み時に決まる定数（表示量の名前・
   表の見出しなど）は、そのときの言語で訳すと後から直らないので、英語のまま `N_("...")` で
   印を付けておき、使うときに `tr` を通す
-- **Python 側で作るエラー**は `gfem.i18n.error_text` で Rust の `GfemError` と同じ体裁
+- **Python 側で作るエラー**は `facetsetfem.i18n.error_text` で Rust の `FacetSetFemError` と同じ体裁
   （`[Setup error] 何が / Where: どこで / Fix: どう直すか`）にそろえる
 - 訳の付け忘れ・使われていない訳・`{name}` の食い違い・訳を通さない日本語の直書きは
   `tests/test_i18n.py` がソースを走査して検出する（全角の記号・空白も日本語として数える。
   英語表示に全角の括弧や空白が混ざらないように）
 
-**GUI の言語の決め方**（強い順）: コマンドラインの `--lang en|ja` → 環境変数 `GFEM_LANG` →
+**GUI の言語の決め方**（強い順）: コマンドラインの `--lang en|ja` → 環境変数 `FACETSETFEM_LANG` →
 メニュー「View → Language（表示 → 言語）」で選んで保存した設定（`QSettings`）→ 英語。
 **メニューで選び直した言語は次に起動したときから効く**。文言はウィジェットを作るときに訳すので、
 その場で切り替えるには全ページを作り直す仕組みが要り、それに見合わない。Qt の標準の部品
@@ -1547,7 +1547,7 @@ Python からは `gfem.i18n.set_language("ja")`）。コアのエラーと GUI �
 使っているが、言語は起動している間は変わらないので問題にならない。
 
 **テストは日本語の表示で回す。** 既存のテストの多くはエラー・警告の日本語の文言を確かめている
-ため、Python は `tests/conftest.py` で、Rust は `.cargo/config.toml` の `GFEM_LANG = "ja"` で
+ため、Python は `tests/conftest.py` で、Rust は `.cargo/config.toml` の `FACETSETFEM_LANG = "ja"` で
 既定を日本語にしている。英語の文言は、言語を切り替えたテスト（`tests/test_i18n.py`、
 Rust は `with_language(Language::En, …)`。スレッドごとの上書きなので並列のテストに影響しない）で
 確かめる。
@@ -1563,7 +1563,7 @@ Rust は `with_language(Language::En, …)`。スレッドごとの上書きな�
 構成の説明はここだけに置く（README からはここを参照する）。
 
 ```
-GenericFEM/
+FacetSetFEM/
 ├── CLAUDE.md                    # Claude Code 向けの作業指示（原則・環境・注意点）
 ├── SPEC.md                      # 本書（規範と開発の経緯）
 ├── README.md                    # 公開向けの紹介（英語）: 特長・インストール・使い方の要点
@@ -1574,9 +1574,9 @@ GenericFEM/
 ├── pyproject.toml               # maturin（Rust 拡張）・pytest・wheel の依存
 ├── requirements.txt             # 開発環境の固定バージョン
 ├── crates/
-│   ├── gfem-core/               # Rust コア（CUDA・Python に非依存）
+│   ├── facetsetfem-core/               # Rust コア（CUDA・Python に非依存）
 │   │   ├── build.rs             # ビルド時の Git の状態を埋め込む（§5.5）
-│   │   ├── build_git.rs         #   その処理（gfem-py の build.rs と共有）
+│   │   ├── build_git.rs         #   その処理（facetsetfem-py の build.rs と共有）
 │   │   └── src/
 │   │       ├── mesh/            # 節点・要素・ID 索引（idmap）・外表面と面隣接（topology）・
 │   │       │                    #   面共役な四面体分割（tetview）・一様格子（spatial）・
@@ -1605,19 +1605,19 @@ GenericFEM/
 │   │       ├── case.rs          # ケース定義とバリデーション、電極面の解決
 │   │       ├── contact.rs       # 完全電極モデル: 接触インピーダンスの項・重ね合わせ・電極ごとの状態（§2.5）
 │   │       └── analysis.rs      # §4.1 の流れを通す入口と結果の型
-│   ├── gfem-cuda/               # CUDA バックエンド（gfem-core にのみ依存）
+│   ├── facetsetfem-cuda/               # CUDA バックエンド（facetsetfem-core にのみ依存）
 │   │   └── src/
 │   │       ├── kernels.cu       # f64 の CSR SpMV・ベクトル演算・決定的リダクション
 │   │       ├── device.rs        # コンテキスト初期化とその使い回し, カーネル読み込み, GPU の素性
 │   │       ├── backend.rs       # LinearBackend の実装（VRAM 常駐）
 │   │       └── lib.rs           # VRAM 見積りと CPU へのフォールバック判定
-│   └── gfem-py/                 # PyO3 バインディング（cuda フィーチャで GPU 対応）
+│   └── facetsetfem-py/                 # PyO3 バインディング（cuda フィーチャで GPU 対応）
 │       ├── build.rs             # 拡張モジュール全体の Git の状態を埋め込む（§5.5）
 │       └── src/
 │           ├── lib.rs           # Mesh / Case / Solution の Python 向けの顔
 │           └── cuda.rs          # GPU を使うかの判断とフォールバック。CUDA 無しでもビルドできる
 ├── python/
-│   └── gfem/
+│   └── facetsetfem/
 │       ├── __init__.py          # 高レベル Python API
 │       ├── study.py             # ケースファイル（YAML）の読み書き
 │       ├── sweep.py             # パラメータスタディ
@@ -1638,13 +1638,13 @@ GenericFEM/
 ├── scripts/                     # サンプルモデル生成、配布用 wheel の作成
 └── tests/                       # Python テストと小規模 Nastran サンプル
                                  # （Rust のテストは crates/*/tests と各モジュール内。
-                                 #   結合テストのメッシュ生成は crates/gfem-core/tests/common に
-                                 #   まとめ、gfem-cuda のテストも path で同じものを読み込む）
+                                 #   結合テストのメッシュ生成は crates/facetsetfem-core/tests/common に
+                                 #   まとめ、facetsetfem-cuda のテストも path で同じものを読み込む）
 ```
 
 **設計原則**
 
-- `gfem-core` は CUDA・Python に一切依存しない。CPU だけで完全にテストできる
+- `facetsetfem-core` は CUDA・Python に一切依存しない。CPU だけで完全にテストできる
 - 要素種は `ShapeFunctions` trait で抽象化し、新しい要素の追加が 1 ファイルで済むようにする（§2.3）
 - 線形代数バックエンドは `LinearBackend` trait で抽象化し、CG の本体は 1 箇所だけ
 - GUI にロジックを置かない。GUI は Python API の薄いフロントエンドにする
@@ -1666,7 +1666,7 @@ GenericFEM/
 
 実際に入れたもの（計画から前倒しした分を含む）:
 
-- `gfem-core`（外部依存は VTU 圧縮用の flate2 のみ）/ `gfem-py`（PyO3 + maturin、`import gfem` まで疎通）
+- `facetsetfem-core`（外部依存は VTU 圧縮用の flate2 のみ）/ `facetsetfem-py`（PyO3 + maturin、`import facetsetfem` まで疎通）
 - Nastran パーサ: **小フィールド + 大フィールド + 自由形式**、明示／暗黙の継続行、Executive・Case Control の読み飛ばし、Fortran 表記の実数（`1.5+3`、`2.-4`、`1.5D+3`）
   - カード: GRID / CTETRA / CHEXA / CPENTA / CTRIA3 / CQUAD4 / PSOLID / PSHELL
   - **CHEXA・CPENTA・CTRIA3・CQUAD4・PSHELL の読み込みは M4 の予定だったが M0 で入れた。** 電極面（シェル）が無いと M1 のサンプルモデルが成立せず、要素種の追加もブロック構造を決めた時点でほぼ差分ゼロだったため
@@ -1798,7 +1798,7 @@ GUI 側は、下部タブに領域統計の表を足し、3D ビューの表示�
 
 **再現性の検証**（設計原則 1）: 逐次と並列で電位・E・J・要素体積・反復回数・
 収束履歴・等価抵抗・消費電力・領域統計が**ビット単位で一致する**ことを、
-end-to-end のテストで確認している（`crates/gfem-core/tests/parallel.rs`）。
+end-to-end のテストで確認している（`crates/facetsetfem-core/tests/parallel.rs`）。
 60 万節点でも同様（`tests/scaling.rs`、`--ignored` で実行）。
 
 **要素種の拡張で一緒に入れたもの**:
@@ -1807,7 +1807,7 @@ end-to-end のテストで確認している（`crates/gfem-core/tests/parallel.
   同じ検査をしているが、読み込み時なら**不正な要素を一度に全部**報告できる
 - VTU / GUI への VTK セル型の受け渡し（§5.5）。CPENTA の節点順序の反転を修正した
 - 3 種すべてで層状スラブの解析解に一致することの検証
-  （`crates/gfem-core/tests/elements.rs`、`tests/test_m4_elements_and_backends.py`）
+  （`crates/facetsetfem-core/tests/elements.rs`、`tests/test_m4_elements_and_backends.py`）
 
 **残した制約**: 等値面・流線・面隣接・L2 誤差評価は Tet4 専用のまま（§5.1）。
 
@@ -1877,7 +1877,7 @@ end-to-end（`tests/end_to_end.rs`）の両方で、CPU 逐次・CPU 並列・GP
 なく、並列化した段の余分な手間を除いて 1000 万節点の構築が 5.4 → 2.55 秒になった。§4.5）
 
 **再現性の検証**（設計原則 1）: AMG を選んだ状態でも CPU 逐次・CPU 並列・GPU が
-**ビット単位で一致する**ことを end-to-end で確認している（`gfem-cuda/tests/end_to_end.rs`）。
+**ビット単位で一致する**ことを end-to-end で確認している（`facetsetfem-cuda/tests/end_to_end.rs`）。
 階層をホスト側だけで作る設計にしたので、これは構造的に保証されている。
 V サイクルで新しく通る道（矩形 SpMV、最粗レベルのホスト往復）も同じテストが踏む。
 
@@ -1892,8 +1892,8 @@ V サイクルで新しく通る道（矩形 SpMV、最粗レベルのホスト�
 | 面共役な四面体分割（§5.1） | 等値面・流線・面隣接・L2 誤差評価が Hex8 / Penta6 で動く |
 | 流線の要素探索 | 一様格子で 16.6 万節点 2.5 秒 → 0.2 ミリ秒 |
 | Undo / Redo | `Session` に履歴。同じ操作の連続はまとめる |
-| パラメータスタディ | `gfem.sweep` と GUI のダイアログ（表 + CSV） |
-| 組織物性プリセット | `gfem.tissue()` / 自前の表を `gfem.load_library()` で差し替え |
+| パラメータスタディ | `facetsetfem.sweep` と GUI のダイアログ（表 + CSV） |
+| 組織物性プリセット | `facetsetfem.tissue()` / 自前の表を `facetsetfem.load_library()` で差し替え |
 | 配布形態 | wheel（`scripts/build_release.py`）。§12 の未決事項 3 を解決 |
 
 **M7 で見つけた既存の不具合**（流線の追跡）。四面体分割を通したことで、
@@ -1921,7 +1921,7 @@ CTRIA3・CQUAD4 は 0 件）では、それまで**電極を 1 つも置けな�
 | 筆で調整 | Shift + ドラッグで塗る／Alt + ドラッグで消す。手直しは `(EID, 面番号)` の差分で保存 |
 | 荷重 | シェルで指定したのと同じ面なら荷重ベクトルはビット単位で一致 |
 
-設計は §11.1 と §6.2 の手順 3。テストは `crates/gfem-core/tests/electrode_patch.rs` と
+設計は §11.1 と §6.2 の手順 3。テストは `crates/facetsetfem-core/tests/electrode_patch.rs` と
 `tests/test_m9_surface_electrodes.py`。
 
 ### M10 — 3D ビューの描画の作り直し（**完了: 2026-08-23**）
@@ -1951,7 +1951,7 @@ v1.0 の全マイルストーンを終えた時点で、ドキュメントと実
 | 埋もれた領域のハイライトを Rust 側で | 体表面に出ていない領域の境界面を Rust 側で直接取り出す（`Mesh.region_surface`）。GUI の表示の経路で体積メッシュを作らなくなった。頭部クラスで 1 回 0.17〜0.56 秒（別に体積メッシュ 0.36 秒・468 MB）→ 0.07〜0.11 秒、2 回目からは 0 秒 | §6.3 |
 
 **1000 万節点の測り直し**（2026-09。RTX A6000 / 20 コア、release ビルド、tol = 1e-9。
-`gfem-cuda/tests/end_to_end.rs` の `ten_million_nodes_*` を他のテストと同時に走らせず 1 件ずつ実行）。
+`facetsetfem-cuda/tests/end_to_end.rs` の `ten_million_nodes_*` を他のテストと同時に走らせず 1 件ずつ実行）。
 上の「前後処理の性能」を入れた後の値で、CG 自体には手を入れていない:
 
 | 段階 | Jacobi（M5 → 今） | AMG（M6 → 今） |
@@ -2118,10 +2118,10 @@ CSV・JSON に出るので言語に依らない `(all regions)` に固定した�
 | 出力 | 電極の電位は板の電位（R は接触抵抗を含む）。電極ごとの接触電流密度の最大・接触面の消費電力・φ から求め直した電流、VTU の `electrode current density [A/m2]`、実行サマリの `distribution` など | §5.3 / §5.5 |
 | 保存則 | 電流（φ から求め直した値と指定値）・エネルギー（接触面の消費を含む）・離散残差（電極の電位を入れた右辺） | §5.4 |
 | 縁の分解能 | ℓ = zσ より電極面の要素が大きいと「ピークがメッシュで決まる」と警告 | §2.5 |
-| 値の決め方 | `gfem.fit_contact_impedance`（実測の電極間抵抗に割線法で合わせる）、パラメータスタディの `contact_impedance` | §2.5 / §6.2 |
+| 値の決め方 | `facetsetfem.fit_contact_impedance`（実測の電極間抵抗に割線法で合わせる）、パラメータスタディの `contact_impedance` | §2.5 / §6.2 |
 | GUI | 電極ページに「電極のモデル」と「接触インピーダンス [Ω·cm²]」、表示量「電極から皮膚へ流れ込む電流密度」、結果の要約とログに板の電位・接触電流密度の最大 | §6.2 |
 
-**検証**（`crates/gfem-core/tests/complete_electrode.rs`、`tests/test_m11_complete_electrode.py`）:
+**検証**（`crates/facetsetfem-core/tests/complete_electrode.rs`、`tests/test_m11_complete_electrode.py`）:
 
 - **厳密解**: 上下面を丸ごと電極にした直方体は直列抵抗 `R = L/(σA) + z_a/A + z_c/A`。Tet4（CTRIA3）・Hex8（CQUAD4）・
   体表面の面で指定した電極・片方だけ CEM のいずれも相対 1e-9 以内。1000 万節点（GPU・AMG）でも相対誤差 2 × 10⁻¹³
@@ -2221,11 +2221,11 @@ CSV・JSON に出るので言語に依らない `(all regions)` に固定した�
   （積分点 → 列の同じ順に足す）
 - AMG: 2 次要素のメッシュでは θ = 0.15 にした（**段階 6 で外した**。§4.5 の「2 次要素の行列」）。実行サマリに θ を記録する
 - GPU のメモリの見積り: 非ゼロ数を要素の種類から見積もる（§4.5 の「非ゼロ数の見積りは要素の種類で決める」）
-- 検証（`crates/gfem-core/tests/quadratic.rs`。求解の入口は止めてあるので、組み立てと CG を直接つなぐ）:
+- 検証（`crates/facetsetfem-core/tests/quadratic.rs`。求解の入口は止めてあるので、組み立てと CG を直接つなぐ）:
   - **厳密解**: 3 層スラブの上下面を丸ごと電極にすると φ は層ごとの 1 次式。2 次に上げたメッシュで、
     辺の中点を含む全節点で相対 2 × 10⁻¹³ 以内
   - **再現性**: 逐次・並列の組み立て × CPU 逐次・並列の CG × Jacobi・AMG で、電位と反復回数が一致。
-    GPU とも、一様電流密度・CEM × Jacobi・AMG でビット単位で一致（`gfem-cuda/tests/end_to_end.rs`）
+    GPU とも、一様電流密度・CEM × Jacobi・AMG でビット単位で一致（`facetsetfem-cuda/tests/end_to_end.rs`）
   - 並列の組み立てが逐次とビット単位で一致・行和ゼロ（2 領域・行の塊をまたぐ大きさ）
   - 非ゼロ数の見積りが実際の非ゼロ数を下回らない（2 倍を超えて大きくもない）
   - **1 次要素の答えは段階 2 のコミットとビット単位で同じ**（段階 2 と同じ 28 通り）
@@ -2280,7 +2280,7 @@ CSV・JSON に出るので言語に依らない `(all regions)` に固定した�
 
 **段階 6 で確かめたもの**
 
-- **収束次数**（`crates/gfem-core/tests/quadratic_convergence.rs`）。問題は 1 次と同じ球殻（φ ∝ 1/r）。
+- **収束次数**（`crates/facetsetfem-core/tests/quadratic_convergence.rs`）。問題は 1 次と同じ球殻（φ ∝ 1/r）。
   1 次の多面体メッシュを 2 次に上げただけでは、球面を多面体で近似した幾何の誤差（O(h²)）が残るので、
   **球面上の辺の中点を球面に載せ直した**（辺が曲がった要素。曲がった要素の経路の検証にもなる）。
   細かい側の 2 段から測った次数（4 段目は 2 次で 39 万節点）:
@@ -2303,7 +2303,7 @@ CSV・JSON に出るので言語に依らない `(all regions)` に固定した�
 
   ふだんのテストは 2 段（デバッグビルドで 7 秒）で次数の下限を見て、4 段と 1 次との比較は `#[ignore]`
 - **再現性**: 2 次要素で解析を後処理まで通し、CPU 逐次・CPU 並列・GPU で E・J・電力密度・要素内の最大・
-  保存則までビット単位で一致（Jacobi・AMG。`gfem-cuda/tests/end_to_end.rs`）。組み立てと CG の段の一致は段階 3
+  保存則までビット単位で一致（Jacobi・AMG。`facetsetfem-cuda/tests/end_to_end.rs`）。組み立てと CG の段の一致は段階 3
 - **1000 万節点**（`ten_million_second_order_nodes_on_the_gpu`、`#[ignore]`）: 1 次の 134 万節点の 3 層スラブを
   2 次に上げて 1053 万節点・776 万四面体。RTX A6000 の AMG で全体 23.2 秒（準備 0.8 / アセンブリ 9.3 / CG 11.0 /
   ポスト 2.0）、70 反復、作用素複雑度 1.18。直列抵抗の厳密解と相対 1.2e-13。1 次の 1000 万節点（11 秒）より
@@ -2385,7 +2385,7 @@ cudarc の `cuda-11080` の探索リストに載っていないため、同居�
 - **球に入っているかだけで決めてはいけない。** 首の切断面・耳の裏・折り返した皮膚など、空間的には近いのに体表面としてはつながっていない面が球に入る。**クリックした面から稜線でつながっている面だけ**を幅優先でたどり、皮膚の上を這うように広げる
 - **PID で絞り込めること。** 上の頭部モデルでは、外表面に出ている面積の内訳が PID 51 が 1601 cm²（皮膚）、62 が 219 cm²、53 が 102 cm² … と続く。**首の切断面で内部組織も「外表面」に現れる**ため、皮膚の PID に絞らないと電極が体内に食い込む。GUI は面積の大きい順に一覧を出し、**外表面の 7 割以上を占める領域があればそれを既定にする**（無ければ「制限しない」）。2026-09 までは無条件に最大の領域を既定にしていて、皮膚が上面の薄い層になっているスラブ（サンプルモデル）では、側面と下面を持つ筋肉が既定になり、上面の皮膚をクリックしても面が選べなかった
 - **クリックした面は半径に関わらず必ず含める。** 半径を小さくしたときに「1 枚も選ばれない」が起きないようにするため
-- 荷重の作り方（面積按分。§2.4）はシェル指定と**完全に同じ**。同じ面を指せば荷重ベクトルは**ビット単位で一致する**（回帰テスト `crates/gfem-core/tests/electrode_patch.rs`）
+- 荷重の作り方（面積按分。§2.4）はシェル指定と**完全に同じ**。同じ面を指せば荷重ベクトルは**ビット単位で一致する**（回帰テスト `crates/facetsetfem-core/tests/electrode_patch.rs`）
 - パッチは外表面から選ぶので、この節の「体表面に限る」制約は**構造的に満たされる**
 
 **クリック点は深度バッファから求める。** PyVista の既定はセルピッカー（`vtkCellPicker`）で、表示中のメッシュに光線を飛ばして交点を出す。411 万セルの頭部モデルでは**これだけで 1 クリック 2.6 秒**かかり、電極を置くたびに固まる。深度バッファからの逆変換（`vtkWorldPointPicker`）なら **0.01 秒**（150 倍）で、セルピッカーとのずれは実測 0.4〜1.8 mm。**選んだ点は最寄りの面を決めるためだけに使い、電極の広がりは半径（cm 級）が決める**ので、この差は結果に効かない。
@@ -2422,9 +2422,9 @@ cudarc の `cuda-11080` の探索リストに載っていないため、同居�
 
 **置く前に輪郭を見せる**。予告（薄いオレンジの面）に加えて、形の輪郭を接平面上の閉じた折れ線で重ねる。面だけでは本来の形も向きも読めないため。輪郭は凹んだ体表面に埋もれないよう、形の大きさの 2 % だけ法線の向きに浮かせる（見た目のためだけ）。
 
-形の解釈（キー・型・範囲）は **Rust 側だけに置く**（`gfem-py` の `parse_patch_at` とコアの `SurfacePatch::check`）。ケースファイルの読み込み（Python）は `check_patch` を呼んで、エラーに場所を添えるだけ（§6.5）。打ち間違いのキー（`widht` など）は黙って無視すると既定の円になるので、エラーにする。
+形の解釈（キー・型・範囲）は **Rust 側だけに置く**（`facetsetfem-py` の `parse_patch_at` とコアの `SurfacePatch::check`）。ケースファイルの読み込み（Python）は `check_patch` を呼んで、エラーに場所を添えるだけ（§6.5）。打ち間違いのキー（`widht` など）は黙って無視すると既定の円になるので、エラーにする。
 
-回帰テスト: `crates/gfem-core/tests/electrode_shape.rs`（面積・向き・回転の向き・角丸・回り込まない・エラー）、`tests/test_electrode_shapes.py`（ケースファイルの往復・場所つきのエラー・画面に対してまっすぐ・形の反映と Undo・輪郭の予告）。
+回帰テスト: `crates/facetsetfem-core/tests/electrode_shape.rs`（面積・向き・回転の向き・角丸・回り込まない・エラー）、`tests/test_electrode_shapes.py`（ケースファイルの往復・場所つきのエラー・画面に対してまっすぐ・形の反映と Undo・輪郭の予告）。
 
 #### 面を 1 枚ずつ調整する（M9 で確定）
 
@@ -2470,7 +2470,10 @@ faces:
 ### 11.2 ライセンス方針: MIT で公開する
 
 当初は研究室内での利用を前提にしていたが、論文の発表にあわせて **MIT License で GitHub に公開する**
-ことにした（2026-10-25。著作権者は Takashi Ota。`LICENSE`）。配布はソースと wheel を GitHub で行い、
+ことにした（2026-10-25。著作権者は Takashi Ota。`LICENSE`）。
+公開にあわせて名前を **GenericFEM から FacetSetFEM** に改めた（2026-10-26）。本質が「要素面（facet）の集合（set）で
+電極を表すこと」（§11.1）だからである。Python のパッケージは `facetsetfem`（Rust の拡張は `facetsetfem._core`）、
+クレートは `facetsetfem-core` / `facetsetfem-cuda` / `facetsetfem-py`、環境変数は `FACETSETFEM_*`、例外は `FacetSetFemError`。配布はソースと wheel を GitHub で行い、
 PyPI・crates.io には出さない（`pyproject.toml` の `Private :: Do Not Upload` と `Cargo.toml` の
 `publish = false` は誤って上げないための印として残す）。
 
@@ -2496,9 +2499,9 @@ PyPI・crates.io には出さない（`pyproject.toml` の `Private :: Do Not Up
    （設計原則 1）を外から与えることはできない。凝集の順序と疎行列積の加算順序を
    自分で握る必要があるため、自前実装が唯一の選択肢だった
 2. 組織物性プリセットに使う文献値のソース（IT'IS Foundation のデータベース等。利用条件の確認が必要）
-   → **未解決のまま。** M7 では代表値のプリセット（`gfem.tissues`）を同梱したが、
+   → **未解決のまま。** M7 では代表値のプリセット（`facetsetfem.tissues`）を同梱したが、
    これは**桁と相対関係を把握するための出発点**であって文献データベースではない。
-   各エントリに周波数帯と「代表値である」旨を明記し、`gfem.load_library()` で
+   各エントリに周波数帯と「代表値である」旨を明記し、`facetsetfem.load_library()` で
    自前の表に差し替えられるようにしてある。権威あるデータベースの取り込みは
    利用条件の確認が済んでから（§11.2）
 3. ~~配布形態（PyInstaller による単体化か、conda / pip 環境の構築手順を配るか）~~

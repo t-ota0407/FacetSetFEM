@@ -1,7 +1,7 @@
 """完全電極モデル（SPEC §2.5 / §8 M11）の Python API・ケースファイル・パラメータスタディ・GUI。
 
 物理の検証（厳密解・極限・保存則・再現性・正方形電極の解析解）は Rust の
-`crates/gfem-core/tests/complete_electrode.rs` にある。ここは Python から使う経路を見る。
+`crates/facetsetfem-core/tests/complete_electrode.rs` にある。ここは Python から使う経路を見る。
 """
 
 from __future__ import annotations
@@ -11,8 +11,8 @@ import json
 import numpy as np
 import pytest
 
-import gfem
-from gfem.gui.state import FIELD_ARRAYS, Session, field_by_key
+import facetsetfem
+from facetsetfem.gui.state import FIELD_ARRAYS, Session, field_by_key
 
 from conftest import SLAB_AREA, SLAB_LAYERS
 
@@ -25,9 +25,9 @@ def _body_resistance() -> float:
     return sum(t / (sigma * SLAB_AREA) for _pid, t, sigma in SLAB_LAYERS)
 
 
-def _full_face_case(full_face_bdf, slab_sigma, anode=None, cathode=None) -> gfem.Case:
-    mesh = gfem.read_nastran(full_face_bdf, length_unit="mm")
-    case = gfem.Case(mesh)
+def _full_face_case(full_face_bdf, slab_sigma, anode=None, cathode=None) -> facetsetfem.Case:
+    mesh = facetsetfem.read_nastran(full_face_bdf, length_unit="mm")
+    case = facetsetfem.Case(mesh)
     case.set_conductivity(slab_sigma)
     for name, role, pid, z in (("E1", "anode", 101, anode), ("E2", "cathode", 201, cathode)):
         if z is None:
@@ -42,7 +42,7 @@ def _full_face_case(full_face_bdf, slab_sigma, anode=None, cathode=None) -> gfem
 
 
 def test_the_choices_come_from_the_core():
-    assert gfem.distribution_choices() == ["uniform_current_density", "complete_electrode"]
+    assert facetsetfem.distribution_choices() == ["uniform_current_density", "complete_electrode"]
 
 
 def test_a_full_face_slab_adds_the_contact_resistance(full_face_bdf, slab_sigma):
@@ -111,9 +111,9 @@ def test_the_summary_json_records_the_model(full_face_bdf, slab_sigma):
 
 def test_a_contact_impedance_without_the_model_is_rejected(full_face_bdf, slab_sigma):
     case = _full_face_case(full_face_bdf, slab_sigma)
-    with pytest.raises(gfem.GfemError, match="complete_electrode"):
+    with pytest.raises(facetsetfem.FacetSetFemError, match="complete_electrode"):
         case.add_electrode("E3", role="anode", current=CURRENT, shell_pids=[101], contact_impedance=Z)
-    with pytest.raises(gfem.GfemError, match="接触インピーダンス"):
+    with pytest.raises(facetsetfem.FacetSetFemError, match="接触インピーダンス"):
         case.add_electrode(
             "E3", role="anode", current=CURRENT, shell_pids=[101], distribution="complete_electrode"
         )
@@ -133,10 +133,10 @@ def _case_yaml(electrode_lines: str) -> str:
     )
 
 
-def _load(tmp_path, text: str) -> gfem.Study:
+def _load(tmp_path, text: str) -> facetsetfem.Study:
     path = tmp_path / "case.yaml"
     path.write_text(text, encoding="utf-8")
-    return gfem.Study.load(path)
+    return facetsetfem.Study.load(path)
 
 
 def test_the_case_file_round_trips_the_model(tmp_path):
@@ -145,7 +145,7 @@ def test_the_case_file_round_trips_the_model(tmp_path):
     )
     e = study.electrodes[0]
     assert e.is_complete and e.contact_impedance == 0.02
-    again = gfem.Study.from_dict(__import__("yaml").safe_load(study.to_yaml()))
+    again = facetsetfem.Study.from_dict(__import__("yaml").safe_load(study.to_yaml()))
     assert again.electrodes[0].contact_impedance == 0.02
     assert again.electrodes[0].distribution == "complete_electrode"
 
@@ -171,7 +171,7 @@ def test_a_remembered_contact_impedance_is_not_written_for_uniform(tmp_path):
     ],
 )
 def test_bad_case_files_are_reported(tmp_path, lines, expected):
-    with pytest.raises(gfem.GfemError) as info:
+    with pytest.raises(facetsetfem.FacetSetFemError) as info:
         _load(tmp_path, _case_yaml(lines))
     message = str(info.value)
     assert expected in message
@@ -181,12 +181,12 @@ def test_bad_case_files_are_reported(tmp_path, lines, expected):
 # --- パラメータスタディと合わせ込み ----------------------------------------
 
 
-def _full_face_study(full_face_bdf, slab_sigma) -> gfem.Study:
-    study = gfem.Study(mesh_file=full_face_bdf, length_unit="mm")
-    study.materials = [gfem.Material(pid=pid, sigma=s) for pid, s in slab_sigma.items()]
+def _full_face_study(full_face_bdf, slab_sigma) -> facetsetfem.Study:
+    study = facetsetfem.Study(mesh_file=full_face_bdf, length_unit="mm")
+    study.materials = [facetsetfem.Material(pid=pid, sigma=s) for pid, s in slab_sigma.items()]
     study.electrodes = [
-        gfem.ElectrodeSpec("E1", "anode", CURRENT, shell_pids=[101]),
-        gfem.ElectrodeSpec("E2", "cathode", CURRENT, shell_pids=[201]),
+        facetsetfem.ElectrodeSpec("E1", "anode", CURRENT, shell_pids=[101]),
+        facetsetfem.ElectrodeSpec("E2", "cathode", CURRENT, shell_pids=[201]),
     ]
     study.solver.tolerance = 1e-12
     return study
@@ -194,7 +194,7 @@ def _full_face_study(full_face_bdf, slab_sigma) -> gfem.Study:
 
 def test_sweeping_the_contact_impedance_makes_the_electrodes_complete(full_face_bdf, slab_sigma):
     study = _full_face_study(full_face_bdf, slab_sigma)
-    table = gfem.sweep(study, {"contact_impedance": [0.01, 0.02]})
+    table = facetsetfem.sweep(study, {"contact_impedance": [0.01, 0.02]})
     body = _body_resistance()
     for row in table.rows:
         z = row["contact_impedance"]
@@ -206,7 +206,7 @@ def test_sweeping_the_contact_impedance_makes_the_electrodes_complete(full_face_
 
 def test_one_electrode_can_be_swept_alone(full_face_bdf, slab_sigma):
     study = _full_face_study(full_face_bdf, slab_sigma)
-    table = gfem.sweep(study, {"electrode.E1.contact_impedance": [0.01]})
+    table = facetsetfem.sweep(study, {"electrode.E1.contact_impedance": [0.01]})
     assert table.rows[0]["impedance_ohm"] == pytest.approx(
         _body_resistance() + 0.01 / SLAB_AREA, rel=1e-9
     )
@@ -214,8 +214,8 @@ def test_one_electrode_can_be_swept_alone(full_face_bdf, slab_sigma):
 
 def test_switching_to_the_model_without_a_value_is_reported(full_face_bdf, slab_sigma):
     study = _full_face_study(full_face_bdf, slab_sigma)
-    with pytest.raises(gfem.GfemError, match="接触インピーダンスがありません"):
-        gfem.sweep(study, {"electrode.E1.distribution": ["complete_electrode"]})
+    with pytest.raises(facetsetfem.FacetSetFemError, match="接触インピーダンスがありません"):
+        facetsetfem.sweep(study, {"electrode.E1.distribution": ["complete_electrode"]})
 
 
 def test_the_contact_impedance_can_be_fitted_to_a_measured_resistance(full_face_bdf, slab_sigma):
@@ -223,7 +223,7 @@ def test_the_contact_impedance_can_be_fitted_to_a_measured_resistance(full_face_
     z_true = 0.0123
     measured = _body_resistance() + 2 * z_true / SLAB_AREA
     seen = []
-    fit = gfem.fit_contact_impedance(study, measured, progress=lambda i, z, r: seen.append(i))
+    fit = facetsetfem.fit_contact_impedance(study, measured, progress=lambda i, z, r: seen.append(i))
     assert fit.contact_impedance == pytest.approx(z_true, rel=1e-3)
     assert fit.impedance == pytest.approx(measured, rel=1e-4)
     assert len(fit.evaluations) <= 4, fit.evaluations
@@ -235,8 +235,8 @@ def test_the_contact_impedance_can_be_fitted_to_a_measured_resistance(full_face_
 
 def test_a_measurement_below_the_body_resistance_is_reported(full_face_bdf, slab_sigma):
     study = _full_face_study(full_face_bdf, slab_sigma)
-    with pytest.raises(gfem.GfemError, match="実測"):
-        gfem.fit_contact_impedance(study, 0.5 * _body_resistance())
+    with pytest.raises(facetsetfem.FacetSetFemError, match="実測"):
+        facetsetfem.fit_contact_impedance(study, 0.5 * _body_resistance())
 
 
 # --- GUI -------------------------------------------------------------------

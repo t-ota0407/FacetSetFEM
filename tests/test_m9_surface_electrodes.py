@@ -5,7 +5,7 @@
 定義できなかった。
 
 物理そのもの（シェルで指定したときとビット単位で同じ荷重になること）は Rust 側の
-`crates/gfem-core/tests/electrode_patch.rs` で確かめている。ここでは
+`crates/facetsetfem-core/tests/electrode_patch.rs` で確かめている。ここでは
 **Python から使ったときに一貫しているか**を見る。
 """
 
@@ -14,8 +14,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-import gfem
-from gfem.gui.state import Session
+import facetsetfem
+from facetsetfem.gui.state import Session
 
 SIGMA = {1: 0.10, 2: 0.04, 3: 0.35}
 CURRENT = 2.0e-3
@@ -90,10 +90,10 @@ def test_a_model_without_shells_can_be_solved(session, tmp_path, make_sample_mes
     """本題。シェル要素を持たないモデルでも解けること。"""
     solid_only = tmp_path / "solid_only.bdf"
     make_sample_mesh.main(["-o", str(solid_only), "--electrodes", "none"])
-    mesh = gfem.read_nastran(solid_only, length_unit="mm")
+    mesh = facetsetfem.read_nastran(solid_only, length_unit="mm")
     assert mesh.n_shell_elements == 0, "シェルの無いモデルを作れていない"
 
-    case = gfem.Case(mesh)
+    case = facetsetfem.Case(mesh)
     case.set_conductivity(SIGMA)
     case.add_electrode(
         "E1", role="anode", current=CURRENT,
@@ -139,7 +139,7 @@ def test_a_bad_patch_says_what_to_fix(session):
     session.add_electrode("E1", role="anode", current=CURRENT)
     session.add_patch("E1", (0.030, 0.020, 0.020), 0.012, pid=999)
     session.add_electrode("E2", role="cathode", current=CURRENT, shell_pids=[201])
-    with pytest.raises(gfem.GfemError) as excinfo:
+    with pytest.raises(facetsetfem.FacetSetFemError) as excinfo:
         session.validate()
     message = str(excinfo.value)
     assert "1 枚も選べませんでした" in message
@@ -151,7 +151,7 @@ def test_an_electrode_without_any_face_mentions_patches(session):
     """面が無いときの案内に、クリックで選ぶ道も出ること。"""
     session.add_electrode("E1", role="anode", current=CURRENT)
     session.add_electrode("E2", role="cathode", current=CURRENT, shell_pids=[201])
-    with pytest.raises(gfem.GfemError) as excinfo:
+    with pytest.raises(facetsetfem.FacetSetFemError) as excinfo:
         session.validate()
     assert "パッチ" in str(excinfo.value)
 
@@ -330,7 +330,7 @@ def test_a_click_off_the_model_is_ignored(session):
 
 def test_a_failed_pick_is_refused_by_the_core(session):
     """NaN が来たら、黙って先頭の面を選ばずに止まること（設計原則 6）。"""
-    with pytest.raises(gfem.GfemError) as excinfo:
+    with pytest.raises(facetsetfem.FacetSetFemError) as excinfo:
         session.pick_patch((float("nan"), 0.0, 0.0), 0.01)
     assert "数値になっていません" in str(excinfo.value)
 
@@ -494,7 +494,7 @@ def test_hovering_previews_what_will_be_painted(painting_window, qt_app):
     qt_app.processEvents()
     assert window.plotter.actors.get(window.PREVIEW_ACTOR) is not None
     # 面はまだ増えない（予告なので）
-    with pytest.raises(gfem.GfemError):
+    with pytest.raises(facetsetfem.FacetSetFemError):
         window.session.electrode_faces("E1")
 
 

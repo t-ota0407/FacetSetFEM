@@ -11,7 +11,7 @@ import copy
 
 import pytest
 
-from gfem.gui.state import Session
+from facetsetfem.gui.state import Session
 
 SIGMA = {1: 0.10, 2: 0.04, 3: 0.35}
 CURRENT = 2.0e-3

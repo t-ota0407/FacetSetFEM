@@ -1,4 +1,4 @@
-# GenericFEM
+# FacetSetFEM
 
 [English](README.md) | 日本語
 
@@ -34,11 +34,11 @@
 
 ### wheel から（Rust も CUDA Toolkit も要らない）
 
-配布用の wheel（`gfem-0.1.0-cp312-abi3-win_amd64.whl`。Python 3.12 以降で共通）を受け取ったら:
+配布用の wheel（`facetsetfem-0.1.0-cp312-abi3-win_amd64.whl`。Python 3.12 以降で共通）を受け取ったら:
 
 ```bash
-pip install gfem-0.1.0-cp312-abi3-win_amd64.whl
-python -m gfem.gui
+pip install facetsetfem-0.1.0-cp312-abi3-win_amd64.whl
+python -m facetsetfem.gui
 ```
 
 GUI に要るもの（PySide6・PyVista・pyvistaqt）も一緒に入る。GPU で解くには NVIDIA のドライバ
@@ -50,12 +50,12 @@ wheel の作り方は「[配布用 wheel の作成](#配布用-wheel-の作成)�
 Rust（1.97 以降）と Python（3.12 以降）を用意して:
 
 ```bash
-git clone https://github.com/t-ota0407/GenericFEM.git
-cd GenericFEM
+git clone https://github.com/t-ota0407/FacetSetFEM.git
+cd FacetSetFEM
 python -m venv .venv
 .venv/Scripts/python.exe -m pip install -r requirements.txt
 .venv/Scripts/maturin.exe develop --release
-.venv/Scripts/python.exe -m gfem.gui tests/models/slab_3layer.yaml
+.venv/Scripts/python.exe -m facetsetfem.gui tests/models/slab_3layer.yaml
 ```
 
 主な動作確認は Windows 11（MSVC ツールチェーン）で行っている。Windows では Visual Studio Build Tools
@@ -67,15 +67,15 @@ python -m venv .venv
 GUI:
 
 ```bash
-.venv/Scripts/python.exe -m gfem.gui tests/models/slab_3layer.yaml          # ケースファイル
-.venv/Scripts/python.exe -m gfem.gui tests/models/slab_3layer.bdf           # 寸法を見せてから単位を選ばせる
-.venv/Scripts/python.exe -m gfem.gui tests/models/slab_3layer.bdf --unit mm # 単位を明示する
+.venv/Scripts/python.exe -m facetsetfem.gui tests/models/slab_3layer.yaml          # ケースファイル
+.venv/Scripts/python.exe -m facetsetfem.gui tests/models/slab_3layer.bdf           # 寸法を見せてから単位を選ばせる
+.venv/Scripts/python.exe -m facetsetfem.gui tests/models/slab_3layer.bdf --unit mm # 単位を明示する
 ```
 
 表示は**英語が既定**で、日本語にも切り替えられる（SPEC §6.6）。メニューの
 「View → Language」で選ぶと保存され、次に起動したときから効く。起動時に指定するなら
-`--lang ja`（または環境変数 `GFEM_LANG=ja`）。Python API のエラーの言語は
-`gfem.i18n.set_language("ja")` で変えられる。
+`--lang ja`（または環境変数 `FACETSETFEM_LANG=ja`）。Python API のエラーの言語は
+`facetsetfem.i18n.set_language("ja")` で変えられる。
 
 Nastran には単位情報が無いので、**単位を黙って決めることはない**（SPEC §3.2）。
 Python API の `read_nastran` も `length_unit` を省略するとエラーになる。
@@ -89,12 +89,12 @@ Python API の `read_nastran` も `length_unit` を省略するとエラーに�
 Python API（GUI と同じコアを叩く）:
 
 ```python
-import gfem
+import facetsetfem
 
-mesh = gfem.read_nastran("tests/models/slab_3layer.bdf", length_unit="mm")
-print(gfem.describe_bounding_box(mesh))  # 60 mm x 40 mm x 20 mm = 0.06 m x 0.04 m x 0.02 m
+mesh = facetsetfem.read_nastran("tests/models/slab_3layer.bdf", length_unit="mm")
+print(facetsetfem.describe_bounding_box(mesh))  # 60 mm x 40 mm x 20 mm = 0.06 m x 0.04 m x 0.02 m
 
-case = gfem.Case(mesh)
+case = facetsetfem.Case(mesh)
 case.set_conductivity({1: 0.10, 2: 0.04, 3: 0.35})   # PSOLID の PID ごとに σ [S/m]
 case.add_electrode("E1", role="anode",   current=2e-3, shell_pids=[101])
 case.add_electrode("E2", role="cathode", current=2e-3, shell_pids=[201])
@@ -115,7 +115,7 @@ result.write_summary_json("summary.json")  # 入力ハッシュ・Git の状態�
 **シェル要素を持たないモデル**（人体モデルはこれが普通）は、体表面から直接電極を選ぶ:
 
 ```python
-mesh = gfem.read_nastran("head.nas", length_unit="mm")
+mesh = facetsetfem.read_nastran("head.nas", length_unit="mm")
 print(mesh.n_shell_elements)     # 0 ← シェル PID では電極を置けない
 
 for row in mesh.surface_pids():  # 外表面に出ている領域（面積の大きい順）
@@ -159,7 +159,7 @@ GUI では「クリックで選ぶ」を押して 3D ビューの体表面をク
 ケースファイル（YAML）から一括で:
 
 ```python
-result = gfem.Study.load("tests/models/slab_3layer.yaml").solve()
+result = facetsetfem.Study.load("tests/models/slab_3layer.yaml").solve()
 ```
 
 **完全電極モデル**（M11。SPEC §2.5）。電極の板は等電位で、皮膚との境目に接触インピーダンス
@@ -185,9 +185,9 @@ GUI では電極ページの「電極のモデル」と「接触インピーダ�
 刺激装置で測った電極間抵抗に合わせるか、何通りかの値で解いて結論が変わらないかを確かめる:
 
 ```python
-fit = gfem.fit_contact_impedance(study, measured_ohm=1200.0)   # 実測の電極間抵抗に合わせる
+fit = facetsetfem.fit_contact_impedance(study, measured_ohm=1200.0)   # 実測の電極間抵抗に合わせる
 print(fit.contact_impedance, fit.evaluations)                   # 数回の求解で収まる
-table = gfem.sweep(study, {"contact_impedance": [0.001, 0.01, 0.1]})   # 何通りかで比べる
+table = facetsetfem.sweep(study, {"contact_impedance": [0.001, 0.01, 0.1]})   # 何通りかで比べる
 ```
 
 縁のピークを使うときは、電極の縁のメッシュが十分細かいか（要素の大きさ < ℓ = zσ）を確かめる。
@@ -196,8 +196,8 @@ table = gfem.sweep(study, {"contact_impedance": [0.001, 0.01, 0.1]})   # 何通�
 パラメータスタディ（M7）。σ・刺激電流・電極の面・ソルバ設定を振って一括で解く:
 
 ```python
-study = gfem.Study.load("tests/models/slab_3layer.yaml")
-table = gfem.sweep(study, {"sigma.2": [0.02, 0.04], "current": [1e-3, 2e-3]})
+study = facetsetfem.Study.load("tests/models/slab_3layer.yaml")
+table = facetsetfem.sweep(study, {"sigma.2": [0.02, 0.04], "current": [1e-3, 2e-3]})
 table.write_csv("sweep.csv")
 print(table.rows[0]["impedance_ohm"])
 ```
@@ -208,9 +208,9 @@ print(table.rows[0]["impedance_ohm"])
 組織物性のプリセット（M7）:
 
 ```python
-gfem.tissue("muscle").sigma     # 0.35
-gfem.tissue_names()             # 使える名前の一覧
-library = gfem.load_library("my_tissues.yaml")   # 自前の表に差し替える
+facetsetfem.tissue("muscle").sigma     # 0.35
+facetsetfem.tissue_names()             # 使える名前の一覧
+library = facetsetfem.load_library("my_tissues.yaml")   # 自前の表に差し替える
 ```
 
 **同梱の値は桁と相対関係を掴むための出発点で、文献データベースではない。**
@@ -269,18 +269,18 @@ RTX A6000 / 20 コア、release ビルドでの目安:
 表と測定条件は SPEC §8 M4〜M6 と §4.5。計測は次のコマンドで回せる:
 
 ```bash
-cargo test --release -p gfem-core --test scaling -- --ignored --nocapture
-cargo test --release -p gfem-core --test amg -- --ignored --nocapture      # AMG と Jacobi の比較
-cargo test --release -p gfem-cuda -- --ignored --nocapture   # GPU の計測と 1000 万節点
-cargo test --release -p gfem-core --test complete_electrode -- --include-ignored --nocapture   # 完全電極モデルの解析解
+cargo test --release -p facetsetfem-core --test scaling -- --ignored --nocapture
+cargo test --release -p facetsetfem-core --test amg -- --ignored --nocapture      # AMG と Jacobi の比較
+cargo test --release -p facetsetfem-cuda -- --ignored --nocapture   # GPU の計測と 1000 万節点
+cargo test --release -p facetsetfem-core --test complete_electrode -- --include-ignored --nocapture   # 完全電極モデルの解析解
 ```
 
 使える GPU は Python から確認できる:
 
 ```python
-import gfem
-print(gfem.describe_gpus())
-print(gfem.cuda_check(10_000_000))   # この規模を GPU に載せられるか（None なら OK）
+import facetsetfem
+print(facetsetfem.describe_gpus())
+print(facetsetfem.cuda_check(10_000_000))   # この規模を GPU に載せられるか（None なら OK）
 ```
 
 ## 正しさの裏づけ
@@ -371,7 +371,7 @@ export PATH="$HOME/.cargo/bin:$PATH"
 | Python 拡張のビルド（開発時） | `.venv/Scripts/maturin.exe develop --release` |
 | Python のテスト | `.venv/Scripts/python.exe -m pytest` |
 | サンプルモデルの再生成 | `.venv/Scripts/python.exe scripts/make_sample_mesh.py` |
-| GUI 起動 | `.venv/Scripts/python.exe -m gfem.gui [case.yaml \| model.bdf [--unit mm]]` |
+| GUI 起動 | `.venv/Scripts/python.exe -m facetsetfem.gui [case.yaml \| model.bdf [--unit mm]]` |
 | 配布用 wheel の作成 | `.venv/Scripts/python.exe scripts/build_release.py` |
 
 `maturin develop` は `VIRTUAL_ENV` を見るので、Git Bash からは環境変数を明示するのが確実
@@ -462,7 +462,7 @@ M12 は完了（ケースファイルの `mesh.element_order: 2`、GUI の解析
 
 - **定電圧刺激**（電極の電圧を指定する）。重ね合わせの形なら、コンダクタンス行列を使わずに
   板の電位を与えるだけで入る（SPEC §2.5 の「このモデルの限界」）
-- **GUI からの接触インピーダンスの合わせ込み**。いまは Python の `gfem.fit_contact_impedance` だけ。
+- **GUI からの接触インピーダンスの合わせ込み**。いまは Python の `facetsetfem.fit_contact_impedance` だけ。
   1 回ごとに丸ごと解くので、パラメータスタディと同じくワーカースレッドで進捗を出す形になる
 - **実際の頭部モデルでの確認**。縁の分解能（ℓ = zσ と電極面の要素の大きさ）がどの程度足りるか、
   AMG の反復回数が導電率の大きなコントラストでどうなるか
