@@ -101,8 +101,10 @@ impl ElectrodeModel {
                 ),
             )
             .with_hint(crate::tr!(
-                "The contact impedance is used only by complete_electrode (SPEC §2.5).                  Either set distribution: complete_electrode or remove contact_impedance",
-                "接触インピーダンスを使うのは complete_electrode だけです（SPEC §2.5）。                 distribution: complete_electrode にするか、contact_impedance を消してください"
+                "The contact impedance is used only by complete_electrode (SPEC §2.5). \
+                 Either set distribution: complete_electrode or remove contact_impedance",
+                "接触インピーダンスを使うのは complete_electrode だけです（SPEC §2.5）。\
+                 distribution: complete_electrode にするか、contact_impedance を消してください"
             ))),
             ("complete_electrode", Some(z)) => Ok(ElectrodeModel::Complete {
                 contact_impedance: z,
@@ -115,8 +117,10 @@ impl ElectrodeModel {
                 ),
             )
             .with_hint(crate::tr!(
-                "Give contact_impedance in Ω·m² (e.g. 0.01). Fitting it to the measured                  inter-electrode resistance is the most reliable way (SPEC §2.5)",
-                "contact_impedance を Ω·m² で指定してください（例: 0.01）。                 実測の電極間抵抗に合わせて決めるのが確実です（SPEC §2.5）"
+                "Give contact_impedance in Ω·m² (e.g. 0.01). Fitting it to the measured \
+                 inter-electrode resistance is the most reliable way (SPEC §2.5)",
+                "contact_impedance を Ω·m² で指定してください（例: 0.01）。\
+                 実測の電極間抵抗に合わせて決めるのが確実です（SPEC §2.5）"
             ))),
             (other, _) => Err(FacetSetFemError::new(
                 ErrorKind::Case,
@@ -903,8 +907,10 @@ impl Case {
                         ),
                     )
                     .with_hint(crate::tr!(
-                        "Give the contact impedance as a positive value in Ω·m² (SPEC §2.5).                          For an ideal equipotential electrode use a small positive value instead of 0",
-                        "接触インピーダンスは Ω·m² の正の値で指定してください（SPEC §2.5）。                         理想的な等電位電極にしたいときは、0 ではなく小さな正の値にしてください"
+                        "Give the contact impedance as a positive value in Ω·m² (SPEC §2.5). \
+                         For an ideal equipotential electrode use a small positive value instead of 0",
+                        "接触インピーダンスは Ω·m² の正の値で指定してください（SPEC §2.5）。\
+                         理想的な等電位電極にしたいときは、0 ではなく小さな正の値にしてください"
                     )),
                 );
             }

@@ -187,34 +187,7 @@ impl CoarseSolver {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// 1 次元格子ラプラシアン（全 Neumann、零空間は定数）。
-    fn laplacian_1d(n: usize) -> CsrMatrix {
-        let mut row_ptr = vec![0usize];
-        let mut col_idx: Vec<u32> = Vec::new();
-        let mut values: Vec<f64> = Vec::new();
-        for i in 0..n {
-            let mut diag = 0.0;
-            if i > 0 {
-                col_idx.push(i as u32 - 1);
-                values.push(-1.0);
-                diag += 1.0;
-            }
-            let slot = col_idx.len();
-            col_idx.push(i as u32);
-            values.push(0.0);
-            if i + 1 < n {
-                col_idx.push(i as u32 + 1);
-                values.push(-1.0);
-                diag += 1.0;
-            }
-            values[slot] = diag;
-            row_ptr.push(col_idx.len());
-        }
-        let mut m = CsrMatrix::from_structure(n, row_ptr, col_idx);
-        m.values_mut().copy_from_slice(&values);
-        m
-    }
+    use crate::testing::laplacian_1d;
 
     #[test]
     fn solves_a_singular_system_exactly() {

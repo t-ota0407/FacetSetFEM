@@ -10,6 +10,10 @@
 //! cargo test -p facetsetfem-cuda --release
 //! ```
 
+#[path = "../../facetsetfem-core/tests/common/mod.rs"]
+mod common;
+
+use common::laplacian_1d;
 use facetsetfem_core::assemble::CsrMatrix;
 use facetsetfem_core::solver::reduce::BLOCK;
 use facetsetfem_core::solver::{CpuParallel, CpuSerial, LinearBackend};
@@ -40,35 +44,6 @@ macro_rules! gpu_or_skip {
             None => return,
         }
     };
-}
-
-/// 1 次元格子ラプラシアン（全 Neumann）。零空間がちょうど定数ベクトル。
-fn laplacian_1d(n: usize) -> CsrMatrix {
-    let mut row_ptr = vec![0usize];
-    let mut col_idx: Vec<u32> = Vec::new();
-    let mut values: Vec<f64> = Vec::new();
-    for i in 0..n {
-        let mut entries: Vec<(u32, f64)> = Vec::new();
-        let mut diag = 0.0;
-        if i > 0 {
-            entries.push(((i - 1) as u32, -1.0));
-            diag += 1.0;
-        }
-        if i + 1 < n {
-            entries.push(((i + 1) as u32, -1.0));
-            diag += 1.0;
-        }
-        entries.push((i as u32, diag));
-        entries.sort_by_key(|&(c, _)| c);
-        for (c, v) in entries {
-            col_idx.push(c);
-            values.push(v);
-        }
-        row_ptr.push(col_idx.len());
-    }
-    let mut m = CsrMatrix::from_structure(n, row_ptr, col_idx);
-    m.values_mut().copy_from_slice(&values);
-    m
 }
 
 /// 丸めが効きやすい、桁の散らばった試験ベクトル。

@@ -9,6 +9,7 @@
 
 #![allow(dead_code)] // テストファイルごとに使う関数が違う
 
+use facetsetfem_core::assemble::CsrMatrix;
 use facetsetfem_core::element::ElementKind;
 use facetsetfem_core::mesh::{ElementBlock, Mesh, Nodes, PropId, Property};
 use facetsetfem_core::units::LengthUnit;
@@ -840,4 +841,35 @@ pub fn centroid(mesh: &Mesh, element: usize) -> [f64; 3] {
         }
     }
     c
+}
+
+/// 1 次元の格子ラプラシアン（全 Neumann）。`tridiag(−1, 2, −1)` の両端の対角を 1 にしたもの。
+///
+/// 零空間がちょうど定数ベクトルになる。ユニットテスト用の `facetsetfem_core` 内の
+/// `testing::laplacian_1d` と同じ行列（結合テストは別クレートなので、そちらは使えない）。
+pub fn laplacian_1d(n: usize) -> CsrMatrix {
+    let mut row_ptr = vec![0usize];
+    let mut col_idx: Vec<u32> = Vec::new();
+    let mut values: Vec<f64> = Vec::new();
+    for i in 0..n {
+        let mut diag = 0.0;
+        if i > 0 {
+            col_idx.push(i as u32 - 1);
+            values.push(-1.0);
+            diag += 1.0;
+        }
+        let slot = col_idx.len();
+        col_idx.push(i as u32);
+        values.push(0.0);
+        if i + 1 < n {
+            col_idx.push(i as u32 + 1);
+            values.push(-1.0);
+            diag += 1.0;
+        }
+        values[slot] = diag;
+        row_ptr.push(col_idx.len());
+    }
+    let mut m = CsrMatrix::from_structure(n, row_ptr, col_idx);
+    m.values_mut().copy_from_slice(&values);
+    m
 }

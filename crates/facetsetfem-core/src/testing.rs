@@ -1,9 +1,11 @@
-//! ユニットテストで使う小さなメッシュ（`cfg(test)` のときだけ入る）。
+//! ユニットテストで使う小さなメッシュと行列（`cfg(test)` のときだけ入る）。
 //!
 //! 以前は同じ Kuhn 分割の生成が、各モジュールのテストに 4 か所コピーされていた。
+//! 1 次元ラプラシアン（[`laplacian_1d`]）も CG と AMG のテストに 4 か所あった。
 //! 結合テスト（`tests/`）は別のクレートとしてビルドされるので、ここは使えない。
 //! そちらは `tests/common` にある。
 
+use crate::assemble::CsrMatrix;
 use crate::io::nastran::read_nastran_from;
 use crate::mesh::Mesh;
 use crate::units::LengthUnit;
@@ -93,4 +95,35 @@ fn the_kuhn_box_fills_its_volume_with_positive_tetrahedra() {
     assert!(volumes.iter().all(|&v| v > 0.0), "負の体積の四面体がある");
     let total: f64 = volumes.iter().sum();
     assert!((total - 6.0).abs() < 1e-12, "体積 {total}");
+}
+
+/// 1 次元の格子ラプラシアン（全 Neumann）。`tridiag(−1, 2, −1)` の両端の対角を 1 にしたもの。
+///
+/// 零空間はちょうど定数ベクトルなので、射影 CG と AMG の検証にそのまま使える。
+/// 列番号は行ごとに昇順。
+pub(crate) fn laplacian_1d(n: usize) -> CsrMatrix {
+    let mut row_ptr = vec![0usize];
+    let mut col_idx: Vec<u32> = Vec::new();
+    let mut values: Vec<f64> = Vec::new();
+    for i in 0..n {
+        let mut diag = 0.0;
+        if i > 0 {
+            col_idx.push(i as u32 - 1);
+            values.push(-1.0);
+            diag += 1.0;
+        }
+        let slot = col_idx.len();
+        col_idx.push(i as u32);
+        values.push(0.0);
+        if i + 1 < n {
+            col_idx.push(i as u32 + 1);
+            values.push(-1.0);
+            diag += 1.0;
+        }
+        values[slot] = diag;
+        row_ptr.push(col_idx.len());
+    }
+    let mut m = CsrMatrix::from_structure(n, row_ptr, col_idx);
+    m.values_mut().copy_from_slice(&values);
+    m
 }

@@ -388,37 +388,7 @@ mod tests {
     use super::*;
     use crate::case::{Backend, Preconditioner};
     use crate::solver::backend::CpuSerial;
-
-    /// 1 次元の格子ラプラシアン（全 Neumann）。K = tridiag(−1, 2, −1) の端を 1 にしたもの。
-    ///
-    /// 零空間はちょうど定数ベクトルなので、射影 CG の検証にそのまま使える。
-    fn laplacian_1d(n: usize) -> CsrMatrix {
-        let mut row_ptr = vec![0usize];
-        let mut col_idx: Vec<u32> = Vec::new();
-        let mut values: Vec<f64> = Vec::new();
-        for i in 0..n {
-            let mut entries: Vec<(u32, f64)> = Vec::new();
-            let mut diag = 0.0;
-            if i > 0 {
-                entries.push((i as u32 - 1, -1.0));
-                diag += 1.0;
-            }
-            if i + 1 < n {
-                entries.push((i as u32 + 1, -1.0));
-                diag += 1.0;
-            }
-            entries.push((i as u32, diag));
-            entries.sort_by_key(|&(c, _)| c);
-            for (c, v) in entries {
-                col_idx.push(c);
-                values.push(v);
-            }
-            row_ptr.push(col_idx.len());
-        }
-        let mut m = CsrMatrix::from_structure(n, row_ptr, col_idx);
-        m.values_mut().copy_from_slice(&values);
-        m
-    }
+    use crate::testing::laplacian_1d;
 
     fn options() -> SolverOptions {
         SolverOptions {

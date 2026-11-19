@@ -25,6 +25,7 @@
 //! 「A・B・C は換算済み、GRID は未換算」のような食い違いが起きる。
 
 use crate::error::{FacetSetFemError, Result};
+use crate::geom::{cross, norm, sub};
 use std::collections::BTreeMap;
 
 /// 座標系の種類。
@@ -253,20 +254,12 @@ fn build(
     })
 }
 
-fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
-}
-
-fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    ]
-}
-
+/// 単位ベクトルにする。長さが 0（または有限でない）なら `None`。
+///
+/// 差・外積・長さは [`crate::geom`] のものを使う（以前はここに同じ式の写しがあった。
+/// 式の形は同じなので、座標変換の結果はビット単位で変わらない）。
 fn normalize(v: [f64; 3]) -> Option<[f64; 3]> {
-    let length = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+    let length = norm(v);
     if length <= 0.0 || !length.is_finite() {
         return None;
     }

@@ -242,3 +242,86 @@ fn the_message_is_fixed_when_the_error_is_made() {
     let e = with_language(Language::Ja, || LengthUnit::parse("furlong").unwrap_err());
     assert_eq!(e.message(), "長さ単位として解釈できません: \"furlong\"");
 }
+
+/// 文字列リテラルの行に、文の途中の空白の列（3 個以上）が無いことを確かめる。
+///
+/// 行末の `\` 継続が壊れると、次の行の字下げがそのまま文言に入る（「…(SPEC §2.5).␣␣␣…␣For an…」）。
+/// コンパイルもテストも通るので気づきにくく、2026-09 に 4 か所、2026-11 にさらに 3 か所で見つかった。
+/// Nastran の固定幅のカード（空白の後ろが数字）は対象にしない。
+#[test]
+fn no_message_carries_a_run_of_spaces_from_a_broken_line_continuation() {
+    use std::path::{Path, PathBuf};
+
+    fn rust_sources(dir: &Path, out: &mut Vec<PathBuf>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                rust_sources(&path, out);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                out.push(path);
+            }
+        }
+    }
+
+    /// 文の途中の空白の列か: 直前が文字か句読点で、3 個以上の空白のあとに文字が続く。
+    fn has_stray_run(line: &str) -> bool {
+        let chars: Vec<char> = line.chars().collect();
+        let mut i = 0;
+        while i < chars.len() {
+            if chars[i] != ' ' {
+                i += 1;
+                continue;
+            }
+            let start = i;
+            while i < chars.len() && chars[i] == ' ' {
+                i += 1;
+            }
+            let before = start.checked_sub(1).map(|k| chars[k]);
+            let after = chars.get(i).copied();
+            let ends_text = before.is_some_and(|c| c.is_alphabetic() || ".。)）,、:：".contains(c));
+            if i - start >= 3 && ends_text && after.is_some_and(char::is_alphabetic) {
+                return true;
+            }
+        }
+        false
+    }
+
+    assert!(has_stray_run(
+        "\"(SPEC §2.5).          For an ideal electrode\","
+    ));
+    assert!(has_stray_run(
+        "\"指定してください（例: 0.01）。         実測の値\""
+    ));
+    assert!(!has_stray_run("\"CHEXA   1       1       1       2\\n\","));
+    assert!(!has_stray_run(
+        "\"Give it in Ω·m² (e.g. 0.01). Fitting it \\"
+    ));
+
+    // このクレートの隣に facetsetfem-cuda と facetsetfem-py がある
+    let crates = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    let mut sources = Vec::new();
+    for name in ["facetsetfem-core", "facetsetfem-cuda", "facetsetfem-py"] {
+        rust_sources(&crates.join(name).join("src"), &mut sources);
+    }
+    assert!(
+        sources.len() > 50,
+        "ソースが見つかりません: {}",
+        crates.display()
+    );
+
+    let mut found = Vec::new();
+    for path in sources {
+        let text = std::fs::read_to_string(&path).unwrap();
+        for (number, line) in text.lines().enumerate() {
+            let line = line.trim();
+            if line.starts_with('"') && has_stray_run(line) {
+                found.push(format!("{}:{}: {line}", path.display(), number + 1));
+            }
+        }
+    }
+    assert!(
+        found.is_empty(),
+        "文言の途中に空白の列があります（行末の `\\` 継続が壊れていないか確かめること）:\n{}",
+        found.join("\n")
+    );
+}
