@@ -44,7 +44,9 @@ pub mod device;
 mod error;
 
 pub use backend::{CudaBackend, CudaCsr, CudaVector};
-pub use device::{Device, DeviceInfo, MIN_COMPUTE_CAPABILITY, devices};
+pub use device::{
+    Device, DeviceInfo, MIN_COMPUTE_CAPABILITY, devices, driver_present, nvrtc_present,
+};
 
 use facetsetfem_core::case::Preconditioner;
 use facetsetfem_core::solver::{BackendSolver, LinearSolver};
@@ -118,6 +120,11 @@ pub fn can_use_gpu(
             "CUDA が使える GPU が見つかりませんでした"
         ));
     }
+    // GPU とドライバがあっても、カーネルをコンパイルする NVRTC が無ければ使えない
+    // （ここで止めないと、コンパイルの時点で cudarc が panic する）
+    if !nvrtc_present() {
+        return Err(device::nvrtc_missing_reason());
+    }
     let usable: Vec<&DeviceInfo> = all.iter().filter(|d| d.supports_f64()).collect();
     let Some(&best) = usable
         .iter()
@@ -182,6 +189,23 @@ pub fn solver_or_fallback(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn probing_without_the_cuda_libraries_reports_no_gpu_instead_of_panicking() {
+        // ドライバの共有ライブラリが無い PC では、cudarc は最初の呼び出しで panic する。
+        // 列挙と判定はそれを先に確かめ、「GPU 無し」として CPU に落とす（SPEC §4.4）。
+        // ドライバがある機械では、ふつうに GPU を数えるだけ
+        let found = devices();
+        if !driver_present() {
+            assert!(found.is_empty());
+            let reason = can_use_gpu(1_000, None, Preconditioner::Jacobi).unwrap_err();
+            assert!(!reason.is_empty());
+            let (solver, note) = solver_or_fallback(1_000, None, Preconditioner::Jacobi);
+            assert!(solver.is_none());
+            assert!(note.is_some());
+            assert!(Device::new(0).is_err());
+        }
+    }
 
     #[test]
     fn amg_needs_room_for_its_hierarchy() {

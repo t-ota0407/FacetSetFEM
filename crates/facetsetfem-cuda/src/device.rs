@@ -12,7 +12,7 @@ use crate::error::cuda_error;
 use cudarc::driver::{CudaContext, CudaFunction, CudaModule, CudaStream};
 use cudarc::nvrtc::{CompileOptions, compile_ptx_with_opts};
 use facetsetfem_core::error::{FacetSetFemError, Result};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// 倍精度演算に必要な Compute Capability（SPEC §4.4）。
 pub const MIN_COMPUTE_CAPABILITY: (i32, i32) = (6, 0);
@@ -45,8 +45,50 @@ impl DeviceInfo {
     }
 }
 
-/// 見えている GPU を列挙する。CUDA が無い環境では空を返す。
+/// CUDA ドライバの共有ライブラリ（Windows は `nvcuda.dll`、Linux は `libcuda.so`）を読み込めるか。
+///
+/// cudarc は共有ライブラリを実行時に読み込む設定（`fallback-dynamic-loading`）で使っている。
+/// その読み込みは最初の API 呼び出しのときに行われ、**見つからないとエラーを返さずに panic する**。
+/// NVIDIA のドライバが入っていない PC では、GPU を数える（[`devices`]）だけで panic し、
+/// Python からは `PanicException`（`Exception` の派生ではない）になって GUI が起動できなかった
+/// （SPEC §8 の「2026-11」）。ドライバに触る前に必ずここを通し、無ければ「GPU 無し」として扱う。
+///
+/// 結果はプロセスの間覚えておく（ライブラリを開いて閉じるので、毎回は調べない）。
+pub fn driver_present() -> bool {
+    static PRESENT: OnceLock<bool> = OnceLock::new();
+    // SAFETY: 候補の名前で共有ライブラリを開いて閉じるだけ。cudarc 自身が読み込むときに
+    // 行う探索と同じもので、ドライバの関数は 1 つも呼ばない
+    *PRESENT.get_or_init(|| unsafe { cudarc::driver::sys::is_culib_present() })
+}
+
+/// カーネルのコンパイラ NVRTC の共有ライブラリ（`nvrtc64_120_0.dll` など）を読み込めるか。
+///
+/// NVRTC は NVIDIA のドライバには入っておらず、CUDA Toolkit（または NVRTC の再配布パッケージ）
+/// が要る。GPU とドライバがあっても NVRTC が無いと、カーネルをコンパイルする時点で
+/// [`driver_present`] と同じ理由で panic するので、GPU を使うと決める前にここで確かめる。
+pub fn nvrtc_present() -> bool {
+    static PRESENT: OnceLock<bool> = OnceLock::new();
+    // SAFETY: [`driver_present`] と同じ。開いて閉じるだけで、NVRTC の関数は呼ばない
+    *PRESENT.get_or_init(|| unsafe { cudarc::nvrtc::sys::is_culib_present() })
+}
+
+/// NVRTC が無いときの説明（GPU を使わない理由として利用者に見せる）。
+pub(crate) fn nvrtc_missing_reason() -> String {
+    facetsetfem_core::tr!(
+        "The CUDA kernel compiler (NVRTC) could not be loaded. Running on the GPU needs the \
+         NVRTC library of CUDA Toolkit 12.x (e.g. nvrtc64_120_0.dll on PATH) in addition to \
+         the NVIDIA driver",
+        "CUDA のカーネルコンパイラ（NVRTC）を読み込めませんでした。GPU で解くには、NVIDIA の\
+         ドライバに加えて CUDA Toolkit 12.x の NVRTC（nvrtc64_120_0.dll など。PATH が通っていること）\
+         が要ります"
+    )
+}
+
+/// 見えている GPU を列挙する。CUDA が無い環境（ドライバが入っていない場合を含む）では空を返す。
 pub fn devices() -> Vec<DeviceInfo> {
+    if !driver_present() {
+        return Vec::new();
+    }
     let Ok(count) = CudaContext::device_count() else {
         return Vec::new();
     };
@@ -136,6 +178,27 @@ impl Device {
     ///
     /// ふつうは使い回す [`Device::shared`] を使う。こちらは呼ぶたびに 0.2 秒ほどかかる。
     pub fn new(ordinal: usize) -> Result<Self> {
+        // 共有ライブラリが無いと cudarc は panic する。触る前に確かめてエラーにする
+        if !driver_present() {
+            return Err(FacetSetFemError::unsupported(facetsetfem_core::tr!(
+                "The CUDA driver library could not be loaded, so GPU {ordinal} cannot be used",
+                "CUDA のドライバを読み込めないので、GPU {ordinal} は使えません"
+            ))
+            .with_hint(facetsetfem_core::tr!(
+                "Install the NVIDIA driver, or use backend: cpu_parallel",
+                "NVIDIA のドライバを入れるか、backend: cpu_parallel を使ってください"
+            )));
+        }
+        if !nvrtc_present() {
+            return Err(
+                FacetSetFemError::unsupported(nvrtc_missing_reason()).with_hint(
+                    facetsetfem_core::tr!(
+                        "Install CUDA Toolkit 12.x, or use backend: cpu_parallel",
+                        "CUDA Toolkit 12.x を入れるか、backend: cpu_parallel を使ってください"
+                    ),
+                ),
+            );
+        }
         let ctx = CudaContext::new(ordinal).map_err(|e| {
             cuda_error(
                 facetsetfem_core::tr!(
