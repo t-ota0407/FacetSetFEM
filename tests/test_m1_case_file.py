@@ -130,6 +130,39 @@ def test_round_trip_preserves_the_settings(case_dir, tmp_path):
     assert again.to_dict() == study.to_dict()
 
 
+def test_the_wedge_order_of_the_vtu_is_kept_only_when_given(case_dir, tmp_path):
+    """`output.vtu_wedge_order` は書いたときだけ残す（書かなければ既定の vtk9.7。SPEC §5.5）。"""
+    study = facetsetfem.Study.load(case_dir / "case.yaml")
+    assert study.output.vtu_wedge_order is None
+    assert "vtu_wedge_order" not in study.to_dict()["output"]
+
+    path = case_dir / "case.yaml"
+    path.write_text(
+        path.read_text(encoding="utf-8").replace(
+            "  vtu: result.vtu\n", "  vtu: result.vtu\n  vtu_wedge_order: vtk9.6\n"
+        ),
+        encoding="utf-8",
+    )
+    study = facetsetfem.Study.load(path)
+    assert study.output.vtu_wedge_order == "vtk9.6"
+    out = tmp_path / "saved.yaml"
+    study.save(out)
+    assert yaml.safe_load(out.read_text(encoding="utf-8"))["output"]["vtu_wedge_order"] == "vtk9.6"
+    assert facetsetfem.Study.load(out).to_dict() == study.to_dict()
+
+
+@pytest.mark.parametrize("value", ["paraview6.1", "9.7"])
+def test_an_unknown_wedge_order_is_reported_with_its_place(tmp_path, value):
+    message = _load_bad(
+        tmp_path,
+        "version: 1\nmesh: {file: m.bdf, length_unit: mm}\n"
+        f"output: {{vtu: r.vtu, vtu_wedge_order: {value}}}\n",
+    )
+    assert "vtu_wedge_order" in message and value in message
+    assert "vtk9.7 / vtk9.6" in message and "ParaView 6.2" in message
+    assert "場所" in message and "対処" in message
+
+
 def test_nastran_file_is_never_modified(case_dir):
     """解析条件は YAML に持ち、メッシュファイルは触らない（SPEC §3.3）。"""
     bdf = case_dir / "slab_3layer.bdf"

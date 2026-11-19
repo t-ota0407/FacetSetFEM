@@ -37,8 +37,10 @@ from ._core import (
     distribution_choices,
     parse_backend,
     parse_preconditioner,
+    parse_wedge_order,
     preconditioner_choices,
     read_nastran,
+    wedge_order_choices,
 )
 from .i18n import error_text, tr
 
@@ -310,6 +312,9 @@ class OutputSpec:
 
     #: 結果の VTU（ParaView で開ける）
     vtu: str | None = None
+    #: VTU に書く五面体（CPENTA）の節点の並び（SPEC §5.5）。開く ParaView の版で選ぶ:
+    #: 6.2 以降なら "vtk9.7"、6.1 以前なら "vtk9.6"。None なら既定（"vtk9.7"）
+    vtu_wedge_order: str | None = None
     #: 領域統計 CSV（SPEC §5.2）
     region_stats: str | None = None
     #: 収束履歴 CSV
@@ -321,7 +326,7 @@ class OutputSpec:
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {}
-        for key in ("vtu", "region_stats", "convergence", "summary_json"):
+        for key in ("vtu", "vtu_wedge_order", "region_stats", "convergence", "summary_json"):
             value = getattr(self, key)
             if value:
                 d[key] = value
@@ -550,7 +555,7 @@ class Study:
         written: list[Path] = []
         if self.output.vtu:
             path = base / self.output.vtu
-            result.write_vtu(path)
+            result.write_vtu(path, wedge_order=self.output.vtu_wedge_order)
             written.append(path)
         if self.output.region_stats:
             path = base / self.output.region_stats
@@ -854,8 +859,22 @@ def _parses(parse: Callable[[str], str], value: str) -> bool:
 def _output_from(data: Any, where_: str) -> OutputSpec:
     if not isinstance(data, dict):
         raise _error(tr("output is not a mapping"), where_, tr("See the example in SPEC §3.3"))
+    wedge_order = data.get("vtu_wedge_order")
+    if wedge_order is not None:
+        if not isinstance(wedge_order, str) or not _parses(parse_wedge_order, wedge_order):
+            raise _error(
+                tr("Unknown order of wedge (CPENTA) nodes: {o}", o=wedge_order),
+                _in(where_, "vtu_wedge_order"),
+                tr(
+                    "Use one of {choices}: vtk9.7 to open the VTU in ParaView 6.2 or later "
+                    "(VTK 9.7 or later), vtk9.6 for ParaView 6.1 or earlier (SPEC §5.5)",
+                    choices=" / ".join(wedge_order_choices()),
+                ),
+            )
+        wedge_order = parse_wedge_order(wedge_order)
     return OutputSpec(
         vtu=data.get("vtu"),
+        vtu_wedge_order=wedge_order,
         region_stats=data.get("region_stats"),
         convergence=data.get("convergence"),
         summary_json=data.get("summary_json"),

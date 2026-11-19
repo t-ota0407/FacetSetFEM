@@ -41,7 +41,7 @@ pub use case::{
     Case, Electrode, ElectrodeModel, ElectrodeRole, Preconditioner, ReferencePotential,
     SolverOptions,
 };
-pub use element::ElementKind;
+pub use element::{ElementKind, WedgeOrder};
 pub use error::{ErrorKind, FacetSetFemError, Location, Result};
 pub use i18n::{Language, language, set_language, with_language};
 pub use io::nastran::{ReadReport, read_nastran};

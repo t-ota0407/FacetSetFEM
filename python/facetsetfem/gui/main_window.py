@@ -43,8 +43,8 @@ from PySide6.QtWidgets import (
 import numpy as np
 import pyvista as pv
 
-from .. import read_nastran
-from ..i18n import LANGUAGES, language, set_language, tr
+from .. import read_nastran, wedge_order_choices
+from ..i18n import LANGUAGES, N_, language, set_language, tr
 from .busy import BusyOverlay, busy_scope, run_in_thread
 from .pages import ElectrodePage, MeshPage, RegionPage, ResultPage, SolverPage
 from .solver_thread import SolverThread
@@ -150,6 +150,28 @@ SECTION_CONTEXT_OPACITY = 0.12
 #: 流線を重ねている間の外表面の不透明度。流線は体の中を通るので、外表面が
 #: 不透明だと 1 本も見えない（以前は「重ねる」を入れても何も変わらなかった）
 STREAMLINE_SURFACE_OPACITY = 0.3
+
+#: VTU の保存ダイアログで選ぶファイルの種類。五面体（CPENTA）の節点の並び → 表示名（SPEC §5.5）。
+#: 開く ParaView の版で正しい並びが変わる（VTK 9.7 で約束が変わった）。並びの名前と既定は
+#: Rust 側にあり（`wedge_order_choices()`）、ここに置くのは表示名だけ
+VTU_WEDGE_FILTERS = {
+    "vtk9.7": N_("VTU for ParaView 6.2 or later (*.vtu)"),
+    "vtk9.6": N_("VTU for ParaView 6.1 or earlier (*.vtu)"),
+}
+#: 五面体が無いときのファイルの種類（並びはどれでも同じなので選ばせない）
+VTU_FILTER = "VTU (*.vtu)"
+
+
+def vtu_save_filters(session: Session) -> tuple[list[str], list[str | None], str]:
+    """VTU の保存ダイアログのファイルの種類 `(表示名, 五面体の並び, 初期選択)`（SPEC §5.5）。
+
+    五面体を含むときだけ、開く ParaView の版（＝五面体の節点の並び）を選ばせる。
+    """
+    if not session.has_wedges():
+        return [VTU_FILTER], [None], VTU_FILTER
+    orders: list[str | None] = list(wedge_order_choices())
+    filters = [tr(VTU_WEDGE_FILTERS[order]) for order in orders]
+    return filters, orders, filters[orders.index(session.vtu_wedge_order())]
 
 
 def draw_on_top(actor) -> None:
@@ -585,15 +607,19 @@ class MainWindow(QMainWindow):
         if self.session.solution is None:
             QMessageBox.information(self, tr("Export VTU"), tr("Solve first (Run → Solve, F5)."))
             return
-        path, _ = QFileDialog.getSaveFileName(self, tr("Export to VTU"), "result.vtu", "VTU (*.vtu)")
+        filters, orders, selected = vtu_save_filters(self.session)
+        path, chosen = QFileDialog.getSaveFileName(
+            self, tr("Export to VTU"), "result.vtu", ";;".join(filters), selected
+        )
         if path:
-            self.export_vtu(path)
+            self.export_vtu(path, orders[filters.index(chosen)] if chosen in filters else None)
 
-    def export_vtu(self, path: str | Path) -> None:
+    def export_vtu(self, path: str | Path, wedge_order: str | None = None) -> None:
+        """結果を VTU に書く。`wedge_order` は五面体の節点の並び（省けばセッションの既定。SPEC §5.5）。"""
         try:
             self.run_busy(
                 tr("Writing the VTU"),
-                lambda: self.session.solution.write_vtu(path),
+                lambda: self.session.write_vtu(path, wedge_order),
                 Path(path).name,
             )
         except Exception as exc:  # noqa: BLE001

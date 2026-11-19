@@ -309,6 +309,131 @@ def test_solid_cells_feed_pyvista_directly(tmp_path, kind):
     assert grid.volume == pytest.approx(volume, rel=1e-9)
 
 
+# --- 五面体の節点の並びと VTK の版（SPEC §5.5）--------------------------------
+#
+# VTK 9.7 で VTK_WEDGE の並びの約束が逆になった。並びを切り替える版の境目は Rust 側の
+# 1 か所（`WedgeOrder::for_vtk`）にだけ置き、ここでは境目を書かずに「入っている VTK で
+# 体積が正になる並び」を実際に確かめる。同じテストを VTK 9.6 と 9.7 の両方で回して
+# 確かめた（SPEC §8 の「2026-11」）。
+
+
+def _signed_cell_volumes(grid) -> np.ndarray:
+    """VTK が計算する符号付きのセル体積（vtkCellSizeFilter）。裏返ったセルは負になる。"""
+    return grid.compute_cell_sizes(length=False, area=False, volume=True).cell_data["Volume"]
+
+
+def test_exactly_one_wedge_order_suits_the_installed_vtk(tmp_path):
+    """入っている VTK で体積が正になる並びはちょうど 1 つで、省略時はそれを選ぶ。"""
+    pv = pytest.importorskip("pyvista")
+    mesh = write_deck(tmp_path, "penta")
+    points = mesh.points()
+    suits = []
+    for order in facetsetfem.wedge_order_choices():
+        cells, types = mesh.solid_cells(wedge_order=order)
+        volumes = _signed_cell_volumes(pv.UnstructuredGrid(cells, types, points))
+        assert np.all(volumes > 0) or np.all(volumes < 0), f"{order}: 向きが揃っていません"
+        if np.all(volumes > 0):
+            suits.append(order)
+    assert len(suits) == 1, suits
+
+    chosen, _ = mesh.solid_cells()
+    expected, _ = mesh.solid_cells(wedge_order=suits[0])
+    assert np.array_equal(chosen, expected)
+
+
+def test_a_vtu_reads_the_right_way_round_only_in_a_matching_vtk(tmp_path):
+    """VTU は読む側の VTK の版で解釈が変わる。合う並びで書けば体積が正、合わなければ負。
+
+    VTU には約束の印が無く（ファイルの版の番号も同じ）、VTK 9.7 のリーダは古い並びの
+    ファイルを読み替えない。だから開く ParaView の版に合わせて書く側で選ぶ（SPEC §5.5）。
+    """
+    pv = pytest.importorskip("pyvista")
+    mesh = write_deck(tmp_path, "penta")
+    installed, _ = mesh.solid_cells()  # 入っている VTK に合う並び（上のテスト）
+    for order in facetsetfem.wedge_order_choices():
+        out = tmp_path / f"{order}.vtu"
+        mesh.write_vtu(out, wedge_order=order)
+        grid = pv.read(out)
+        volumes = _signed_cell_volumes(grid)[grid.celltypes == 13]
+        assert len(volumes) == mesh.n_solid_elements
+        cells, _ = mesh.solid_cells(wedge_order=order)
+        if np.array_equal(cells, installed):
+            assert np.all(volumes > 0), order
+        else:
+            assert np.all(volumes < 0), order
+
+
+def test_the_vtu_is_written_for_paraview_6_2_or_later_by_default(tmp_path):
+    """VTU の既定は VTK 9.7 以降（ParaView 6.2 以降）の並び（SPEC §5.5）。"""
+    pv = pytest.importorskip("pyvista")
+    mesh = write_deck(tmp_path, "penta")
+    assert facetsetfem.wedge_order_choices() == ["vtk9.7", "vtk9.6"]
+    written = {}
+    for name, order in [("default", None), ("vtk9.7", "vtk9.7"), ("vtk9.6", "vtk9.6")]:
+        out = tmp_path / f"{name}.vtu"
+        if order is None:
+            mesh.write_vtu(out)
+        else:
+            mesh.write_vtu(out, wedge_order=order)
+        written[name] = pv.read(out).cells
+    assert np.array_equal(written["default"], written["vtk9.7"])
+    assert not np.array_equal(written["default"], written["vtk9.6"])
+
+
+def test_an_unknown_wedge_order_says_which_names_to_use(tmp_path):
+    mesh = write_deck(tmp_path, "penta")
+    out = tmp_path / "x.vtu"
+    for call in (
+        lambda: mesh.solid_cells(wedge_order="paraview"),
+        lambda: mesh.write_vtu(out, wedge_order="paraview"),
+    ):
+        with pytest.raises(facetsetfem.FacetSetFemError) as excinfo:
+            call()
+        message = str(excinfo.value)
+        assert "paraview" in message and "vtk9.7" in message and "vtk9.6" in message
+        assert "ParaView 6.2" in message, message
+    assert not out.exists(), "解釈できない指定で書き始めない"
+
+
+def test_without_vtk_the_wedge_order_must_be_given(tmp_path, monkeypatch):
+    """VTK を読み込めなければ並びを黙って決めず、指定を求める。五面体が無ければ要らない。"""
+    import sys
+
+    monkeypatch.setitem(sys.modules, "vtkmodules.vtkCommonCore", None)  # import が失敗する
+    penta = write_deck(tmp_path, "penta")
+    with pytest.raises(facetsetfem.FacetSetFemError) as excinfo:
+        penta.solid_cells()
+    assert "wedge_order" in str(excinfo.value)
+    assert "対処" in str(excinfo.value)
+    penta.solid_cells(wedge_order="vtk9.6")  # 指定すれば VTK の版は見ない
+    write_deck(tmp_path, "tet").solid_cells()  # 五面体が無ければ並びはどれでも同じ
+
+
+def test_the_case_file_chooses_the_wedge_order_of_the_vtu(tmp_path):
+    """ケースファイルの `output.vtu_wedge_order` が、解いた後に書く VTU に効く（SPEC §3.3）。"""
+    pv = pytest.importorskip("pyvista")
+    (tmp_path / "slab_penta.bdf").write_text(slab_deck("penta"), encoding="utf-8")
+    materials = "".join(f"  - {{pid: {p}, sigma: {s}}}\n" for p, s in SIGMA.items())
+    (tmp_path / "case.yaml").write_text(
+        "version: 1\n"
+        "mesh: {file: slab_penta.bdf, length_unit: mm}\n"
+        f"materials:\n{materials}"
+        "electrodes:\n"
+        f"  - {{name: E1, role: anode, current: {CURRENT}, faces: {{shell_pids: [{TOP_PID}]}}}}\n"
+        f"  - {{name: E2, role: cathode, current: {CURRENT}, faces: {{shell_pids: [{BOTTOM_PID}]}}}}\n"
+        "output: {vtu: result.vtu, vtu_wedge_order: vtk9.6}\n",
+        encoding="utf-8",
+    )
+    study = facetsetfem.Study.load(tmp_path / "case.yaml")
+    assert study.output.vtu_wedge_order == "vtk9.6"
+    study.solve()
+
+    mesh = facetsetfem.read_nastran(tmp_path / "slab_penta.bdf", length_unit="mm")
+    expected, _ = mesh.solid_cells(wedge_order="vtk9.6")
+    cells = pv.read(tmp_path / "result.vtu").cells
+    assert np.array_equal(cells[: len(expected)], expected)
+
+
 def test_gui_state_shows_a_hex_mesh(tmp_path):
     """GUI のセッション状態も要素種を選ばない（SPEC §6.3）。"""
     pytest.importorskip("pyvista")
@@ -321,6 +446,85 @@ def test_gui_state_shows_a_hex_mesh(tmp_path):
     grid = state.grid()
     assert grid.n_cells == state.mesh.n_solid_elements
     assert "PID" in grid.cell_data
+
+
+def test_the_gui_asks_which_paraview_opens_the_vtu_only_for_wedges(tmp_path):
+    """五面体があるときだけ、VTU の保存ダイアログで開く ParaView の版を選ばせる（SPEC §5.5）。
+
+    初期選択はこのセッションで前回選んだもの → ケースの `output.vtu_wedge_order` → 既定の順。
+    """
+    pytest.importorskip("PySide6")
+    pytest.importorskip("pyvista")
+    from facetsetfem.gui.main_window import VTU_WEDGE_FILTERS, vtu_save_filters
+    from facetsetfem.gui.state import Session
+
+    # Rust 側の選択肢には、どれも表示名がある（選択肢が増えたら表示名も足すこと）
+    assert set(facetsetfem.wedge_order_choices()) == set(VTU_WEDGE_FILTERS)
+
+    def session(kind: str) -> Session:
+        path = tmp_path / f"{kind}.bdf"
+        path.write_text(slab_deck(kind), encoding="utf-8")
+        state = Session()
+        state.open_mesh(path, length_unit="mm")
+        return state
+
+    filters, orders, selected = vtu_save_filters(session("tet"))
+    assert orders == [None] and filters == [selected], "四面体だけなら並びを選ばせない"
+
+    state = session("penta")
+    filters, orders, selected = vtu_save_filters(state)
+    assert orders == ["vtk9.7", "vtk9.6"]
+    assert selected == filters[0] and "ParaView 6.2" in selected
+
+    state.study.output.vtu_wedge_order = "vtk9.6"  # ケースの指定
+    assert vtu_save_filters(state)[2] == filters[1]
+
+    for pid, sigma in SIGMA.items():
+        state.set_conductivity(pid, sigma)
+    state.add_electrode("E1", role="anode", current=CURRENT, shell_pids=[TOP_PID])
+    state.add_electrode("E2", role="cathode", current=CURRENT, shell_pids=[BOTTOM_PID])
+    state.solve()
+    state.write_vtu(tmp_path / "chosen.vtu", "vtk9.7")  # ダイアログで選んだ
+    assert vtu_save_filters(state)[2] == filters[0], "選んだものを次の既定にする"
+    state.write_vtu(tmp_path / "again.vtu")  # 省けば前回の選択
+    pv = pytest.importorskip("pyvista")
+    assert np.array_equal(
+        pv.read(tmp_path / "again.vtu").cells, pv.read(tmp_path / "chosen.vtu").cells
+    )
+
+
+def test_the_file_type_chosen_in_the_save_dialog_reaches_the_vtu(
+    tmp_path, main_window, qt_app, monkeypatch
+):
+    """保存ダイアログで選んだファイルの種類どおりの並びで VTU を書く（SPEC §5.5）。"""
+    pv = pytest.importorskip("pyvista")
+    from facetsetfem.gui import main_window as module
+
+    path = tmp_path / "penta.bdf"
+    path.write_text(slab_deck("penta"), encoding="utf-8")
+    window = main_window
+    window.open_mesh(path, "mm")
+    for pid, sigma in SIGMA.items():
+        window.session.set_conductivity(pid, sigma)
+    window.session.add_electrode("E1", role="anode", current=CURRENT, shell_pids=[TOP_PID])
+    window.session.add_electrode("E2", role="cathode", current=CURRENT, shell_pids=[BOTTOM_PID])
+    window.session.solve()
+
+    asked = {}
+    out = tmp_path / "chosen.vtu"
+
+    def save_dialog(_parent, _caption, _name, filters, selected):
+        asked["filters"], asked["selected"] = filters.split(";;"), selected
+        return str(out), asked["filters"][1]  # 2 つ目（ParaView 6.1 以前）を選ぶ
+
+    monkeypatch.setattr(module.QFileDialog, "getSaveFileName", save_dialog)
+    window.export_vtu_dialog()
+    qt_app.processEvents()
+
+    assert len(asked["filters"]) == 2 and asked["selected"] == asked["filters"][0]
+    assert "6.1" in asked["filters"][1]
+    expected, _ = window.session.mesh.solid_cells(wedge_order="vtk9.6")
+    assert np.array_equal(pv.read(out).cells[: len(expected)], expected)
 
 
 # --- 3. バックエンド ---------------------------------------------------

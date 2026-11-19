@@ -474,8 +474,7 @@ _DISTRIBUTION_OF = {
     "pyvista": "pyvista",
     "pyvistaqt": "pyvistaqt",
     "PySide6": "PySide6",
-    # vtkmodules を提供するのは vtk の配布パッケージ（pyvista はそれに依存しているだけ）。
-    # 上限（vtk<9.7）を置くために pyproject.toml に直接書いている
+    # vtkmodules を提供するのは vtk の配布パッケージ（pyvista はそれに依存しているだけ）
     "vtkmodules": "vtk",
 }
 

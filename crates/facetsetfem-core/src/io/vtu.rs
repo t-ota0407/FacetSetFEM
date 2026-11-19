@@ -12,6 +12,7 @@
 //!
 //! という順で処理する。全配列をメモリ上に二重持ちしないためにこうしている。
 
+use crate::element::WedgeOrder;
 use crate::error::{FacetSetFemError, Result};
 use crate::mesh::Mesh;
 use std::fs::File;
@@ -38,6 +39,9 @@ pub struct VtuOptions {
     pub compress: bool,
     /// 圧縮レベル（0〜9）
     pub level: u32,
+    /// 五面体（CPENTA）の節点の並び。読む側の VTK の版で正しい並びが変わる（SPEC §5.5）。
+    /// 既定は VTK 9.7 以降（ParaView 6.2 以降）
+    pub wedge_order: WedgeOrder,
 }
 
 impl Default for VtuOptions {
@@ -45,6 +49,7 @@ impl Default for VtuOptions {
         Self {
             compress: true,
             level: 6,
+            wedge_order: WedgeOrder::default(),
         }
     }
 }
@@ -191,7 +196,7 @@ pub fn write_vtu(
     for block in mesh.blocks() {
         let nn = block.kind().node_count();
         let ty = block.kind().vtk_cell_type();
-        let order = block.kind().vtk_node_order();
+        let order = block.kind().vtk_node_order(opts.wedge_order);
         for e in 0..block.len() {
             let conn = block.conn_of(e);
             for &local in order {
@@ -587,7 +592,11 @@ mod tests {
         let mesh = two_tets();
         for (name, compress) in [("c.vtu", true), ("u.vtu", false)] {
             let p = tmp_path(name);
-            write_mesh_vtu(&p, &mesh, &VtuOptions { compress, level: 6 }).unwrap();
+            let opts = VtuOptions {
+                compress,
+                ..VtuOptions::default()
+            };
+            write_mesh_vtu(&p, &mesh, &opts).unwrap();
             let bytes = std::fs::read(&p).unwrap();
             let head = String::from_utf8_lossy(&bytes[..600]).to_string();
             assert!(head.contains("NumberOfPoints=\"5\""), "{head}");
@@ -606,15 +615,7 @@ mod tests {
             .map(|i| (i * 31 % 251) as u8)
             .collect();
         let mut out = Out::new(Vec::new());
-        write_block(
-            &mut out,
-            &data,
-            &VtuOptions {
-                compress: true,
-                level: 6,
-            },
-        )
-        .unwrap();
+        write_block(&mut out, &data, &VtuOptions::default()).unwrap();
 
         let blocks: Vec<Vec<u8>> = data
             .chunks(BLOCK_SIZE)
@@ -643,6 +644,7 @@ mod tests {
             &VtuOptions {
                 compress: false,
                 level: 0,
+                ..VtuOptions::default()
             },
         )
         .unwrap();
@@ -654,6 +656,51 @@ mod tests {
             "types 配列が見つかりません"
         );
         std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn wedge_connectivity_follows_the_chosen_vtk_order() {
+        // CPENTA 1 個（節点索引 0〜5 を CPENTA の順に持つ）。圧縮せずに書くと、接続配列は
+        // Int32 の並びがそのままファイルに入る（SPEC §5.5）
+        let mut mesh = two_tets();
+        mesh.nodes = Nodes::new(
+            vec![1, 2, 3, 4, 5, 6],
+            vec![
+                0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, //
+                0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 0.0, 1.0, 1.0,
+            ],
+        );
+        mesh.solids = vec![ElementBlock::new(
+            ElementKind::Penta6,
+            vec![10],
+            vec![1],
+            vec![0, 1, 2, 3, 4, 5],
+        )];
+        mesh.shells.clear();
+        let bytes_of = |ids: [i32; 6]| {
+            ids.iter()
+                .flat_map(|i| i.to_ne_bytes())
+                .collect::<Vec<u8>>()
+        };
+        let vtk97 = bytes_of([0, 1, 2, 3, 4, 5]);
+        let vtk96 = bytes_of([0, 2, 1, 3, 5, 4]);
+        for (wedge, expected, other) in [
+            (WedgeOrder::Vtk97, &vtk97, &vtk96),
+            (WedgeOrder::Vtk96, &vtk96, &vtk97),
+        ] {
+            let p = tmp_path(&format!("wedge_{}.vtu", wedge.label()));
+            let opts = VtuOptions {
+                compress: false,
+                wedge_order: wedge,
+                ..VtuOptions::default()
+            };
+            write_mesh_vtu(&p, &mesh, &opts).unwrap();
+            let bytes = std::fs::read(&p).unwrap();
+            let has = |needle: &[u8]| bytes.windows(needle.len()).any(|w| w == needle);
+            assert!(has(expected), "{wedge:?} の並びで書かれていません");
+            assert!(!has(other), "{wedge:?} なのに別の並びが入っています");
+            std::fs::remove_file(&p).ok();
+        }
     }
 
     #[test]

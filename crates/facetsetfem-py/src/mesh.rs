@@ -2,11 +2,11 @@
 
 use crate::FacetSetFemError;
 use crate::case::build_electrode;
-use crate::convert::{lazy, to_py};
+use crate::convert::{installed_vtk_wedge_order, lazy, to_py, wedge_order_arg};
 use crate::patch::{describe_patch, parse_patch_at};
 use facetsetfem_core::case::{ElectrodeRole, FaceLookup, SurfaceIndex};
 use facetsetfem_core::mesh::{Plane, TriangleMesh};
-use facetsetfem_core::{LengthUnit, VtuOptions};
+use facetsetfem_core::{ElementKind, LengthUnit, VtuOptions, WedgeOrder};
 use numpy::{IntoPyArray, PyArray1, PyArray2, PyArrayMethods};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
@@ -16,6 +16,9 @@ use std::sync::OnceLock;
 
 /// バウンディングボックスを Python 側に返すときの形。
 pub(crate) type BoundingBox = ((f64, f64, f64), (f64, f64, f64));
+
+/// `Mesh.solid_cells` の戻り値: (VTK のセル配列, VTK のセル型)。
+pub(crate) type SolidCells<'py> = (Bound<'py, PyArray1<i64>>, Bound<'py, PyArray1<u8>>);
 
 /// `Mesh.region_surface` の戻り値: (三角形, 元のソリッド要素)。
 pub(crate) type RegionSurface<'py> = (Bound<'py, PyArray2<u32>>, Bound<'py, PyArray1<u32>>);
@@ -623,19 +626,40 @@ impl PyMesh {
     /// 四面体へ切り分ける必要はない（M4 で追加）。節点の並び替えは
     /// `ElementKind::vtk_node_order`（VTU 出力と共通）。
     ///
+    /// `wedge_order` は五面体（CPENTA）の節点の並び（`"vtk9.7"` / `"vtk9.6"`。SPEC §5.5）。
+    /// **省略すると、このプロセスに読み込まれている VTK の版に合わせる**（ここで組み立てた
+    /// セルは同じプロセスの PyVista / VTK に渡すため）。五面体が無ければ VTK の版は見ない。
+    ///
     /// 並びは要素値配列（`solid_pid_array` や結果の要素値）と同じ。
+    #[pyo3(signature = (wedge_order = None))]
     fn solid_cells<'py>(
         &self,
         py: Python<'py>,
-    ) -> (Bound<'py, PyArray1<i64>>, Bound<'py, PyArray1<u8>>) {
+        wedge_order: Option<&str>,
+    ) -> PyResult<SolidCells<'py>> {
+        let has_wedges = self
+            .inner
+            .solids
+            .iter()
+            .any(|b| b.kind() == ElementKind::Penta6);
+        let wedge = match wedge_order_arg(wedge_order)? {
+            Some(wedge) => wedge,
+            None if has_wedges => installed_vtk_wedge_order(py)?,
+            None => WedgeOrder::default(), // 五面体が無ければ並びはどちらでも同じ
+        };
         let mut cells: Vec<i64> = Vec::new();
         let mut types: Vec<u8> = Vec::with_capacity(self.inner.n_solid_elements());
         for e in self.inner.iter_solids() {
             cells.push(e.conn.len() as i64);
-            cells.extend(e.kind.vtk_node_order().iter().map(|&l| e.conn[l] as i64));
+            cells.extend(
+                e.kind
+                    .vtk_node_order(wedge)
+                    .iter()
+                    .map(|&l| e.conn[l] as i64),
+            );
             types.push(e.kind.vtk_cell_type());
         }
-        (cells.into_pyarray(py), types.into_pyarray(py))
+        Ok((cells.into_pyarray(py), types.into_pyarray(py)))
     }
 
     /// 四面体の接続 `(n_tet, 4)`（節点索引）。
@@ -698,12 +722,25 @@ impl PyMesh {
     }
 
     /// VTU（ParaView で開ける形式）としてメッシュだけを書き出す。
-    #[pyo3(signature = (path, compress = true, level = 6))]
-    fn write_vtu(&self, py: Python<'_>, path: PathBuf, compress: bool, level: u32) -> PyResult<()> {
-        py.detach(|| {
-            facetsetfem_core::write_mesh_vtu(&path, &self.inner, &VtuOptions { compress, level })
-        })
-        .map_err(to_py)
+    ///
+    /// `wedge_order` は五面体（CPENTA）の節点の並びで、開く ParaView の版で選ぶ。
+    /// 6.2 以降（VTK 9.7 以降）なら `"vtk9.7"`（既定）、6.1 以前なら `"vtk9.6"`（SPEC §5.5）。
+    #[pyo3(signature = (path, compress = true, level = 6, wedge_order = None))]
+    fn write_vtu(
+        &self,
+        py: Python<'_>,
+        path: PathBuf,
+        compress: bool,
+        level: u32,
+        wedge_order: Option<&str>,
+    ) -> PyResult<()> {
+        let opts = VtuOptions {
+            compress,
+            level,
+            wedge_order: wedge_order_arg(wedge_order)?.unwrap_or_default(),
+        };
+        py.detach(|| facetsetfem_core::write_mesh_vtu(&path, &self.inner, &opts))
+            .map_err(to_py)
     }
 
     fn __repr__(&self) -> String {

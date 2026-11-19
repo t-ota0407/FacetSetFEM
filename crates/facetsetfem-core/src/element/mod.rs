@@ -19,6 +19,73 @@ pub use penta6::Penta6;
 pub use shape::{MAX_ELEMENT_NODES, QuadraturePoint, ShapeFunctions};
 pub use tet10::Tet10;
 
+use crate::error::{ErrorKind, FacetSetFemError, Result};
+
+/// VTK の五面体（VTK_WEDGE）の節点の並びの約束（SPEC §5.5）。
+///
+/// **VTK 9.7 で約束が変わった。** 9.6 までの VTK は、体積・面の向き・四面体分割で
+/// 「1 枚目の三角形の法線が 2 枚目から遠ざかる」並び（VTK の教科書の図）を前提にしていた。
+/// 9.7 からは形状関数（パラメータ座標）どおりの並び——1 枚目の法線が 2 枚目の側を向く——
+/// に揃えられた。形状関数そのものは変わっていないので、点の探索・補間・等値面は
+/// どちらの並びでも同じになるが、体積の符号・面の向き・クリップは版で逆になる。
+/// VTU には約束の印が無く（ファイルの版の番号も同じ）、読む側の VTK の版で解釈が変わるので、
+/// 書く側で選ぶ（いずれも SPEC §8 の「2026-11」で VTK 9.6.2 と 9.7.2 を比べて確かめた）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WedgeOrder {
+    /// VTK 9.7 以降（ParaView 6.2 以降）の約束。Nastran の CPENTA と同じ向きなので並べ替えない。
+    /// VTU の既定
+    #[default]
+    Vtk97,
+    /// VTK 9.6 まで（ParaView 6.1 まで）の約束。CPENTA の三角形の 2 番目と 3 番目を入れ替える
+    Vtk96,
+}
+
+impl WedgeOrder {
+    /// 指定できる名前（既定が先頭）。Python は `facetsetfem.wedge_order_choices()` で引く（SPEC §6.5）。
+    pub const CHOICES: [&'static str; 2] = ["vtk9.7", "vtk9.6"];
+
+    /// ケースファイル・Python での名前。
+    pub const fn label(self) -> &'static str {
+        match self {
+            WedgeOrder::Vtk97 => "vtk9.7",
+            WedgeOrder::Vtk96 => "vtk9.6",
+        }
+    }
+
+    /// 名前（`vtk9.7` / `vtk9.6`）を解釈する。
+    pub fn parse(name: &str) -> Result<Self> {
+        match name {
+            "vtk9.7" => Ok(WedgeOrder::Vtk97),
+            "vtk9.6" => Ok(WedgeOrder::Vtk96),
+            other => Err(FacetSetFemError::new(
+                ErrorKind::Case,
+                crate::tr!(
+                    "Unknown order of wedge (CPENTA) nodes for VTK: \"{other}\"",
+                    "VTK に渡す五面体（CPENTA）の節点の並びが不明です: \"{other}\""
+                ),
+            )
+            .with_hint(crate::tr!(
+                "Use vtk9.7 to open the file in ParaView 6.2 or later (VTK 9.7 or later), \
+                 and vtk9.6 for ParaView 6.1 or earlier (VTK 9.6 or earlier)",
+                "ParaView 6.2 以降（VTK 9.7 以降）で開くなら vtk9.7、\
+                 ParaView 6.1 以前（VTK 9.6 以前）で開くなら vtk9.6 を指定してください"
+            ))),
+        }
+    }
+
+    /// その版の VTK が前提にする並び。
+    ///
+    /// **並びを切り替える VTK の版の境目は、ここにだけ書く**（Python の `Mesh.solid_cells()` は
+    /// 読み込まれている VTK の版をここへ渡す。SPEC §6.5）。
+    pub const fn for_vtk(major: u32, minor: u32) -> Self {
+        if major > 9 || (major == 9 && minor >= 7) {
+            WedgeOrder::Vtk97
+        } else {
+            WedgeOrder::Vtk96
+        }
+    }
+}
+
 /// 対応する要素の種類（SPEC §1.3 / §3.1）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum ElementKind {
@@ -100,7 +167,7 @@ impl ElementKind {
     /// CTETRA → VTK_TETRA(10), CPENTA → VTK_WEDGE(13), CHEXA → VTK_HEXAHEDRON(12),
     /// 10 節点の CTETRA → VTK_QUADRATIC_TETRA(24),
     /// CTRIA3 → VTK_TRIANGLE(5), CQUAD4 → VTK_QUAD(9), CTRIA6 → VTK_QUADRATIC_TRIANGLE(22)。
-    /// 節点の並びは CPENTA だけ VTK と逆向きなので、書き出すときは
+    /// CPENTA の節点の並びは読む側の VTK の版で変わるので、書き出すときは
     /// [`vtk_node_order`](Self::vtk_node_order) で並べ替えること。
     pub const fn vtk_cell_type(self) -> u8 {
         match self {
@@ -114,17 +181,21 @@ impl ElementKind {
         }
     }
 
-    /// VTK のセルに書くときの節点の並び替え（局所節点番号）。
+    /// VTK のセルに書くときの節点の並び替え（局所節点番号。SPEC §5.5）。
     ///
-    /// CTETRA（4 節点・10 節点とも）/ CHEXA / CTRIA3 / CQUAD4 は VTK と同じ並びだが、
-    /// **CPENTA だけは向きが逆**。VTK_WEDGE は 1 枚目の三角形の法線が
-    /// 2 枚目の三角形から**遠ざかる**向きを要求するのに対し、Nastran の CPENTA は
-    /// G1〜G3 の法線が G4〜G6 の側を向く。そのまま書くと ParaView 側で
-    /// 体積が負の反転セルになるため、三角形の 2 番目と 3 番目を入れ替える。
-    pub const fn vtk_node_order(self) -> &'static [usize] {
+    /// CTETRA（4 節点・10 節点とも）/ CHEXA / CTRIA3 / CQUAD4 は VTK と同じ並び。
+    /// **CPENTA だけは読む側の VTK の版で変わる**（[`WedgeOrder`]）。Nastran の CPENTA は
+    /// G1〜G3 の三角形の法線が G4〜G6 の側を向く。VTK 9.7 以降の VTK_WEDGE も同じ向きなので
+    /// そのまま渡し、VTK 9.6 までは逆向き（2 枚目から**遠ざかる**向き）を要求するので
+    /// 三角形の 2 番目と 3 番目を入れ替える。約束に合わない並びで渡すと、
+    /// 読んだ側で体積が負の反転セルになる。
+    pub const fn vtk_node_order(self, wedge: WedgeOrder) -> &'static [usize] {
         match self {
             ElementKind::Tet4 => &[0, 1, 2, 3],
-            ElementKind::Penta6 => &[0, 2, 1, 3, 5, 4],
+            ElementKind::Penta6 => match wedge {
+                WedgeOrder::Vtk97 => &[0, 1, 2, 3, 4, 5],
+                WedgeOrder::Vtk96 => &[0, 2, 1, 3, 5, 4],
+            },
             ElementKind::Hex8 => &[0, 1, 2, 3, 4, 5, 6, 7],
             ElementKind::Tet10 => &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
             ElementKind::Tria3 => &[0, 1, 2],
@@ -343,33 +414,37 @@ mod tests {
         assert!((max_edge_length(&p) - 3.0f64.sqrt()).abs() < 1e-15);
     }
 
+    const WEDGE_ORDERS: [WedgeOrder; 2] = [WedgeOrder::Vtk97, WedgeOrder::Vtk96];
+
     #[test]
     fn vtk_node_order_is_a_permutation() {
-        for kind in [
-            ElementKind::Tet4,
-            ElementKind::Penta6,
-            ElementKind::Hex8,
-            ElementKind::Tet10,
-            ElementKind::Tria3,
-            ElementKind::Quad4,
-            ElementKind::Tria6,
-        ] {
-            let order = kind.vtk_node_order();
-            assert_eq!(order.len(), kind.node_count(), "{kind:?}");
-            let mut sorted = order.to_vec();
-            sorted.sort_unstable();
-            assert!(
-                sorted.iter().copied().eq(0..kind.node_count()),
-                "{kind:?}: {order:?}"
-            );
+        for wedge in WEDGE_ORDERS {
+            for kind in [
+                ElementKind::Tet4,
+                ElementKind::Penta6,
+                ElementKind::Hex8,
+                ElementKind::Tet10,
+                ElementKind::Tria3,
+                ElementKind::Quad4,
+                ElementKind::Tria6,
+            ] {
+                let order = kind.vtk_node_order(wedge);
+                assert_eq!(order.len(), kind.node_count(), "{kind:?}");
+                let mut sorted = order.to_vec();
+                sorted.sort_unstable();
+                assert!(
+                    sorted.iter().copied().eq(0..kind.node_count()),
+                    "{kind:?} {wedge:?}: {order:?}"
+                );
+            }
         }
     }
 
     #[test]
-    fn wedge_is_flipped_for_vtk() {
-        // VTK_WEDGE は 1 枚目の三角形の法線が 2 枚目の三角形から**遠ざかる**向きを
-        // 要求する。Nastran の CPENTA は逆（G1〜G3 の法線が G4〜G6 の側を向く）なので、
-        // そのまま書くと ParaView で体積が負の反転セルになる
+    fn wedge_order_follows_each_vtk_convention() {
+        // Nastran の CPENTA は G1〜G3 の三角形の法線が G4〜G6 の側を向く。
+        // VTK 9.7 以降の VTK_WEDGE も同じ向き、9.6 までは 2 枚目から**遠ざかる**向きを
+        // 要求する。約束に合わない並びで渡すと、読んだ側で体積が負の反転セルになる
         let cpenta = [
             [0.0, 0.0, 0.0],
             [1.0, 0.0, 0.0],
@@ -392,18 +467,57 @@ mod tests {
         };
         assert!(facing(&cpenta) > 0.0, "CPENTA の前提が変わっています");
 
-        let order = ElementKind::Penta6.vtk_node_order();
-        let mut vtk = [[0.0f64; 3]; 6];
-        for (i, &local) in order.iter().enumerate() {
-            vtk[i] = cpenta[local];
-        }
-        assert!(facing(&vtk) < 0.0, "VTK_WEDGE の向きになっていません");
-
-        // 他の要素は並び替え不要
-        assert_eq!(ElementKind::Tet4.vtk_node_order(), &[0, 1, 2, 3]);
-        assert_eq!(
-            ElementKind::Hex8.vtk_node_order(),
-            &[0, 1, 2, 3, 4, 5, 6, 7]
+        let reordered = |wedge: WedgeOrder| {
+            let mut vtk = [[0.0f64; 3]; 6];
+            for (i, &local) in ElementKind::Penta6.vtk_node_order(wedge).iter().enumerate() {
+                vtk[i] = cpenta[local];
+            }
+            vtk
+        };
+        assert!(
+            facing(&reordered(WedgeOrder::Vtk97)) > 0.0,
+            "VTK 9.7 以降の VTK_WEDGE の向きになっていません"
         );
+        assert!(
+            facing(&reordered(WedgeOrder::Vtk96)) < 0.0,
+            "VTK 9.6 までの VTK_WEDGE の向きになっていません"
+        );
+
+        // 他の要素は並び替え不要で、VTK の版にもよらない
+        for wedge in WEDGE_ORDERS {
+            assert_eq!(ElementKind::Tet4.vtk_node_order(wedge), &[0, 1, 2, 3]);
+            assert_eq!(
+                ElementKind::Hex8.vtk_node_order(wedge),
+                &[0, 1, 2, 3, 4, 5, 6, 7]
+            );
+        }
+    }
+
+    #[test]
+    fn the_wedge_order_switches_at_vtk_9_7() {
+        assert_eq!(WedgeOrder::for_vtk(9, 6), WedgeOrder::Vtk96);
+        assert_eq!(WedgeOrder::for_vtk(9, 7), WedgeOrder::Vtk97);
+        assert_eq!(WedgeOrder::for_vtk(9, 10), WedgeOrder::Vtk97);
+        assert_eq!(WedgeOrder::for_vtk(10, 0), WedgeOrder::Vtk97);
+        assert_eq!(WedgeOrder::for_vtk(8, 2), WedgeOrder::Vtk96);
+        // VTU の既定は VTK 9.7 以降（いまの ParaView 6.2 以降）に合わせる
+        assert_eq!(WedgeOrder::default(), WedgeOrder::Vtk97);
+        assert_eq!(WedgeOrder::CHOICES[0], WedgeOrder::default().label());
+    }
+
+    #[test]
+    fn wedge_order_names_round_trip_and_unknown_names_say_what_to_write() {
+        for wedge in WEDGE_ORDERS {
+            assert_eq!(WedgeOrder::parse(wedge.label()).unwrap(), wedge);
+            assert!(WedgeOrder::CHOICES.contains(&wedge.label()));
+        }
+        let e = crate::with_language(crate::Language::Ja, || {
+            WedgeOrder::parse("paraview").unwrap_err().to_string()
+        });
+        assert!(
+            e.contains("paraview") && e.contains("vtk9.7") && e.contains("vtk9.6"),
+            "{e}"
+        );
+        assert!(e.contains("ParaView 6.2"), "{e}");
     }
 }

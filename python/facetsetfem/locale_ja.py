@@ -298,6 +298,8 @@ JA: dict[str, str] = {
     'Export VTU': 'VTU 書き出し',
     'Solve first (Run → Solve, F5).': '先に求解してください（実行 → 求解、F5）。',
     'Export to VTU': 'VTU に書き出す',
+    'VTU for ParaView 6.2 or later (*.vtu)': 'ParaView 6.2 以降で開く VTU (*.vtu)',
+    'VTU for ParaView 6.1 or earlier (*.vtu)': 'ParaView 6.1 以前で開く VTU (*.vtu)',
     'Writing the VTU': 'VTU を書き出しています',
     'Wrote the VTU: {path}': 'VTU を書き出しました: {path}',
     'Export region statistics': '領域統計を書き出す',
@@ -422,6 +424,8 @@ JA: dict[str, str] = {
     'Unknown preconditioner: {p}': '未知の前処理です: {p}',
     'Use one of {choices}. With amg the iteration count hardly depends on mesh fineness (SPEC §4.5)': '{choices} のいずれかです。amg は反復回数がメッシュの細かさにほとんど依存しなくなります（SPEC §4.5）',
     'output is not a mapping': 'output がマッピングではありません',
+    'Unknown order of wedge (CPENTA) nodes: {o}': '五面体（CPENTA）の節点の並びが不明です: {o}',
+    'Use one of {choices}: vtk9.7 to open the VTU in ParaView 6.2 or later (VTK 9.7 or later), vtk9.6 for ParaView 6.1 or earlier (SPEC §5.5)': '{choices} のいずれかです。ParaView 6.2 以降（VTK 9.7 以降）で VTU を開くなら vtk9.7、ParaView 6.1 以前なら vtk9.6（SPEC §5.5）',
     # --- tissues.py
     'DC to a few kHz (the band of transcutaneous stimulation)': 'DC〜数 kHz（経皮電気刺激の帯域）',
     'Representative value widely used at low frequency. Literature values vary widely; check them': '低周波帯で広く使われる代表値。文献値の範囲は広いので要確認',

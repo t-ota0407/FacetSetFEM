@@ -37,8 +37,10 @@ from ._core import (
     distribution_choices,
     length_units,
     metres_per_unit,
+    parse_wedge_order,
     preconditioner_choices,
     read_nastran,
+    wedge_order_choices,
 )
 from . import i18n
 from .contact import ContactFit, fit_contact_impedance
@@ -78,11 +80,13 @@ __all__ = [
     "length_units",
     "load_library",
     "metres_per_unit",
+    "parse_wedge_order",
     "preconditioner_choices",
     "read_nastran",
     "sweep",
     "tissue",
     "tissue_names",
+    "wedge_order_choices",
 ]
 
 def describe_bounding_box(mesh: Mesh, unit: str | None = None) -> str:

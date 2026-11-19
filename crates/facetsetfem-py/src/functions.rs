@@ -1,11 +1,11 @@
-//! モジュール直下の関数: 長さ単位・表示言語・ソルバの選択肢・GPU の問い合わせ（SPEC §6.5）。
+//! モジュール直下の関数: 長さ単位・表示言語・ソルバと VTU の選択肢・GPU の問い合わせ（SPEC §6.5）。
 //!
 //! 選択肢と別名の表は `facetsetfem-core` の 1 か所にあり、ここはそれを Python に見せるだけ。
 
 use crate::convert::to_py;
 use crate::cuda;
-use facetsetfem_core::LengthUnit;
 use facetsetfem_core::case::{Backend, ElectrodeModel, Preconditioner};
+use facetsetfem_core::{LengthUnit, WedgeOrder};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
@@ -78,6 +78,22 @@ pub(crate) fn parse_backend(name: &str) -> PyResult<&'static str> {
 #[pyfunction]
 pub(crate) fn parse_preconditioner(name: &str) -> PyResult<&'static str> {
     Ok(Preconditioner::parse(name).map_err(to_py)?.label())
+}
+
+/// VTU に書く五面体（CPENTA）の節点の並びの選択肢（既定が先頭。SPEC §5.5）。
+///
+/// `"vtk9.7"` は ParaView 6.2 以降（VTK 9.7 以降）、`"vtk9.6"` は ParaView 6.1 以前向け。
+#[pyfunction]
+pub(crate) fn wedge_order_choices() -> Vec<&'static str> {
+    WedgeOrder::CHOICES.to_vec()
+}
+
+/// 五面体の並びの名前を解釈して記録用の名前を返す。解釈できなければ `FacetSetFemError`。
+///
+/// ケースファイルの `output.vtu_wedge_order` の検査もここを通す（SPEC §3.3）。
+#[pyfunction]
+pub(crate) fn parse_wedge_order(name: &str) -> PyResult<&'static str> {
+    Ok(WedgeOrder::parse(name).map_err(to_py)?.label())
 }
 
 /// このビルドに CUDA バックエンドが入っているか（SPEC §8 M5）。

@@ -16,7 +16,7 @@ import numpy as np
 import pyvista as pv
 
 from .. import Case, FacetSetFemError, Mesh, Solution, Study, read_nastran
-from .._core import check_patch
+from .._core import check_patch, parse_wedge_order, wedge_order_choices
 from ..i18n import N_, error_text, tr
 from ..study import ElectrodeSpec, Material, SurfacePatch
 from ..tissues import TISSUES
@@ -261,6 +261,9 @@ class Session:
         self._corner_mask: np.ndarray | None = None
         #: 領域の組 → その要素が使う節点（色の範囲を表示中の領域に合わせるとき）
         self._region_nodes: dict[tuple[int, ...], np.ndarray] = {}
+        #: VTU の書き出しで最後に選んだ五面体の並び（`vtu_wedge_order`。SPEC §5.5）。
+        #: 開く ParaView の好みなので解析条件には入れない
+        self._chosen_vtu_wedge_order: str | None = None
         # Undo / Redo（SPEC §8 M7）。
         # 解析条件は Study 1 つに閉じていて、メッシュも結果も含まないので、
         # 操作ごとに丸ごと複製して積むだけで済む。差分を持つ設計は
@@ -1452,8 +1455,34 @@ class Session:
             case_file=None if study is None else study.path,
         )
 
-    def write_vtu(self, path) -> None:
-        self._require_solution().write_vtu(path)
+    def has_wedges(self) -> bool:
+        """五面体（CPENTA）を含むか。VTU の書き出しで並びを選ばせるかを決める（SPEC §5.5）。
+
+        四面体・六面体だけなら、VTU の中身は読む側の VTK の版によらない。
+        """
+        return any(kind == "CPENTA" and n for kind, n in self._require_mesh().element_counts())
+
+    def vtu_wedge_order(self) -> str:
+        """VTU に書く五面体の節点の並び（SPEC §5.5）。
+
+        このセッションの書き出しで選んだもの、無ければケースの `output.vtu_wedge_order`、
+        それも無ければ既定（`wedge_order_choices()` の先頭。ParaView 6.2 以降向け）。
+        """
+        if self._chosen_vtu_wedge_order is not None:
+            return self._chosen_vtu_wedge_order
+        if self.study is not None and self.study.output.vtu_wedge_order:
+            return self.study.output.vtu_wedge_order
+        return wedge_order_choices()[0]
+
+    def write_vtu(self, path, wedge_order: str | None = None) -> None:
+        """結果を VTU に書く。`wedge_order` を省けば [`vtu_wedge_order`] に従う。
+
+        指定した並びは次の書き出しの既定として覚える（保存ダイアログの初期選択）。
+        """
+        order = parse_wedge_order(wedge_order) if wedge_order else self.vtu_wedge_order()
+        self._require_solution().write_vtu(path, wedge_order=order)
+        if wedge_order:
+            self._chosen_vtu_wedge_order = order
 
     def available_fields(self) -> list[DisplayField]:
         """いま表示できる量。"""

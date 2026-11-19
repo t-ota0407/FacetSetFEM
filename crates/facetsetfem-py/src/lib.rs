@@ -76,6 +76,8 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(functions::distribution_choices, m)?)?;
     m.add_function(wrap_pyfunction!(functions::parse_backend, m)?)?;
     m.add_function(wrap_pyfunction!(functions::parse_preconditioner, m)?)?;
+    m.add_function(wrap_pyfunction!(functions::wedge_order_choices, m)?)?;
+    m.add_function(wrap_pyfunction!(functions::parse_wedge_order, m)?)?;
     m.add_function(wrap_pyfunction!(patch::check_patch, m)?)?;
     m.add_function(wrap_pyfunction!(functions::cuda_available, m)?)?;
     m.add_function(wrap_pyfunction!(functions::cuda_devices, m)?)?;

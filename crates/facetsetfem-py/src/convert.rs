@@ -1,8 +1,9 @@
-//! Rust と Python のあいだの受け渡し（エラーの変換・numpy 配列・遅延初期化）。
+//! Rust と Python のあいだの受け渡し（エラーの変換・numpy 配列・遅延初期化・引数の解釈）。
 //!
 //! `Mesh` / `Case` / `Solution` のどれからも使う小さな道具だけを置く。
 
 use crate::{FacetSetFemError, SolverCancelled};
+use facetsetfem_core::WedgeOrder;
 use numpy::ndarray::{ArrayView1, ArrayView2, Dimension};
 use numpy::{IntoPyArray, PyArray, PyArray1, PyArray2, PyArrayMethods};
 use pyo3::prelude::*;
@@ -67,6 +68,40 @@ pub(crate) fn read_only<D: Dimension>(
 ) -> Bound<'_, PyArray<f64, D>> {
     let readonly = array.readwrite().make_nonwriteable();
     (*readonly).clone()
+}
+
+/// `wedge_order` 引数（`"vtk9.7"` / `"vtk9.6"`）を解釈する。省略（`None`）なら `None`（SPEC §5.5）。
+pub(crate) fn wedge_order_arg(name: Option<&str>) -> PyResult<Option<WedgeOrder>> {
+    name.map(WedgeOrder::parse).transpose().map_err(to_py)
+}
+
+/// このプロセスの VTK（`vtkmodules`）の版に合う五面体の並び（SPEC §5.5）。
+///
+/// 版の境目は [`WedgeOrder::for_vtk`] にだけ書いてある。VTK を読み込めなければ、並びを
+/// 明示するよう促すエラーにする（黙ってどちらかに決めると、体積が負のセルを渡しうる）。
+pub(crate) fn installed_vtk_wedge_order(py: Python<'_>) -> PyResult<WedgeOrder> {
+    let version = |method: &str| -> PyResult<u32> {
+        py.import("vtkmodules.vtkCommonCore")?
+            .getattr("vtkVersion")?
+            .call_method0(method)?
+            .extract()
+    };
+    match (version("GetVTKMajorVersion"), version("GetVTKMinorVersion")) {
+        (Ok(major), Ok(minor)) => Ok(WedgeOrder::for_vtk(major, minor)),
+        (Err(e), _) | (_, Err(e)) => Err(to_py(
+            facetsetfem_core::FacetSetFemError::unsupported(facetsetfem_core::tr!(
+                "Could not read the version of VTK, which decides the order of \
+                 wedge (CPENTA) nodes: {e}",
+                "五面体（CPENTA）の節点の並びを決める VTK の版を読めませんでした: {e}"
+            ))
+            .with_hint(facetsetfem_core::tr!(
+                "Install VTK (pip install vtk), or give the order explicitly: \
+                 wedge_order=\"vtk9.7\" for VTK 9.7 or later, \"vtk9.6\" for VTK 9.6 or earlier",
+                "VTK を入れる（pip install vtk）か、並びを明示してください\
+                 （VTK 9.7 以降なら wedge_order=\"vtk9.7\"、9.6 以前なら \"vtk9.6\"）"
+            )),
+        )),
+    }
 }
 
 /// `cell` が空なら `build` で作って入れ、中身を返す（`OnceLock::get_or_try_init` の代わり）。

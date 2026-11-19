@@ -1,7 +1,7 @@
 //! `Solution` の Python 向けの顔: 結果の配列・統計・書き出し・等値面・流線（SPEC §5 / §6.3）。
 
 use crate::FacetSetFemError;
-use crate::convert::{array1, lazy, to_py, view1, view2};
+use crate::convert::{array1, lazy, to_py, view1, view2, wedge_order_arg};
 use crate::mesh::PyMesh;
 use facetsetfem_core::mesh::streamline::{TraceDirection, TraceOptions};
 use facetsetfem_core::post::RegionStats;
@@ -585,18 +585,26 @@ impl PySolution {
     }
 
     /// 結果を VTU として書き出す（節点値と要素値の両方を含む）。
-    #[pyo3(signature = (path, compress = true, level = 6))]
-    fn write_vtu(&self, py: Python<'_>, path: PathBuf, compress: bool, level: u32) -> PyResult<()> {
+    ///
+    /// `wedge_order` は五面体（CPENTA）の節点の並びで、開く ParaView の版で選ぶ。
+    /// 6.2 以降（VTK 9.7 以降）なら `"vtk9.7"`（既定）、6.1 以前なら `"vtk9.6"`（SPEC §5.5）。
+    #[pyo3(signature = (path, compress = true, level = 6, wedge_order = None))]
+    fn write_vtu(
+        &self,
+        py: Python<'_>,
+        path: PathBuf,
+        compress: bool,
+        level: u32,
+        wedge_order: Option<&str>,
+    ) -> PyResult<()> {
         let mesh = &self.mesh.get().inner;
-        py.detach(|| {
-            facetsetfem_core::write_analysis_vtu(
-                &path,
-                mesh,
-                &self.inner,
-                &VtuOptions { compress, level },
-            )
-        })
-        .map_err(to_py)
+        let opts = VtuOptions {
+            compress,
+            level,
+            wedge_order: wedge_order_arg(wedge_order)?.unwrap_or_default(),
+        };
+        py.detach(|| facetsetfem_core::write_analysis_vtu(&path, mesh, &self.inner, &opts))
+            .map_err(to_py)
     }
 
     fn __repr__(&self) -> String {
