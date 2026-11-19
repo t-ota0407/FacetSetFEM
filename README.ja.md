@@ -421,6 +421,33 @@ GPU のテストは GPU が無い機械では skip される。ただし `backen
 wheel の依存と、パッケージが実際に import しているものが一致していることはテストで見ている。
 PyInstaller で 1 つの exe に固めない理由は SPEC §12 の未決事項 3 に書いてある。
 
+### 最新の依存ライブラリで確かめる
+
+wheel の依存は下限だけなので、`pip install` すると開発機（`requirements.txt` で固定した版）より
+新しい版が入る。VTK 9.7 での五面体の並びやカラーバーのように、新しい版でだけ出る不具合がある
+（SPEC §8 の「2026-11」）。配布の前や、VTK・PyVista・PySide6 の新しい版が出たときは、
+その時点の最新の版で使い捨ての環境を作り、テスト一式を回す（リポジトリの最上位で）:
+
+```bash
+# 1. 開発用の .venv で拡張をビルドしておく（新しい環境もこの拡張をそのまま使う）
+VIRTUAL_ENV="$(pwd -W)/.venv" .venv/Scripts/maturin.exe develop --release
+# 2. pyproject.toml の依存を、版を固定せずに入れる
+.venv/Scripts/python.exe -m venv target/tmp/venv-latest
+.venv/Scripts/python.exe -c "import tomllib; [print(d) for d in tomllib.load(open('pyproject.toml', 'rb'))['project']['dependencies']]" > target/tmp/requirements-latest.txt
+target/tmp/venv-latest/Scripts/python.exe -m pip install -r target/tmp/requirements-latest.txt pytest
+# 3. リポジトリの python/ を読み込ませて、テストを回す
+echo "$(pwd -W)/python" > target/tmp/venv-latest/Lib/site-packages/facetsetfem-repo.pth
+target/tmp/venv-latest/Scripts/python.exe -m pytest -q
+# 4. 終わったら消す（1.4 GB ほどある。cargo clean でも消える）
+rm -rf target/tmp/venv-latest target/tmp/requirements-latest.txt
+```
+
+- **置き場所は `target/tmp/` にする。** PySide6 は深い階層にファイルを置くので、パスの長い場所
+  （ユーザーの一時フォルダなど）では Windows のパス長の制限（260 文字）に当たって入らない
+- 依存の一覧は `pyproject.toml` から読み出す（ここに書き写すと食い違う）
+- 環境は数分で作り直せて、すぐ古くなるので残しておかない。入った版は
+  `target/tmp/venv-latest/Scripts/python.exe -m pip list` で分かる
+
 ### 次にやること
 
 #### 全体の見直しの残り（2026-09 に見つけたもの）
@@ -447,7 +474,8 @@ PyInstaller で 1 つの exe に固めない理由は SPEC §12 の未決事項 
 
 - **依存ライブラリの版**: wheel の依存は下限だけ（`pyvista>=0.44` など）なので、`pip install` すると
   開発機で確かめていない新しい版が入る。VTK 9.7 で五面体の節点の並びの約束が変わったように
-  （いまは VTK の版を見て切り替えている。SPEC §5.5）、新しい版で何かが変わることがある。下の CI で拾う
+  （いまは VTK の版を見て切り替えている。SPEC §5.5）、新しい版で何かが変わることがある。下の CI で拾う。
+  CI ができるまでは「[最新の依存ライブラリで確かめる](#最新の依存ライブラリで確かめる)」の手順で手で確かめる
 - **NVRTC を要らなくする**: カーネルをビルド時に PTX にして埋め込む（受け取った側はドライバだけで GPU を使える）
 - **CI**: ドライバの無い Linux と最新の依存ライブラリでテストを回す（今回の不具合はどれもそこでしか出ない）
 - **GUI の大きなクラスを分ける**: `MainWindow`（1,800 行）から 3D ビューの描画（`_draw_view` と視点・カラーバー）と
