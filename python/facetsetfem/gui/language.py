@@ -18,7 +18,7 @@ import os
 
 from PySide6.QtCore import QLibraryInfo, QLocale, QSettings, QTranslator
 
-from ..i18n import LANGUAGES, language, set_language
+from ..i18n import LANGUAGES, set_language
 
 __all__ = ["apply_startup_language", "save_language", "saved_language"]
 
@@ -85,6 +85,3 @@ def install_qt_translation(app, code: str) -> None:
             _qt_translators.append(translator)
             break
 
-
-def current_language() -> str:
-    return language()

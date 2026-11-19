@@ -35,7 +35,6 @@ from PySide6.QtWidgets import (
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
-    QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
@@ -1771,13 +1770,15 @@ class MainWindow(QMainWindow):
         strip.RemoveAllViewProps()
         bars = list(self.plotter.scalar_bars.values())
         for bar in bars:
-            self.plotter.renderer.RemoveActor2D(bar)
-            strip.AddActor2D(bar)
+            # AddActor2D / RemoveActor2D は VTK 9.7 で無くなった。どの版にもある
+            # AddViewProp / RemoveViewProp を使う（2D の重ね描きも同じ一覧に入る）
+            self.plotter.renderer.RemoveViewProp(bar)
+            strip.AddViewProp(bar)
             # 見出しは VTK のカラーバーに描かせない。バーの幅に合わせて右寄せ・縮小され、
             # 細い帯では端が切れた。帯の左上に、左寄せの文字として置く
             title = scalar_bar_title(bar.GetTitle())  # 管理の鍵は表示量の鍵のまま
             bar.SetTitle("")
-            strip.AddActor2D(self._scalar_bar_title_actor(title))
+            strip.AddViewProp(self._scalar_bar_title_actor(title))
         width = max(self.plotter.interactor.width(), 1)
         right = 1.0 - min(SCALAR_BAR_STRIP_PX / width, 0.4) if bars else 1.0
         self.plotter.renderer.SetViewport(0.0, 0.0, right, 1.0)
@@ -1800,18 +1801,77 @@ class MainWindow(QMainWindow):
         return actor
 
     def _draw_view(self, scope, highlight_pid, highlight_electrode) -> None:
+        """3D ビューを描き直す。
+
+        描く順は、体（層ごと）→ 節点 → 流線 → 断面のときの体の外形 → 選んだ領域 → 電極。
+        重ねる順が見え方を決めるので、足す順は変えないこと。
+        """
         self.plotter.clear()
         # **clear() は光源も消す。** 置き直さないと以降ずっと陰影が付かず、
         # どんな形も影絵になる（気づきにくいので、描き直しのたびに入れ直す）
         self.plotter.enable_lightkit()
         options = self.page_result.options()
-        scalars = options["field"]
         mode = options["mode"]
 
         # **体積メッシュではなく外表面を描く**（SPEC §6.3）。
         # 頭部モデルで 2.7 秒 → 0.09 秒。しかも法線が付くので形が読める。
         # 断面・クリップ・等値面が空だったときの代わりの表示もこれで足りる
-        surface = self.session.display_surface(scalars)
+        surface = self.session.display_surface(options["field"])
+        target, scalars = self._view_target(scope, options, surface)
+        # 領域ごとに表示・半透明・非表示を選んでいれば、描く面を領域で分ける
+        customised = self.session.regions_customised() and mode != "isosurface"
+        regions, buried = self._highlighted_regions(scope, highlight_pid, mode)
+        lines = self._traced_streamlines(scope, options)
+        # 流線が引けたら外表面を透かす（流線は体の中を通るので、外表面が不透明だと
+        # 1 本も見えない）。断面は板なので透かさなくても見える
+        see_through = lines is not None and lines.n_cells > 0 and mode in ("volume", "clip")
+        opacity = (
+            BURIED_OPACITY if buried else STREAMLINE_SURFACE_OPACITY if see_through else 1.0
+        )
+        layers = [(target, opacity)]
+        if customised:
+            layers = self._part_layers(target, surface, mode, options["field"], opacity)
+        clim = None
+        if scalars is not None:
+            shown = self.session.shown_region_pids() if customised and options["fit_range"] else None
+            clim = self.session.field_range(scalars, shown) or self.session.field_range(scalars)
+
+        scope.step(tr("Building the view"))
+        self._add_body_layers(layers, scalars, clim, options)
+        if lines is not None and lines.n_cells:
+            self.plotter.add_mesh(lines, color="black", line_width=2, reset_camera=False)
+        if mode == "slice" and target is not surface:
+            self.plotter.add_mesh(
+                surface,
+                color=SURFACE_COLOR,
+                opacity=SECTION_CONTEXT_OPACITY,
+                pickable=False,
+                reset_camera=False,
+            )
+        for region in regions:
+            draw_on_top(
+                self.plotter.add_mesh(
+                    region, color=REGION_COLOR, show_edges=False, pickable=False, reset_camera=False
+                )
+            )
+        self._add_electrodes(scope, options, highlight_electrode)
+
+        scope.step(tr("Rendering"))
+        self.plotter.add_axes()
+        self._make_room_for_scalar_bar()
+        self._frame_new_mesh()
+        self.plotter.render()
+        # clear() でピッキングも外れるので、選択中なら掛け直す
+        self._arm_picking()
+
+    def _view_target(self, scope, options, surface):
+        """表示モードに応じて描く面を作り、`(面, 色分けに使う配列名)` を返す。
+
+        全体表示は外表面、断面・クリップは切り口、等値面は等値面。切り口や等値面が
+        空だったら外表面で代える。色分けしないとき（形状表示・面に値が無い）は配列名が None。
+        """
+        scalars = options["field"]
+        mode = options["mode"]
         target = surface
         iso_text = ""
         if mode in ("slice", "clip"):
@@ -1837,15 +1897,16 @@ class MainWindow(QMainWindow):
         self.page_result.show_iso_level(iso_text)
         if target.n_cells == 0:
             target = surface
-            scalars = options["field"]
-
         if scalars == SHAPE_FIELD or scalars not in target.array_names:
             scalars = None  # 色分けなし（PID には大小の意味が無い）
-        # 領域ごとに表示・半透明・非表示を選んでいれば、描く面を領域で分ける
-        customised = self.session.regions_customised() and mode != "isosurface"
+        return target, scalars
 
-        # 選んだ領域を先に用意する。**体表面に出ていない領域**（頭部モデルの
-        # 大半がそう）は、外側を半透明にしないと見えないため
+    def _highlighted_regions(self, scope, highlight_pid, mode):
+        """強調する領域の面を用意し、`(面の一覧, 体表面に出ていない領域があるか)` を返す。
+
+        **体表面に出ていない領域**（頭部モデルの大半がそう）は、外側を半透明にしないと
+        見えない。全体表示でそういう領域を選んでいたら、呼び出し側が外表面を透かす。
+        """
         pids = [] if highlight_pid is None else (
             [highlight_pid] if isinstance(highlight_pid, int) else list(highlight_pid)
         )
@@ -1861,34 +1922,26 @@ class MainWindow(QMainWindow):
                 buried = buried or (region.n_cells > 0 and mode == "volume")
             if region.n_cells:
                 regions.append(region)
+        return regions, buried
 
-        # 流線は先に引いておく。引けたら外表面を透かす（流線は体の中を通るので、
-        # 外表面が不透明だと 1 本も見えない）。断面は板なので透かさなくても見える
-        lines = None
-        if options["streamlines"] and self.session.solution is not None:
-            scope.step(tr("Tracing streamlines"))
-            try:
-                seeds = self.session.default_seed_points(options["n_seeds"])
-                lines = self.session.streamlines(seeds)
-            except Exception as exc:  # noqa: BLE001
-                self.log(tr("Could not trace streamlines: {error}", error=exc))
-        see_through = lines is not None and lines.n_cells > 0 and mode in ("volume", "clip")
-        opacity = (
-            BURIED_OPACITY if buried else STREAMLINE_SURFACE_OPACITY if see_through else 1.0
-        )
-        layers = [(target, opacity)]
-        if customised:
-            layers = self._part_layers(target, surface, mode, options["field"], opacity)
-        clim = None
-        if scalars is not None:
-            shown = self.session.shown_region_pids() if customised and options["fit_range"] else None
-            clim = self.session.field_range(scalars, shown) or self.session.field_range(scalars)
+    def _traced_streamlines(self, scope, options):
+        """流線を引く。引かない設定・まだ解いていない・失敗したときは None。"""
+        if not options["streamlines"] or self.session.solution is None:
+            return None
+        scope.step(tr("Tracing streamlines"))
+        try:
+            seeds = self.session.default_seed_points(options["n_seeds"])
+            return self.session.streamlines(seeds)
+        except Exception as exc:  # noqa: BLE001
+            self.log(tr("Could not trace streamlines: {error}", error=exc))
+            return None
 
-        scope.step(tr("Building the view"))
+    def _add_body_layers(self, layers, scalars, clim, options) -> None:
+        """体の面（層ごと）と、その稜線・節点を足す。"""
         edges = options["edges"]
         # **視点は利用者のものとして保つ。** pyvista の add_mesh は既定で視点を
         # 合わせ直すことがあるので、どれも reset_camera=False で足し、モデル全体に
-        # 合わせ直すのは新しいメッシュを開いたときだけにする（下の `_frame_new_mesh`）
+        # 合わせ直すのは新しいメッシュを開いたときだけにする（`_frame_new_mesh`）
         for layer, layer_opacity in layers:
             # 2 次要素の面は 4 枚の三角形に割って描くので、稜線は元の要素の辺だけを線で足す
             # （show_edges に任せると分割の線まで出る。`Session.element_edges`）
@@ -1940,28 +1993,15 @@ class MainWindow(QMainWindow):
                 lighting=False,
                 reset_camera=False,
             )
-        if lines is not None and lines.n_cells:
-            self.plotter.add_mesh(lines, color="black", line_width=2, reset_camera=False)
-        if mode == "slice" and target is not surface:
-            self.plotter.add_mesh(
-                surface,
-                color=SURFACE_COLOR,
-                opacity=SECTION_CONTEXT_OPACITY,
-                pickable=False,
-                reset_camera=False,
-            )
 
-        for region in regions:
-            draw_on_top(
-                self.plotter.add_mesh(
-                    region, color=REGION_COLOR, show_edges=False, pickable=False, reset_camera=False
-                )
-            )
-        # ほかの電極の位置も見えるように、縁を役割の色で描く（選んでいる電極は下で面を塗る）
-        # クリップでは電極の縁と面も同じ平面で切る（切り落とした側に宙に浮いて見えないように）
+    def _add_electrodes(self, scope, options, highlight_electrode) -> None:
+        """電極を足す。選んでいる電極は面を塗り、ほかの電極は縁を役割の色で描く。
+
+        クリップでは電極の縁と面も同じ平面で切る（切り落とした側に宙に浮いて見えないように）。
+        """
         clip_plane = (
             self.session.section_plane(options["slice_normal"], options["slice_position"])
-            if mode == "clip"
+            if options["mode"] == "clip"
             else None
         )
 
@@ -2000,11 +2040,3 @@ class MainWindow(QMainWindow):
                         reset_camera=False,
                     )
                 )
-
-        scope.step(tr("Rendering"))
-        self.plotter.add_axes()
-        self._make_room_for_scalar_bar()
-        self._frame_new_mesh()
-        self.plotter.render()
-        # clear() でピッキングも外れるので、選択中なら掛け直す
-        self._arm_picking()
