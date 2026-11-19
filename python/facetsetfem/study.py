@@ -80,6 +80,48 @@ def _require(mapping: Any, key: str, where_: str, hint: str) -> Any:
     return mapping[key]
 
 
+def _number(cast: Callable[[Any], Any], value: Any, key: str, where_: str, hint: str) -> Any:
+    """`value` を数値（`cast` は `float` か `int`）として読む。読めなければ場所つきで止める。
+
+    YAML は `1e-10` のように小数点の無い指数表記を文字列として読むので、文字列も通す。
+    `float()` / `int()` の例外をそのまま出すと、どの項目の話か分からない（設計原則 6）。
+    """
+    try:
+        if isinstance(value, bool):
+            raise TypeError(value)
+        return cast(value)
+    except (TypeError, ValueError) as exc:
+        raise _error(
+            tr("Cannot read {key} as a number: {value}", key=key, value=repr(value)),
+            _in(where_, key),
+            hint,
+        ) from exc
+
+
+def _list_of(data: Any, key: str, where_: str, hint: str) -> list:
+    """`data` がリストであることを確かめて返す（無ければ空）。
+
+    `shell_pids: 101` のようにリストでない値を書くと、以前は Python の
+    `TypeError: 'int' object is not iterable` がそのまま出ていた。
+    """
+    if data is None:
+        return []
+    if not isinstance(data, (list, tuple)):
+        raise _error(
+            tr("{key} is not a list: {value}", key=key, value=repr(data)), _in(where_, key), hint
+        )
+    return list(data)
+
+
+def _ids_from(data: Any, key: str, where_: str) -> list[int]:
+    """ID のリスト（`shell_pids` / `element_ids`）を読む。"""
+    hint = tr("Write a list of integer IDs, e.g. {key}: [101, 102]", key=key)
+    return [
+        _number(int, v, f"{key}[{i}]", where_, hint)
+        for i, v in enumerate(_list_of(data, key, where_, hint))
+    ]
+
+
 @dataclass
 class Material:
     """領域（PSOLID の PID）に割り当てる導電率。"""
@@ -372,13 +414,14 @@ class Study:
                 ),
             )
 
+        section_hint = tr("Write it as a list of entries, each starting with \"- \" (SPEC §3.3)")
         materials = [
             _material_from(m, _in(where, f"materials[{i}]"))
-            for i, m in enumerate(data.get("materials") or [])
+            for i, m in enumerate(_list_of(data.get("materials"), "materials", where, section_hint))
         ]
         electrodes = [
             _electrode_from(e, _in(where, f"electrodes[{i}]"))
-            for i, e in enumerate(data.get("electrodes") or [])
+            for i, e in enumerate(_list_of(data.get("electrodes"), "electrodes", where, section_hint))
         ]
         _require_unique_names(electrodes, where)
         solver = _solver_from(data.get("solver") or {}, _in(where, "solver"))
@@ -570,11 +613,13 @@ def _electrode_from(data: Any, where_: str) -> ElectrodeSpec:
             _in(where_, "faces"),
             tr("Write lists of shell_pids and element_ids"),
         )
-    shell_pids = [int(p) for p in (faces.get("shell_pids") or [])]
-    element_ids = [int(i) for i in (faces.get("element_ids") or [])]
+    where_faces = _in(where_, "faces")
+    shell_pids = _ids_from(faces.get("shell_pids"), "shell_pids", where_faces)
+    element_ids = _ids_from(faces.get("element_ids"), "element_ids", where_faces)
+    patch_hint = tr("Write a list of patches, each with center and a shape (SPEC §3.3)")
     patches = [
         _patch_from(p, _in(where_, f"faces.patches[{i}]"))
-        for i, p in enumerate(faces.get("patches") or [])
+        for i, p in enumerate(_list_of(faces.get("patches"), "patches", where_faces, patch_hint))
     ]
     added = _face_refs_from(faces.get("added"), _in(where_, "faces.added"))
     removed = _face_refs_from(faces.get("removed"), _in(where_, "faces.removed"))
@@ -685,6 +730,12 @@ def _face_refs_from(data: Any, where_: str) -> list[tuple[int, int]]:
     """`[[EID, 面番号], ...]` を読む。面番号は 1 始まり。"""
     if data is None:
         return []
+    if not isinstance(data, (list, tuple)):
+        raise _error(
+            tr("Cannot read the face: {value}", value=repr(data)),
+            where_,
+            tr("Write pairs of [element EID, face number] (face numbers start at 1)"),
+        )
     out: list[tuple[int, int]] = []
     for i, item in enumerate(data):
         try:
@@ -742,8 +793,20 @@ def _solver_from(data: Any, where_: str) -> SolverSpec:
     spec.method = str(data.get("method", spec.method))
     spec.preconditioner = str(data.get("preconditioner", spec.preconditioner))
     spec.gauge = str(data.get("gauge", spec.gauge))
-    spec.tolerance = float(data.get("tolerance", spec.tolerance))
-    spec.max_iterations = int(data.get("max_iterations", spec.max_iterations))
+    spec.tolerance = _number(
+        float,
+        data.get("tolerance", spec.tolerance),
+        "tolerance",
+        where_,
+        tr("Write the relative residual to converge to as a real number (e.g. 1.0e-10)"),
+    )
+    spec.max_iterations = _number(
+        int,
+        data.get("max_iterations", spec.max_iterations),
+        "max_iterations",
+        where_,
+        tr("Write the iteration limit as an integer (e.g. 50000)"),
+    )
 
     if spec.method != "cg":
         raise _error(

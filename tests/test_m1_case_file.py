@@ -255,3 +255,59 @@ def test_missing_file_is_reported(tmp_path):
     with pytest.raises(facetsetfem.FacetSetFemError) as excinfo:
         facetsetfem.Study.load(tmp_path / "does_not_exist.yaml")
     assert "開けません" in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    ("solver", "key"),
+    [("{tolerance: tight}", "tolerance"), ("{max_iterations: many}", "max_iterations")],
+)
+def test_non_numeric_solver_settings_are_reported_with_their_place(tmp_path, solver, key):
+    """数値でない値は、Python の ValueError のままではなく場所つきで知らせる（設計原則 6）。"""
+    message = _load_bad(
+        tmp_path, f"version: 1\nmesh: {{file: m.bdf, length_unit: mm}}\nsolver: {solver}\n"
+    )
+    assert key in message and "数値として読めません" in message
+    assert "場所" in message and "対処" in message
+
+
+def test_exponent_notation_without_a_decimal_point_is_read_as_a_number(case_dir):
+    """YAML は `1e-9` を文字列として読む。書いた人の意図どおり数値として扱う。"""
+    path = case_dir / "case.yaml"
+    path.write_text(
+        path.read_text(encoding="utf-8").replace("tolerance: 1.0e-12", "tolerance: 1e-9"),
+        encoding="utf-8",
+    )
+    assert facetsetfem.Study.load(path).solver.tolerance == 1e-9
+
+
+@pytest.mark.parametrize(
+    ("faces", "key"),
+    [
+        ("{shell_pids: 101}", "shell_pids"),
+        ("{shell_pids: [skin]}", "shell_pids[0]"),
+        ("{element_ids: 7}", "element_ids"),
+        ("{patches: {center: [0, 0, 0], radius: 0.01}}", "patches"),
+        ("{shell_pids: [101], added: 5}", "faces.added"),
+    ],
+)
+def test_face_lists_of_the_wrong_shape_are_reported_with_their_place(tmp_path, faces, key):
+    """リストで書くべき項目にリストでない値を書いても、TypeError のまま落ちない。"""
+    message = _load_bad(
+        tmp_path,
+        "version: 1\n"
+        "mesh: {file: m.bdf, length_unit: mm}\n"
+        "electrodes:\n"
+        f"  - {{name: E1, role: anode, current: 1.0e-3, faces: {faces}}}\n",
+    )
+    assert key in message
+    assert "electrodes[0]" in message
+    assert "場所" in message and "対処" in message
+
+
+@pytest.mark.parametrize("section", ["materials", "electrodes"])
+def test_sections_that_are_not_lists_are_reported(tmp_path, section):
+    message = _load_bad(
+        tmp_path,
+        f"version: 1\nmesh: {{file: m.bdf, length_unit: mm}}\n{section}: {{pid: 1, sigma: 0.1}}\n",
+    )
+    assert section in message and "リストではありません" in message
