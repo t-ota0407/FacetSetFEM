@@ -34,23 +34,21 @@
 
 ### wheel から（Rust も CUDA Toolkit も要らない）
 
-配布用の wheel（`facetsetfem-0.1.0-cp312-abi3-win_amd64.whl`。Python 3.12〜3.14 で共通）を受け取ったら:
+配布用の wheel（`facetsetfem-0.1.0-cp312-abi3-win_amd64.whl`。Python 3.12 以降で共通）を受け取ったら:
 
 ```bash
 pip install facetsetfem-0.1.0-cp312-abi3-win_amd64.whl
 python -m facetsetfem.gui
 ```
 
-GUI に要るもの（PySide6・PyVista・pyvistaqt・VTK）も一緒に入る。Python 3.15 にはまだ対応していない
-（VTK を確かめた 9.6 系に留めていて、VTK 9.6 には Python 3.15 用の配布物が無い。VTK 9.7 で五面体の
-節点の並びの約束が変わったため。SPEC §8 の「2026-11」）。GPU で解くには NVIDIA のドライバ
+GUI に要るもの（PySide6・PyVista・pyvistaqt・VTK）も一緒に入る。GPU で解くには NVIDIA のドライバ
 （Compute Capability 6.0 以上の GPU）と、CUDA Toolkit 12.x の NVRTC（カーネルを実行時にコンパイルする）が要る。
 どちらかが無ければ自動で CPU で解く。
 wheel の作り方は「[配布用 wheel の作成](#配布用-wheel-の作成)」。
 
 ### ソースから
 
-Rust（1.97 以降）と Python（3.12〜3.14）を用意して:
+Rust（1.97 以降）と Python（3.12 以降）を用意して:
 
 ```bash
 git clone https://github.com/t-ota0407/FacetSetFEM.git
@@ -114,6 +112,12 @@ result.write_vtu("out.vtu")              # ParaView で開ける
 result.write_region_stats_csv("stats.csv")
 result.write_summary_json("summary.json")  # 入力ハッシュ・Git の状態つき
 ```
+
+**五面体（CPENTA）を含むモデルの VTU** は、開く ParaView の版によって正しい節点の並びが逆になる
+（VTK 9.7 で約束が変わった。SPEC §5.5）。既定は ParaView 6.2 以降向けで、ParaView 6.1 以前で開くなら
+`result.write_vtu("out.vtu", wedge_order="vtk9.6")` とする（ケースファイルなら `output.vtu_wedge_order: vtk9.6`、
+GUI なら保存ダイアログのファイルの種類で「ParaView 6.1 以前」を選ぶ）。合わない並びで開くと五面体が
+裏返る（体積が負になる）。四面体・六面体だけのモデルには関係しない。
 
 **シェル要素を持たないモデル**（人体モデルはこれが普通）は、体表面から直接電極を選ぶ:
 
@@ -412,8 +416,7 @@ GPU のテストは GPU が無い機械では skip される。ただし `backen
 .venv/Scripts/python.exe scripts/build_release.py --no-cuda # CPU だけの版
 ```
 
-`dist/` に abi3 wheel（Python 3.12〜3.14 で共通。拡張そのものは 3.12 以降のどの版でも動くが、
-依存の VTK 9.6 が 3.14 まで）ができる。受け取った側の手順は
+`dist/` に abi3 wheel（Python 3.12 以降で共通）ができる。受け取った側の手順は
 「[インストール](#インストール)」（`pip install` だけで、Rust も CUDA Toolkit も要らない）。
 wheel の依存と、パッケージが実際に import しているものが一致していることはテストで見ている。
 PyInstaller で 1 つの exe に固めない理由は SPEC §12 の未決事項 3 に書いてある。
@@ -442,13 +445,9 @@ PyInstaller で 1 つの exe に固めない理由は SPEC §12 の未決事項 
 
 #### 2 回目の見直しの残り（2026-11 に見つけたもの。経緯は SPEC §8 の「2026-11」）
 
-- **VTK 9.7 への対応**: VTK 9.7 では五面体（CPENTA）の節点の並びの約束が変わり、
-  `vtk_node_order` の裏返しが逆になる。いまは wheel の依存に上限（`vtk<9.7`）を置いてしのいでいる
-  （その代わり Python 3.15 では入らない）。上限で直るのはアプリの 3D ビューだけで、VTU は Rust が
-  書くので、新しい ParaView で開いたときの問題は残る。VTK の版で並びを切り替え、VTU をどちらの
-  約束で書くかを決めたら上限を外す
-- **ほかの依存ライブラリの版**: VTK 以外の wheel の依存は下限だけ（`pyvista>=0.44` など）なので、
-  `pip install` すると開発機で確かめていない新しい版が入る
+- **依存ライブラリの版**: wheel の依存は下限だけ（`pyvista>=0.44` など）なので、`pip install` すると
+  開発機で確かめていない新しい版が入る。VTK 9.7 で五面体の節点の並びの約束が変わったように
+  （いまは VTK の版を見て切り替えている。SPEC §5.5）、新しい版で何かが変わることがある。下の CI で拾う
 - **NVRTC を要らなくする**: カーネルをビルド時に PTX にして埋め込む（受け取った側はドライバだけで GPU を使える）
 - **CI**: ドライバの無い Linux と最新の依存ライブラリでテストを回す（今回の不具合はどれもそこでしか出ない）
 - **GUI の大きなクラスを分ける**: `MainWindow`（1,800 行）から 3D ビューの描画（`_draw_view` と視点・カラーバー）と

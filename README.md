@@ -44,9 +44,7 @@ pip install facetsetfem-0.1.0-cp312-abi3-win_amd64.whl
 python -m facetsetfem.gui
 ```
 
-The wheel works with Python 3.12 to 3.14 and pulls in the GUI dependencies (PySide6, PyVista, pyvistaqt, VTK).
-Python 3.15 is not supported yet: VTK is held below 9.7, which changed the node order of wedge
-(pentahedral) elements, and VTK 9.6 has no build for Python 3.15.
+The wheel works with Python 3.12 or later and pulls in the GUI dependencies (PySide6, PyVista, pyvistaqt, VTK).
 Solving on a GPU needs an NVIDIA driver, the NVRTC library of CUDA Toolkit 12.x (the kernels are
 compiled at run time) and a GPU of compute capability 6.0 or later; without them,
 FacetSetFEM falls back to the CPU automatically. To build the wheel yourself, run
@@ -54,7 +52,7 @@ FacetSetFEM falls back to the CPU automatically. To build the wheel yourself, ru
 
 ### From source
 
-Requires Rust 1.97+ and Python 3.12–3.14.
+Requires Rust 1.97+ and Python 3.12+.
 
 ```bash
 git clone https://github.com/t-ota0407/FacetSetFEM.git
@@ -115,6 +113,13 @@ result.write_vtu("out.vtu")                 # open in ParaView
 result.write_region_stats_csv("stats.csv")
 result.write_summary_json("summary.json")   # with input hashes and Git state
 ```
+
+For a model with wedge (CPENTA) elements, the right node order in the VTU depends on the ParaView
+version, because VTK 9.7 changed the wedge convention. The default suits ParaView 6.2 or later; to open
+the file in ParaView 6.1 or earlier, write `result.write_vtu("out.vtu", wedge_order="vtk9.6")` (in a case
+file, `output.vtu_wedge_order: vtk9.6`; in the GUI, choose "ParaView 6.1 or earlier" as the file type in
+the save dialog). With the wrong order the wedges come out inside out (negative volume). Models with only
+tetrahedra or hexahedra are not affected.
 
 Electrodes on the body surface of a model without shell elements:
 

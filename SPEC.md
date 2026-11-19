@@ -469,6 +469,7 @@ solver:
 
 output:
   vtu: result.vtu
+  vtu_wedge_order: vtk9.7             # 五面体の節点の並び（省略可）: vtk9.7（ParaView 6.2 以降。既定）| vtk9.6（6.1 以前）。§5.5
   region_stats: stats.csv
   convergence: convergence.csv        # 収束履歴（省略可）
   summary_json: summary.json          # プロビナンス付き実行サマリ（省略可）
@@ -1155,13 +1156,37 @@ FacetSetFEM で体表面から選んだ電極を、ほかのソフトウェア�
 - 接続配列は節点数と接続総数が 2^31 に収まるうちは `Int32` で書く。ファイルサイズが半分になる
 - 座標と物理量は常に `Float64`（設計原則 2）
 
-**VTK のセル型と節点順序**（M4 で確定）。CTETRA → VTK_TETRA、CHEXA → VTK_HEXAHEDRON、
-CPENTA → VTK_WEDGE、CTRIA3 → VTK_TRIANGLE、CQUAD4 → VTK_QUAD。
-節点の並びは **CPENTA だけ VTK と向きが逆**である。VTK_WEDGE は 1 枚目の三角形の法線が
-2 枚目から遠ざかる向きを要求するのに対し、Nastran の CPENTA は G1〜G3 の法線が
-G4〜G6 の側を向く。そのまま書くと ParaView 側で体積が負の反転セルになるため、
-書き出し時に三角形の 2 番目と 3 番目を入れ替える（`ElementKind::vtk_node_order`。
-VTU 出力と GUI の表示経路で共通）。
+**VTK のセル型と節点順序**（M4 で確定、五面体は 2026-11 に改訂）。CTETRA → VTK_TETRA、
+CHEXA → VTK_HEXAHEDRON、CPENTA → VTK_WEDGE、CTRIA3 → VTK_TRIANGLE、CQUAD4 → VTK_QUAD。
+四面体・六面体・シェルは Nastran と VTK で並びが同じで、並べ替えない。
+
+**CPENTA だけは、読む側の VTK の版で正しい並びが逆になる。** Nastran の CPENTA は
+G1〜G3 の三角形の法線が G4〜G6 の側を向く。VTK は 9.6 まで、体積・面の向き・四面体分割で
+「1 枚目の三角形の法線が 2 枚目から遠ざかる」並び（VTK の教科書の図）を前提にしていたが、
+**9.7 で形状関数（パラメータ座標）どおりの並び——CPENTA と同じ向き——に揃えた**
+（VTK のリリースノート「Fix Point Ordering and Correctness」）。形状関数そのものは変わっていないので、
+点の探索・補間・等値面はどちらの並びでも同じになるが、体積の符号・セルの面の向き・クリップは版で逆になる。
+約束に合わない並びで渡すと、体積が負の裏返ったセルになる。並びは `WedgeOrder` で選ぶ
+（`ElementKind::vtk_node_order(wedge)`）:
+
+| `WedgeOrder` | 名前 | 合う VTK / ParaView | CPENTA からの並び替え |
+|---|---|---|---|
+| `Vtk97`（VTU の既定） | `vtk9.7` | VTK 9.7 以降 / ParaView 6.2 以降 | なし |
+| `Vtk96` | `vtk9.6` | VTK 9.6 以前 / ParaView 6.1 以前 | 三角形の 2 番目と 3 番目を入れ替える |
+
+- **GUI と Python の表示経路**（`Mesh.solid_cells()` → PyVista）は、同じプロセスの VTK に渡すので、
+  **読み込まれている VTK の版を見て自動で選ぶ**。版の境目は `WedgeOrder::for_vtk` の 1 か所にだけ書く（§6.5）。
+  五面体が無ければ VTK の版は見ない。VTK を読み込めないときは、黙って決めずに `wedge_order` の指定を求める
+- **VTU** は別の PC の ParaView が読むので、入っている VTK の版からは決められない。しかも VTU には
+  約束の印が無く（VTK 9.7 自身のライタも `version="0.1"` のまま）、VTK 9.7 のリーダは古い並びのファイルを
+  読み替えない。だから**書く側で選ぶ**: Python は `write_vtu(..., wedge_order="vtk9.6")`、ケースファイルは
+  `output.vtu_wedge_order`（§3.3）、GUI は保存ダイアログのファイルの種類（五面体を含むときだけ出す）。
+  既定は、いま最新の ParaView 6.2（VTK 9.7）に合わせて `vtk9.7`（2026-11 に利用者と決めた）
+- ParaView と VTK は 6.0 / 9.5、6.1 / 9.6、6.2 / 9.7 と組で出ている（ParaView 6.2.0 は 2026 年 9 月）
+- **VTK 9.7.2 の食い違い**: 外表面を取り出す `vtkDataSetSurfaceFilter`（PyVista の `extract_surface` の既定）だけは
+  古い並びのままで、`vtk9.7` の五面体の外表面が内向きになる。`vtkGeometryFilter` と
+  `vtkUnstructuredGridGeometryFilter` は新しい並びに直っている（§8 の「2026-11」で実測）。
+  VTK 側の修正漏れと見ている。FacetSetFEM の GUI は外表面を Rust 側で作るので影響を受けない
 
 ---
 
@@ -1503,6 +1528,9 @@ result.write_vtu("out.vtu")
 **選択肢と換算表は Rust 側の 1 か所だけに置く**（2026-09 に整理）。長さ単位の換算係数
 （`facetsetfem.metres_per_unit`）、バックエンドと前処理の選択肢（`facetsetfem.backend_choices()` /
 `facetsetfem.preconditioner_choices()`）と別名（`"gpu"` など）の解釈は、Python 側でも Rust から引く。
+VTU に書く五面体の並びの選択肢（`facetsetfem.wedge_order_choices()` / `parse_wedge_order()`）と、
+並びを切り替える VTK の版の境目（`WedgeOrder::for_vtk`。§5.5）も同じ。GUI に置くのは保存ダイアログの表示名だけで、
+Rust 側の選択肢にどれも表示名があることをテストで見ている。
 ケースファイルの検査・GUI の選択肢・エラーの対処の文言が同じ表を見るので、片方だけ直して
 食い違うことがない。以前は換算表が 3 か所、別名の表が 2 か所にあった。
 
@@ -2325,13 +2353,15 @@ CSV・JSON に出るので言語に依らない `(all regions)` に固定した�
 論文の投稿と GitHub での公開を前に、もう一度全体を見直した。開発機には無い 2 つの環境
 ——**NVIDIA のドライバが無い Linux**と、**`pip install` したときに入る最新の依存ライブラリ**
 （VTK 9.7.2 / PyVista 0.49.2 / PySide6 6.12.0 / NumPy 2.5.5）——でテスト一式を回したところ、
-開発機（ドライバあり・`requirements.txt` で固定した版）では出ない不具合が 2 つ見つかった。
+開発機（ドライバあり・`requirements.txt` で固定した版）では出ない不具合が 3 つ見つかった
+（ドライバの無い PC での panic、VTK 9.7 でのカラーバーと五面体）。
 
 | 区切り | 内容 | 関係する節 |
 |---|---|---|
 | ドライバが無い PC で GUI が起動しない | cudarc は CUDA の共有ライブラリを最初の API 呼び出しで読み込み、**見つからないとエラーを返さずに panic する**。GPU を数える `devices()` がそれを踏み、`cuda_devices()` / `describe_gpus()` / `cuda_check()` と `backend: cuda` の求解が `PanicException`（`Exception` の派生ではない）で落ちた。GUI はソルバのページを作るときに `describe_gpus()` を呼ぶので、**ドライバの無い PC では起動できなかった**。`cargo test` も `facetsetfem-cuda` の `tests/bitwise.rs` の 5 件すべてが同じ panic で落ちた（「GPU が無ければ黙って通る」はドライバがある機械でしか成り立っていなかった）。共有ライブラリを読み込めるかを先に確かめ（`driver_present`）、無ければ GPU 無しとして CPU に落とす | §4.4 / §10.1 |
 | ドライバはあるが CUDA Toolkit が無い PC | カーネルは NVRTC で実行時にコンパイルするが、NVRTC はドライバには入っていない。README は「GPU で解くにはドライバが要る」としか書いておらず、NVRTC が無いとコンパイルの時点で同じ panic になる（コードの上では確実。実機では未確認）。`nvrtc_present` で先に確かめて CPU に落とし、README と本書に要件を書いた | §4.4 / §10.1 |
 | VTK 9.7 でカラーバーの描き直しが落ちる | `vtkViewport::AddActor2D` / `RemoveActor2D` が VTK 9.7 で無くなり、結果を表示するたびに `AttributeError` になった（wheel の依存は `pyvista>=0.44` で上限が無いので、いま `pip install` すると VTK 9.7 が入る）。どの版にもある `AddViewProp` / `RemoveViewProp` に変えた | §6.3 |
+| VTK 9.7 で五面体の並びの約束が逆になった | VTK 9.7 は `vtkWedge` の並びを形状関数（パラメータ座標）に合わせて直し、体積・面の向き・四面体分割・クリップの前提が 9.6 までと逆になった（下の実測）。CPENTA を 9.6 までの約束で並べ替えていたので、VTK 9.7 では五面体の体積が負になった（`test_solid_cells_feed_pyvista_directly[penta]` が落ちた。GUI は外表面を Rust 側で作るので、表示への影響は小さかった）。並びを `WedgeOrder` で選べるようにし、同じプロセスの VTK に渡す `solid_cells()` は VTK の版を見て自動で選ぶ。VTU は読む側の版で解釈が変わるので、書く側で選ぶ（既定は ParaView 6.2 以降向け）。いったん wheel の依存に `vtk<9.7` を置いたが（Python 3.15 では入らなくなる代償があった。VTK 9.6 の配布物は 3.14 まで）、切り替えを入れて外した | §5.5 |
 | エラーの文言に空白の列 | 完全電極モデル（M11）で足した 3 つの対処の文言（英語・日本語とも）に、行末の `\` 継続が壊れてできた 17〜26 個の空白が入っていた（2026-09 に 4 か所直したのと同じ種類）。直して、ソースを走査する回帰テストを足した（`tests/i18n.rs`） | §6.6 |
 | ケースファイルの数値でない値 | `solver.tolerance` / `max_iterations` に数値でない値、`shell_pids` / `element_ids` / `patches` / `added` にリストでない値、`materials` / `electrodes` にリストでない値を書くと、Python の `ValueError` / `TypeError` がそのまま出ていた。場所と対処を添えたエラーにした（設計原則 6） | §3.3 |
 | Python バインディングの分割 | `facetsetfem-py/src/lib.rs`（2,282 行）を `mesh` / `case` / `solution` / `patch` / `functions` / `convert` に分けた。コードは移しただけ（差分は可視性 `pub(crate)` と rustfmt の折り返しのみ） | §7 |
@@ -2347,20 +2377,37 @@ PySide6 6.11.1 / NumPy 2.5.2）でも、`cargo fmt --check`・`clippy`・
 `pytest`（412 件。五面体の `test_solid_cells_feed_pyvista_directly[penta]` も通る）を回し、
 GUI の結果表示（カラーバー）・断面・クリップ・流線・電極の強調を画面で確かめた。
 
+五面体の並びの切り替え（同じ月に追加）は、開発機に VTK 9.7.2 / PyVista 0.49.2 の検証用の環境
+（ほかは `requirements.txt` と同じ版）を別に作って確かめた。切り替えを入れる前は、この環境の `pytest` で
+五面体の 1 件だけが落ちた（GUI のテストを含むほかの 411 件は通った）。入れた後は、VTK 9.6.2 と 9.7.2 の両方で
+`pytest` の 423 件がすべて通り、`cargo test --release -- --include-ignored` も通った。あわせて、
+`solid_cells()` が 9.6.2 では `vtk9.6`、9.7.2 では `vtk9.7` を選ぶこと、両方の並びで書いた VTU を各版のリーダで
+読み戻した体積の符号が予想どおりになること、五面体のモデルの GUI の表示（結果表示と断面）が両方の版で
+画素単位で同じこと（外表面は Rust 側で作るため）、上限を外した wheel を Python 3.14 / 3.15 で `pip install` すると
+VTK 9.7.2 が選ばれることを確かめた。検証用の環境を、その `pip install` で入る版（VTK 9.7.2 / PyVista 0.49.2 /
+PySide6 6.12.0 / NumPy 2.5.5 / pyvistaqt 0.14.0）に上げても、`pytest` の 423 件はすべて通った。
+
+**五面体の並びの実測**（VTK 9.6.2 と 9.7.2。§5.5 の根拠）。少し歪めた三角柱 1 つ（真の体積 1.8）を、
+CPENTA の並びのまま（`vtk9.7`）と、三角形の 2・3 番目を入れ替えた並び（`vtk9.6`）で VTK に渡して比べた。
+各欄は「`vtk9.6` で渡したとき / `vtk9.7` で渡したとき」:
+
+| 調べたもの | VTK 9.6.2 | VTK 9.7.2 |
+|---|---|---|
+| 体積（`vtkCellSizeFilter`・`vtkMeshQuality`） | +1.8 / −1.8 | −1.8 / +1.8 |
+| セルの面（`GetFace`）のうち外向きのもの | 5/5 / 0/5 | 0/5 / 5/5 |
+| 四面体分割のうち体積が負のもの | 0/3 / 3/3 | 3/3 / 0/3 |
+| クリップした残りの体積 | +0.98 / −0.98 | −0.98 / +0.98 |
+| 外表面（`vtkGeometryFilter`・`vtkUnstructuredGridGeometryFilter`）のうち外向きのもの | 5/5 / 0/5 | 0/5 / 5/5 |
+| 外表面（`vtkDataSetSurfaceFilter`）のうち外向きのもの | 5/5 / 0/5 | **5/5 / 0/5**（直っていない） |
+| 形状関数のヤコビアンの行列式 | −3.6 / +3.6 | −3.6 / +3.6（変わらない） |
+| 点の探索・補間・等値面の面積 | 同じ | 同じ |
+
+FacetSetFEM が書いた VTU（五面体 48 個）を各版のリーダで読むと、合わない並びのものは 48 個すべての体積が負になった。
+VTK 9.7 自身のライタも `version="0.1"` のままで、古い並びのファイルを読み替える仕組みは無い。
+ParaView 6.2.0（2026 年 9 月）は VTK 9.7 と組で出ているので、ParaView 6.1 以前とは VTU の正しい並びが逆になる。
+
 **残したもの**:
 
-- **VTK 9.7 で五面体（CPENTA）の向きの約束が変わった。** VTK 9.7 は `vtkWedge` の節点の並びを
-  パラメータ座標に合わせて直した（それまでの文書の図が逆だった）。`ElementKind::vtk_node_order` は
-  VTK 9.6 までの約束で CPENTA を裏返しているので、VTK 9.7 以降では体積の符号が負になる
-  （`test_solid_cells_feed_pyvista_directly[penta]` が落ちる。表示への影響は小さい）。
-  VTU を読む側（ParaView）の版にも依るので、どちらに合わせるかは決めていない。
-  決まるまでの措置として、**wheel の依存に上限 `vtk<9.7` を置いた**（`pyproject.toml`）。
-  代償は 2 つある。(1) **Python 3.15 では入らない**——VTK 9.6 系の配布物は Python 3.14 まで
-  （3.15 用は 2026-11-04 の VTK 9.7.2 が最初）で、VTK はソース配布も無いので、`pip install` が
-  「条件に合う vtk が無い」で止まる。対応する Python を README に 3.12〜3.14 と書いた。
-  (2) 上限で直るのは**アプリの 3D ビューだけ**で、VTU は Rust が `vtk_node_order` で書く
-  （入っている VTK の版に依らない）ので、VTK 9.7 以降の ParaView で開いたときの問題は残る。
-  VTK の版で並びを切り替え、VTU をどちらの約束で書くかを決めたら上限を外す
 - **NVRTC を要らなくする。** ビルド時にカーネルを PTX にコンパイルして埋め込めば、受け取った側は
   ドライバだけで GPU を使える（初回の 0.2 秒のコンパイルも要らなくなる）
 - **GUI の大きなクラス。** `MainWindow`（1,800 行・101 メソッド）と `Session`（1,400 行・98 メソッド）は
