@@ -14,7 +14,7 @@ import pytest
 
 import facetsetfem
 from facetsetfem.gui.state import Session
-from test_m4_elements_and_backends import slab_deck, write_deck
+from test_m4_elements_and_backends import write_deck
 
 CURRENT = 2.0e-3
 SLAB_SIGMA = {1: 0.10, 2: 0.04, 3: 0.35}
@@ -474,7 +474,9 @@ _DISTRIBUTION_OF = {
     "pyvista": "pyvista",
     "pyvistaqt": "pyvistaqt",
     "PySide6": "PySide6",
-    "vtkmodules": "pyvista",
+    # vtkmodules を提供するのは vtk の配布パッケージ（pyvista はそれに依存しているだけ）。
+    # 上限（vtk<9.7）を置くために pyproject.toml に直接書いている
+    "vtkmodules": "vtk",
 }
 
 

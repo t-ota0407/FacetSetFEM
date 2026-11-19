@@ -34,20 +34,23 @@
 
 ### wheel から（Rust も CUDA Toolkit も要らない）
 
-配布用の wheel（`facetsetfem-0.1.0-cp312-abi3-win_amd64.whl`。Python 3.12 以降で共通）を受け取ったら:
+配布用の wheel（`facetsetfem-0.1.0-cp312-abi3-win_amd64.whl`。Python 3.12〜3.14 で共通）を受け取ったら:
 
 ```bash
 pip install facetsetfem-0.1.0-cp312-abi3-win_amd64.whl
 python -m facetsetfem.gui
 ```
 
-GUI に要るもの（PySide6・PyVista・pyvistaqt）も一緒に入る。GPU で解くには NVIDIA のドライバ
-（Compute Capability 6.0 以上の GPU）が要る。GPU が無ければ自動で CPU で解く。
+GUI に要るもの（PySide6・PyVista・pyvistaqt・VTK）も一緒に入る。Python 3.15 にはまだ対応していない
+（VTK を確かめた 9.6 系に留めていて、VTK 9.6 には Python 3.15 用の配布物が無い。VTK 9.7 で五面体の
+節点の並びの約束が変わったため。SPEC §8 の「2026-11」）。GPU で解くには NVIDIA のドライバ
+（Compute Capability 6.0 以上の GPU）と、CUDA Toolkit 12.x の NVRTC（カーネルを実行時にコンパイルする）が要る。
+どちらかが無ければ自動で CPU で解く。
 wheel の作り方は「[配布用 wheel の作成](#配布用-wheel-の作成)」。
 
 ### ソースから
 
-Rust（1.97 以降）と Python（3.12 以降）を用意して:
+Rust（1.97 以降）と Python（3.12〜3.14）を用意して:
 
 ```bash
 git clone https://github.com/t-ota0407/FacetSetFEM.git
@@ -319,7 +322,7 @@ print(facetsetfem.cuda_check(10_000_000))   # この規模を GPU に載せら�
 | M10: 3D ビューの描画の作り直し | **完了**（2026-08-23） |
 | M11: 完全電極モデル（接触インピーダンス付きの等電位電極） | **完了**（2026-09-30） |
 | M12: 2 次四面体（Tet10） | **完了**（2026-10-01） |
-| 全体の見直し（リファクタリング） | **進行中**（2026-09〜。残りは「次にやること」） |
+| 全体の見直し（リファクタリング） | **進行中**（2026-09〜、2 回目は 2026-11。残りは「次にやること」） |
 
 マイルストーンの定義と経緯（入れたもの・実測・見つけた不具合）は SPEC.md §8 にまとめてある。
 
@@ -409,7 +412,8 @@ GPU のテストは GPU が無い機械では skip される。ただし `backen
 .venv/Scripts/python.exe scripts/build_release.py --no-cuda # CPU だけの版
 ```
 
-`dist/` に abi3 wheel（Python 3.12 以降で共通）ができる。受け取った側の手順は
+`dist/` に abi3 wheel（Python 3.12〜3.14 で共通。拡張そのものは 3.12 以降のどの版でも動くが、
+依存の VTK 9.6 が 3.14 まで）ができる。受け取った側の手順は
 「[インストール](#インストール)」（`pip install` だけで、Rust も CUDA Toolkit も要らない）。
 wheel の依存と、パッケージが実際に import しているものが一致していることはテストで見ている。
 PyInstaller で 1 つの exe に固めない理由は SPEC §12 の未決事項 3 に書いてある。
@@ -435,6 +439,25 @@ PyInstaller で 1 つの exe に固めない理由は SPEC §12 の未決事項 
 - 電極の形の第 2 段: よく使う電極を YAML に登録して一覧から選べるプリセット（組織物性の
   `load_library` と同じ形）。必要なら、電極アレイ（ピッチを指定して格子状に一括で置く）と、
   面を形で切り抜いて面積をメッシュに依らず正確にする荷重（SPEC §2.4 に手が入るので要議論）
+
+#### 2 回目の見直しの残り（2026-11 に見つけたもの。経緯は SPEC §8 の「2026-11」）
+
+- **VTK 9.7 への対応**: VTK 9.7 では五面体（CPENTA）の節点の並びの約束が変わり、
+  `vtk_node_order` の裏返しが逆になる。いまは wheel の依存に上限（`vtk<9.7`）を置いてしのいでいる
+  （その代わり Python 3.15 では入らない）。上限で直るのはアプリの 3D ビューだけで、VTU は Rust が
+  書くので、新しい ParaView で開いたときの問題は残る。VTK の版で並びを切り替え、VTU をどちらの
+  約束で書くかを決めたら上限を外す
+- **ほかの依存ライブラリの版**: VTK 以外の wheel の依存は下限だけ（`pyvista>=0.44` など）なので、
+  `pip install` すると開発機で確かめていない新しい版が入る
+- **NVRTC を要らなくする**: カーネルをビルド時に PTX にして埋め込む（受け取った側はドライバだけで GPU を使える）
+- **CI**: ドライバの無い Linux と最新の依存ライブラリでテストを回す（今回の不具合はどれもそこでしか出ない）
+- **GUI の大きなクラスを分ける**: `MainWindow`（1,800 行）から 3D ビューの描画（`_draw_view` と視点・カラーバー）と
+  体表面のクリック選択（マウスの扱い）を別のクラスへ、`Session`（1,400 行）から表示用データの組み立て
+  （`display_surface` / `section` / `iso_surface` / `region_polydata` など）と電極の編集・Undo を別のクラスへ
+- **電極の役割と基準電位の名前の解釈**（`parse_role` / `parse_reference`）は `facetsetfem-py` にある。
+  バックエンドと前処理と同じく `facetsetfem-core` に寄せる（エラーの文面が変わるので、テストの文言と合わせて）
+- **テストからしか使っていないもの**: `Session.region_grid` / `Session.shell_polydata`（表示は Rust 側の
+  取り出しに移した）、`Study.region_names`
 
 #### 書き出し（2026-10 に追加）
 

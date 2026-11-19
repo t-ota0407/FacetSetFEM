@@ -8,7 +8,7 @@
     pip install facetsetfem-0.1.0-cp312-abi3-win_amd64.whl
 
 だけで、Rust も CUDA Toolkit も無しに使える（GPU で走らせるには
-NVIDIA ドライバは要る）。
+NVIDIA ドライバと、CUDA Toolkit 12.x の NVRTC が要る。無ければ CPU で解く。SPEC §10.1）。
 
 # なぜ PyInstaller で 1 つの exe にしないのか
 

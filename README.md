@@ -44,14 +44,17 @@ pip install facetsetfem-0.1.0-cp312-abi3-win_amd64.whl
 python -m facetsetfem.gui
 ```
 
-The wheel works with Python 3.12 or later and pulls in the GUI dependencies (PySide6, PyVista, pyvistaqt).
-Solving on a GPU needs an NVIDIA driver and a GPU of compute capability 6.0 or later; without one,
+The wheel works with Python 3.12 to 3.14 and pulls in the GUI dependencies (PySide6, PyVista, pyvistaqt, VTK).
+Python 3.15 is not supported yet: VTK is held below 9.7, which changed the node order of wedge
+(pentahedral) elements, and VTK 9.6 has no build for Python 3.15.
+Solving on a GPU needs an NVIDIA driver, the NVRTC library of CUDA Toolkit 12.x (the kernels are
+compiled at run time) and a GPU of compute capability 6.0 or later; without them,
 FacetSetFEM falls back to the CPU automatically. To build the wheel yourself, run
 `python scripts/build_release.py` (add `--no-cuda` for a CPU-only build); it is written to `dist/`.
 
 ### From source
 
-Requires Rust 1.97+ and Python 3.12+.
+Requires Rust 1.97+ and Python 3.12–3.14.
 
 ```bash
 git clone https://github.com/t-ota0407/FacetSetFEM.git

@@ -665,7 +665,7 @@ facetsetfem-core  →  CUDA を知らないまま、渡されたソルバで解�
 実行タイミングにも依存しない。SpMV は行ごとに独立なので、行内を列番号の昇順に足す限り
 順序の問題は起きない。
 
-**CUDA 要件**: 倍精度演算を使うため Compute Capability 6.0 以上を要求する。GPU が使えない・VRAM が足りない場合は CPU バックエンドにフォールバックする（下記の「フォールバックは黙って行わない」）。
+**CUDA 要件**: 倍精度演算を使うため Compute Capability 6.0 以上を要求する。GPU が使えない・VRAM が足りない場合は CPU バックエンドにフォールバックする（下記の「フォールバックは黙って行わない」）。「GPU が使えない」には、**NVIDIA のドライバが入っていない**場合と、ドライバはあるが**カーネルをコンパイルする NVRTC（CUDA Toolkit 12.x）が無い**場合を含む。どちらも共有ライブラリを読み込めるかを先に確かめて（`facetsetfem_cuda::driver_present` / `nvrtc_present`）、無ければ GPU 無しとして扱う——確かめずに cudarc を呼ぶと、エラーではなく panic になる（§8 の「2026-11」）。
 
 **CUDA でビット単位一致を保つ方法**（M5 で確定）。順序を崩す要因は 2 つあり、両方を潰す。
 
@@ -1598,7 +1598,7 @@ FacetSetFEM/
 │   │       ├── units.rs         # 長さ単位と SI への換算
 │   │       ├── geom.rs          # 3 次元ベクトルの小さな関数（演算順序を変えないこと）
 │   │       ├── parallel.rs      # 並列で決定的な振り分けソート、大きな列の解放（§8 の「2026-09」）
-│   │       ├── testing.rs       # ユニットテスト用のメッシュ（cfg(test) のときだけ）
+│   │       ├── testing.rs       # ユニットテスト用のメッシュと行列（cfg(test) のときだけ）
 │   │       ├── error.rs         # 「何が・どこで・どう直すか」を持つエラー型
 │   │       ├── i18n.rs          # 表示言語と、英語・日本語を並べて書く tr! マクロ（§6.6）
 │   │       ├── provenance.rs    # 入力ハッシュ・Git の状態・実行時刻（§5.5）
@@ -1608,13 +1608,20 @@ FacetSetFEM/
 │   ├── facetsetfem-cuda/               # CUDA バックエンド（facetsetfem-core にのみ依存）
 │   │   └── src/
 │   │       ├── kernels.cu       # f64 の CSR SpMV・ベクトル演算・決定的リダクション
-│   │       ├── device.rs        # コンテキスト初期化とその使い回し, カーネル読み込み, GPU の素性
+│   │       ├── device.rs        # ドライバと NVRTC があるかの確認, コンテキスト初期化とその使い回し,
+│   │       │                    #   カーネル読み込み, GPU の素性
 │   │       ├── backend.rs       # LinearBackend の実装（VRAM 常駐）
 │   │       └── lib.rs           # VRAM 見積りと CPU へのフォールバック判定
 │   └── facetsetfem-py/                 # PyO3 バインディング（cuda フィーチャで GPU 対応）
 │       ├── build.rs             # 拡張モジュール全体の Git の状態を埋め込む（§5.5）
 │       └── src/
-│           ├── lib.rs           # Mesh / Case / Solution の Python 向けの顔
+│           ├── lib.rs           # モジュールの登録と例外の型（中身は下の各ファイル）
+│           ├── mesh.rs          # Mesh / ReadReport の Python 向けの顔、read_nastran
+│           ├── case.rs          # Case の Python 向けの顔（電極の組み立て・検証・求解）
+│           ├── solution.rs      # Solution の Python 向けの顔（配列・統計・書き出し・等値面・流線）
+│           ├── patch.rs         # 体表面パッチの辞書の解釈（ケースファイル・GUI・API の共通）
+│           ├── functions.rs     # モジュール直下の関数（単位・言語・選択肢・GPU の問い合わせ）
+│           ├── convert.rs       # エラーの変換・numpy 配列（読み取り専用ビュー）・遅延初期化
 │           └── cuda.rs          # GPU を使うかの判断とフォールバック。CUDA 無しでもビルドできる
 ├── python/
 │   └── facetsetfem/
@@ -2313,6 +2320,52 @@ CSV・JSON に出るので言語に依らない `(all regions)` に固定した�
   θ を比べる使い捨ての計測で θ = 0.25 を試したとき、粗いレベルが膨らみ続けて主記憶を 100 GB 超使い、止めた
   （θ を大きくしすぎたときの AMG の壊れ方。既定の値では起きない）
 
+### 2026-11 — 見直し（2 回目）
+
+論文の投稿と GitHub での公開を前に、もう一度全体を見直した。開発機には無い 2 つの環境
+——**NVIDIA のドライバが無い Linux**と、**`pip install` したときに入る最新の依存ライブラリ**
+（VTK 9.7.2 / PyVista 0.49.2 / PySide6 6.12.0 / NumPy 2.5.5）——でテスト一式を回したところ、
+開発機（ドライバあり・`requirements.txt` で固定した版）では出ない不具合が 2 つ見つかった。
+
+| 区切り | 内容 | 関係する節 |
+|---|---|---|
+| ドライバが無い PC で GUI が起動しない | cudarc は CUDA の共有ライブラリを最初の API 呼び出しで読み込み、**見つからないとエラーを返さずに panic する**。GPU を数える `devices()` がそれを踏み、`cuda_devices()` / `describe_gpus()` / `cuda_check()` と `backend: cuda` の求解が `PanicException`（`Exception` の派生ではない）で落ちた。GUI はソルバのページを作るときに `describe_gpus()` を呼ぶので、**ドライバの無い PC では起動できなかった**。`cargo test` も `facetsetfem-cuda` の `tests/bitwise.rs` の 5 件すべてが同じ panic で落ちた（「GPU が無ければ黙って通る」はドライバがある機械でしか成り立っていなかった）。共有ライブラリを読み込めるかを先に確かめ（`driver_present`）、無ければ GPU 無しとして CPU に落とす | §4.4 / §10.1 |
+| ドライバはあるが CUDA Toolkit が無い PC | カーネルは NVRTC で実行時にコンパイルするが、NVRTC はドライバには入っていない。README は「GPU で解くにはドライバが要る」としか書いておらず、NVRTC が無いとコンパイルの時点で同じ panic になる（コードの上では確実。実機では未確認）。`nvrtc_present` で先に確かめて CPU に落とし、README と本書に要件を書いた | §4.4 / §10.1 |
+| VTK 9.7 でカラーバーの描き直しが落ちる | `vtkViewport::AddActor2D` / `RemoveActor2D` が VTK 9.7 で無くなり、結果を表示するたびに `AttributeError` になった（wheel の依存は `pyvista>=0.44` で上限が無いので、いま `pip install` すると VTK 9.7 が入る）。どの版にもある `AddViewProp` / `RemoveViewProp` に変えた | §6.3 |
+| エラーの文言に空白の列 | 完全電極モデル（M11）で足した 3 つの対処の文言（英語・日本語とも）に、行末の `\` 継続が壊れてできた 17〜26 個の空白が入っていた（2026-09 に 4 か所直したのと同じ種類）。直して、ソースを走査する回帰テストを足した（`tests/i18n.rs`） | §6.6 |
+| ケースファイルの数値でない値 | `solver.tolerance` / `max_iterations` に数値でない値、`shell_pids` / `element_ids` / `patches` / `added` にリストでない値、`materials` / `electrodes` にリストでない値を書くと、Python の `ValueError` / `TypeError` がそのまま出ていた。場所と対処を添えたエラーにした（設計原則 6） | §3.3 |
+| Python バインディングの分割 | `facetsetfem-py/src/lib.rs`（2,282 行）を `mesh` / `case` / `solution` / `patch` / `functions` / `convert` に分けた。コードは移しただけ（差分は可視性 `pub(crate)` と rustfmt の折り返しのみ） | §7 |
+| 3D ビューの描き直しの分割 | `MainWindow._draw_view`（209 行、分岐 27）を、描く面の決定・強調する領域・流線・体の層・電極の 5 つのメソッドに分けた。足す順は同じ | §6.3 |
+| 重複の整理 | Nastran の座標系（`coord.rs`）にあった差・外積・長さの写しを `geom.rs` に寄せた（式の形が同じなので結果はビット単位で同じ）。CG と AMG のテストに 5 か所あった 1 次元ラプラシアンを `testing.rs` と `tests/common` に集めた。使っていない import と関数（`gui.language.current_language`）を消した | §7 |
+
+**確かめたこと**（ドライバの無い Linux、Rust 1.97.0）: `cargo fmt --check`、
+`cargo clippy --workspace --all-targets -- -D warnings`（`cuda` フィーチャ無しでも）、
+`cargo test --release --workspace`、`pytest`（最新の依存ライブラリ、オフスクリーン）。
+開発機（Windows・RTX A6000・`requirements.txt` で固定した版。VTK 9.6.2 / PyVista 0.48.4 /
+PySide6 6.11.1 / NumPy 2.5.2）でも、`cargo fmt --check`・`clippy`・
+`cargo test --release -- --include-ignored`（GPU の `bitwise` / `end_to_end` を含めすべて通過）・
+`pytest`（412 件。五面体の `test_solid_cells_feed_pyvista_directly[penta]` も通る）を回し、
+GUI の結果表示（カラーバー）・断面・クリップ・流線・電極の強調を画面で確かめた。
+
+**残したもの**:
+
+- **VTK 9.7 で五面体（CPENTA）の向きの約束が変わった。** VTK 9.7 は `vtkWedge` の節点の並びを
+  パラメータ座標に合わせて直した（それまでの文書の図が逆だった）。`ElementKind::vtk_node_order` は
+  VTK 9.6 までの約束で CPENTA を裏返しているので、VTK 9.7 以降では体積の符号が負になる
+  （`test_solid_cells_feed_pyvista_directly[penta]` が落ちる。表示への影響は小さい）。
+  VTU を読む側（ParaView）の版にも依るので、どちらに合わせるかは決めていない。
+  決まるまでの措置として、**wheel の依存に上限 `vtk<9.7` を置いた**（`pyproject.toml`）。
+  代償は 2 つある。(1) **Python 3.15 では入らない**——VTK 9.6 系の配布物は Python 3.14 まで
+  （3.15 用は 2026-11-04 の VTK 9.7.2 が最初）で、VTK はソース配布も無いので、`pip install` が
+  「条件に合う vtk が無い」で止まる。対応する Python を README に 3.12〜3.14 と書いた。
+  (2) 上限で直るのは**アプリの 3D ビューだけ**で、VTU は Rust が `vtk_node_order` で書く
+  （入っている VTK の版に依らない）ので、VTK 9.7 以降の ParaView で開いたときの問題は残る。
+  VTK の版で並びを切り替え、VTU をどちらの約束で書くかを決めたら上限を外す
+- **NVRTC を要らなくする。** ビルド時にカーネルを PTX にコンパイルして埋め込めば、受け取った側は
+  ドライバだけで GPU を使える（初回の 0.2 秒のコンパイルも要らなくなる）
+- **GUI の大きなクラス。** `MainWindow`（1,800 行・101 メソッド）と `Session`（1,400 行・98 メソッド）は
+  そのまま。分け方の案は README.ja.md の「次にやること」
+
 ---
 
 ## 9. 将来拡張の設計上の備え
@@ -2364,6 +2417,11 @@ cudarc の `cuda-11080` の探索リストに載っていないため、同居�
 バインディングを使う設定にしてある。ドライバ（596.72 / CUDA 13.2 対応）が
 上位互換なので実害はない。ビルドは `fallback-dynamic-loading` で行うので、
 **CUDA が無いマシンでもビルド自体は通る**（実行時に CPU へ落ちる。§4.4）。
+
+**GPU で解くのに要るもの**は、NVIDIA のドライバ（`nvcuda.dll` / `libcuda.so`）と
+**NVRTC**（`nvrtc64_120_0.dll` など）の 2 つ。NVRTC はドライバには入っておらず、
+CUDA Toolkit 12.x と一緒に入る。どちらかが無ければ CPU で解く（§4.4。`backend: cuda` を
+明示していれば理由を警告に出す）。
 
 ---
 

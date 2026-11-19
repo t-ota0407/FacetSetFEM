@@ -8,6 +8,8 @@
 __pycache__/
 # *.pyd も含む（maturin develop が python/facetsetfem/ に置くビルド成果物）
 *.py[cod]
+# Linux / macOS では拡張モジュールが _core.abi3.so になる
+*.so
 *.egg-info/
 .pytest_cache/
 build/
